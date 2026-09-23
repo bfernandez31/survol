@@ -3,6 +3,7 @@
 mod ask;
 mod comments;
 mod diff;
+mod flows;
 mod graph;
 mod rows;
 mod stack;
@@ -193,6 +194,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                     Mode::Symbol => {
                         " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  / find  m mode  a ask  A answers  ? help"
                     }
+                    Mode::Flows => {
+                        " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x Mermaid  e edit  gd diff  h back  m mode  ? help"
+                    }
                     Mode::Modules => {
                         " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x Mermaid export  / find  m mode  ? help"
                     }
@@ -253,7 +257,30 @@ const HELP: &[(&str, &str)] = &[
     ("gs", "Graph view of the hunk's symbol"),
     ("c / V then c / C (content)", "comment line / range / file"),
     ("# Graph", ""),
-    ("m", "mode: changed symbols / search / module map / symbol"),
+    (
+        "m",
+        "mode: changed symbols / search / module map / flows / symbol",
+    ),
+    (
+        "f",
+        "flows: impacted entry points and their end-to-end flow",
+    ),
+    (
+        "flows: Enter / l, h",
+        "into the flow, back to the entry points",
+    ),
+    (
+        "flows: n / N",
+        "next / previous changed (or added / removed) step",
+    ),
+    (
+        "flows: b",
+        "after → before → merged (when the flow differs)",
+    ),
+    (
+        "flows: x",
+        "write the flow as Mermaid (.git/survol/exports)",
+    ),
     ("Enter", "symbol: focus it (new root); section/module: fold"),
     ("l / h", "expand / collapse (callers of callers…), parent"),
     ("Backspace / Ctrl-o", "back to the previous symbol or list"),

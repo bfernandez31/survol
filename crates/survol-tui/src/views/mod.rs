@@ -3,6 +3,7 @@
 pub mod ask;
 pub mod comments;
 pub mod diff;
+pub mod flows;
 pub mod graph;
 pub mod stack;
 

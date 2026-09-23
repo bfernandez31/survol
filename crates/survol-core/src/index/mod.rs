@@ -594,70 +594,8 @@ impl Index {
             head_entries.len(),
             base_entries.len()
         ));
-
-        // One parse per distinct (blob, language), whatever the path or side.
-        let mut todo: Vec<(&str, Lang)> = head_entries
-            .iter()
-            .chain(&base_entries)
-            .map(|(e, l)| (e.blob.as_str(), *l))
-            .collect();
-        todo.sort_unstable();
-        todo.dedup();
-        let cached: Vec<Option<FileIndex>> = todo
-            .par_iter()
-            .map(|(blob, lang)| {
-                opts.cache_dir
-                    .as_deref()
-                    .and_then(|d| cache::load(d, blob, *lang))
-            })
-            .collect();
-        let mut parsed: HashMap<(String, Lang), FileIndex> = HashMap::new();
-        let mut missing = Vec::new();
-        for ((blob, lang), hit) in todo.into_iter().zip(cached) {
-            match hit {
-                Some(f) => {
-                    stats.cached += 1;
-                    parsed.insert((blob.to_string(), lang), f);
-                }
-                None => missing.push((blob, lang)),
-            }
-        }
-        if !missing.is_empty() {
-            progress(&format!("parsing {} files", missing.len()));
-            let ids: Vec<&str> = missing.iter().map(|(b, _)| *b).collect();
-            let contents = repo.read_blobs(&ids)?;
-            let fresh: Vec<FileIndex> = missing
-                .par_iter()
-                .zip(contents.par_iter())
-                .map(|((blob, lang), src)| {
-                    let f = parse_file("", *lang, &String::from_utf8_lossy(src));
-                    if let Some(d) = &opts.cache_dir {
-                        // A cache write failure only costs a reparse next time.
-                        let _ = cache::save(d, blob, &f);
-                    }
-                    f
-                })
-                .collect();
-            stats.parsed = fresh.len();
-            for ((blob, lang), f) in missing.into_iter().zip(fresh) {
-                parsed.insert((blob.to_string(), lang), f);
-            }
-        }
-
-        let assemble = |entries: Vec<(TreeEntry, Lang)>| -> Vec<FileIndex> {
-            let mut files: Vec<FileIndex> = entries
-                .into_iter()
-                .filter_map(|(e, lang)| {
-                    let mut f = parsed.get(&(e.blob, lang))?.clone();
-                    f.path = e.path;
-                    Some(f)
-                })
-                .collect();
-            files.sort_by(|a, b| a.path.cmp(&b.path));
-            files
-        };
-        let files = assemble(head_entries);
-        let base_files = assemble(base_entries);
+        let (files, base_files) =
+            parse_entries(repo, head_entries, base_entries, opts, &mut stats, progress)?;
         stats.files = files.len() + base_files.len();
         stats.with_errors = files.iter().filter(|f| f.has_errors).count();
         stats.millis = started.elapsed().as_millis() as u64;
@@ -667,6 +605,116 @@ impl Index {
             stats,
         })
     }
+
+    /// Indexes the files of `rev` accepted by `only` (all when `None`) as
+    /// the head side of an index, without base versions: the graph of
+    /// another revision (the base of a review), from the same blob cache.
+    pub fn build_revision(
+        repo: &Git,
+        rev: &str,
+        only: Option<&dyn Fn(&str) -> bool>,
+        opts: &Options,
+        progress: &mut dyn FnMut(&str),
+    ) -> crate::Result<Self> {
+        let started = Instant::now();
+        let mut stats = IndexStats::default();
+        let entries: Vec<TreeEntry> = repo
+            .ls_tree(rev)?
+            .into_iter()
+            .filter(|e| only.is_none_or(|f| f(&e.path)))
+            .collect();
+        let entries = select(entries, opts, &mut stats);
+        progress(&format!(
+            "indexing {} files of {}",
+            entries.len(),
+            &rev[..rev.len().min(8)]
+        ));
+        let (files, _) = parse_entries(repo, entries, Vec::new(), opts, &mut stats, progress)?;
+        stats.files = files.len();
+        stats.with_errors = files.iter().filter(|f| f.has_errors).count();
+        stats.millis = started.elapsed().as_millis() as u64;
+        Ok(Self {
+            files,
+            base_files: Vec::new(),
+            stats,
+        })
+    }
+}
+
+/// Parses (or loads from the cache) the blobs of `head_entries` and
+/// `base_entries`, once per distinct blob and language.
+fn parse_entries(
+    repo: &Git,
+    head_entries: Vec<(TreeEntry, Lang)>,
+    base_entries: Vec<(TreeEntry, Lang)>,
+    opts: &Options,
+    stats: &mut IndexStats,
+    progress: &mut dyn FnMut(&str),
+) -> crate::Result<(Vec<FileIndex>, Vec<FileIndex>)> {
+    // One parse per distinct (blob, language), whatever the path or side.
+    let mut todo: Vec<(&str, Lang)> = head_entries
+        .iter()
+        .chain(&base_entries)
+        .map(|(e, l)| (e.blob.as_str(), *l))
+        .collect();
+    todo.sort_unstable();
+    todo.dedup();
+    let cached: Vec<Option<FileIndex>> = todo
+        .par_iter()
+        .map(|(blob, lang)| {
+            opts.cache_dir
+                .as_deref()
+                .and_then(|d| cache::load(d, blob, *lang))
+        })
+        .collect();
+    let mut parsed: HashMap<(String, Lang), FileIndex> = HashMap::new();
+    let mut missing = Vec::new();
+    for ((blob, lang), hit) in todo.into_iter().zip(cached) {
+        match hit {
+            Some(f) => {
+                stats.cached += 1;
+                parsed.insert((blob.to_string(), lang), f);
+            }
+            None => missing.push((blob, lang)),
+        }
+    }
+    if !missing.is_empty() {
+        progress(&format!("parsing {} files", missing.len()));
+        let ids: Vec<&str> = missing.iter().map(|(b, _)| *b).collect();
+        let contents = repo.read_blobs(&ids)?;
+        let fresh: Vec<FileIndex> = missing
+            .par_iter()
+            .zip(contents.par_iter())
+            .map(|((blob, lang), src)| {
+                let f = parse_file("", *lang, &String::from_utf8_lossy(src));
+                if let Some(d) = &opts.cache_dir {
+                    // A cache write failure only costs a reparse next time.
+                    let _ = cache::save(d, blob, &f);
+                }
+                f
+            })
+            .collect();
+        stats.parsed = fresh.len();
+        for ((blob, lang), f) in missing.into_iter().zip(fresh) {
+            parsed.insert((blob.to_string(), lang), f);
+        }
+    }
+
+    let assemble = |entries: Vec<(TreeEntry, Lang)>| -> Vec<FileIndex> {
+        let mut files: Vec<FileIndex> = entries
+            .into_iter()
+            .filter_map(|(e, lang)| {
+                let mut f = parsed.get(&(e.blob, lang))?.clone();
+                f.path = e.path;
+                Some(f)
+            })
+            .collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files
+    };
+    let files = assemble(head_entries);
+    let base_files = assemble(base_entries);
+    Ok((files, base_files))
 }
 
 /// Source files worth indexing, with their language.

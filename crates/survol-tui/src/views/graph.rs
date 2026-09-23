@@ -5,7 +5,9 @@
 //! - **symbol**: a navigable tree around one symbol (called by, calls, tests,
 //!   then any other edge kind), each node expandable to walk the graph
 //!   further in the same direction, with a back stack;
-//! - **module map**: packages / directories with their dependencies.
+//! - **module map**: packages / directories with their dependencies;
+//! - **flows**: the entry points whose end-to-end flow reaches a change, and
+//!   that flow as a tree, before / after (see [`super::flows`]).
 //!
 //! The right pane previews the code of the selected node. Rendering lives in
 //! `ui/graph.rs`.
@@ -17,6 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::graph::{EdgeKind, Graph, Link, ModuleMap, Role, SymIdx, SymbolKind};
 use survol_core::model::{Diff, LineKind};
 
+use super::flows::{EntryRow, FlowsState};
 use super::{Focus, Scroll};
 use crate::app::{Action, Shared};
 use crate::highlight::Spans;
@@ -28,6 +31,8 @@ pub enum Mode {
     /// Results of a `/` search.
     Found,
     Modules,
+    /// End-to-end flows from the impacted entry points.
+    Flows,
     Symbol,
 }
 
@@ -37,6 +42,7 @@ impl Mode {
             Mode::Changed => "changed symbols",
             Mode::Found => "search",
             Mode::Modules => "module map",
+            Mode::Flows => "flows",
             Mode::Symbol => "symbol",
         }
     }
@@ -443,6 +449,8 @@ pub struct GraphView {
     pub mod_pos: Scroll,
     open_modules: HashSet<usize>,
 
+    pub flows: FlowsState,
+
     pub symbol: Option<SymbolState>,
     pub tree: Vec<TreeRow>,
     /// Previous places, most recent last.
@@ -557,7 +565,13 @@ impl GraphView {
 
     /// `m`: next mode (symbol only when there is one).
     fn cycle_mode(&mut self) {
-        let order = [Mode::Changed, Mode::Found, Mode::Modules, Mode::Symbol];
+        let order = [
+            Mode::Changed,
+            Mode::Found,
+            Mode::Modules,
+            Mode::Flows,
+            Mode::Symbol,
+        ];
         let i = order.iter().position(|m| *m == self.mode).unwrap_or(0);
         for k in 1..=order.len() {
             let m = order[(i + k) % order.len()];
@@ -579,6 +593,7 @@ impl GraphView {
             Mode::Changed => &mut self.list_pos,
             Mode::Found => &mut self.found_pos,
             Mode::Modules => &mut self.mod_pos,
+            Mode::Flows => &mut self.flows.pos,
             Mode::Symbol => match &mut self.symbol {
                 Some(st) => &mut st.pos,
                 None => &mut self.list_pos,
@@ -591,6 +606,7 @@ impl GraphView {
             Mode::Changed => self.list_pos,
             Mode::Found => self.found_pos,
             Mode::Modules => self.mod_pos,
+            Mode::Flows => self.flows.pos,
             Mode::Symbol => self.symbol.as_ref().map_or(self.list_pos, |st| st.pos),
         }
     }
@@ -600,6 +616,7 @@ impl GraphView {
             Mode::Changed => self.list.len(),
             Mode::Found => self.found.len(),
             Mode::Modules => self.mod_rows.len(),
+            Mode::Flows => self.flows.rows.len(),
             Mode::Symbol => self.tree.len(),
         }
     }
@@ -616,9 +633,13 @@ impl GraphView {
     fn select(&mut self, i: usize) {
         let len = self.len();
         let pos = self.pos_mut();
+        let moved = pos.cursor != i;
         pos.cursor = i;
         pos.clamp(len);
         self.preview_offset = 0;
+        if moved && self.mode == Mode::Flows {
+            self.flows.on_entry_moved();
+        }
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -632,6 +653,7 @@ impl GraphView {
             Mode::Changed => matches!(self.list[i], ListRow::Module(_)),
             Mode::Found => matches!(self.found[i], ListRow::Module(_)),
             Mode::Modules => matches!(self.mod_rows[i], ModRow::Module(_)),
+            Mode::Flows => matches!(self.flows.rows[i], EntryRow::Kind(_)),
             Mode::Symbol => matches!(self.tree[i], TreeRow::Section { .. }),
         };
         let c = self.pos().cursor;
@@ -789,6 +811,16 @@ impl GraphView {
                 ModRow::Symbol { sym, .. } => Some(Target::of_symbol(g, *sym)),
                 ModRow::Module(_) => None,
             },
+            Mode::Flows => {
+                let step = self.flows.target_step(self.focus == Focus::Content)?;
+                let s = FlowsState::head_symbol(g, step)?;
+                let mut t = Target::of_symbol(g, s);
+                // Removed in the base view: the base line, not the head's.
+                if g.symbol(s).removed {
+                    t.line = step.line;
+                }
+                Some(t)
+            }
             Mode::Symbol => {
                 let st = self.symbol.as_ref()?;
                 match self.tree.get(c)? {
@@ -842,6 +874,29 @@ impl GraphView {
                 }
                 _ => None,
             },
+            Mode::Flows => {
+                if self.focus == Focus::List {
+                    if self.flows.selected().is_some() {
+                        self.focus = Focus::Content;
+                        // Straight to the first change of the flow.
+                        if self.flows.step_pos.cursor == 0 {
+                            self.flows.next_change(true);
+                        }
+                    }
+                    None
+                } else {
+                    let step = self.flows.target_step(true);
+                    let s = step.and_then(|st| FlowsState::head_symbol(g, st));
+                    if s.is_none()
+                        && let Some(st) = step
+                    {
+                        let msg = format!("{} only exists in the base revision", st.name);
+                        sh.notify(msg);
+                        return Action::None;
+                    }
+                    s
+                }
+            }
         };
         if let Some(s) = sym {
             if g.symbol(s).removed {
@@ -1041,6 +1096,7 @@ impl GraphView {
             match (p, key.code) {
                 ('g', KeyCode::Char('g')) => match self.focus {
                     Focus::List => self.select(0),
+                    Focus::Content if self.mode == Mode::Flows => self.flows.select_step(0),
                     Focus::Content => self.preview_offset = 0,
                 },
                 ('g', KeyCode::Char('d')) => return self.to_diff(sh),
@@ -1076,16 +1132,26 @@ impl GraphView {
                 }
             }
             KeyCode::Char('m') => self.cycle_mode(),
+            KeyCode::Char('f') => {
+                if self.mode != Mode::Flows {
+                    self.mode = Mode::Flows;
+                    self.focus = Focus::List;
+                    self.preview_offset = 0;
+                }
+            }
+            KeyCode::Char('b') if self.mode == Mode::Flows => self.flows.cycle_side(sh),
             KeyCode::Char('/') => {
                 self.query_editing = true;
                 self.query.clear();
             }
             KeyCode::Char('e') => self.open_in_editor(sh),
+            KeyCode::Char('x') if self.mode == Mode::Flows => self.flows.export(sh),
             KeyCode::Char('x') => self.export_mermaid(sh),
             KeyCode::Char('o') => self.toggle_fold(g),
             KeyCode::Char('0') => self.hscroll = 0,
             _ => match self.focus {
                 Focus::List => return self.on_list_key(sh, key),
+                Focus::Content if self.mode == Mode::Flows => return self.on_flow_key(sh, key),
                 Focus::Content => return self.on_preview_key(sh, key),
             },
         }
@@ -1095,6 +1161,9 @@ impl GraphView {
     fn on_list_key(&mut self, sh: &mut Shared, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pos().height / 2).max(1) as isize;
+        if self.mode == Mode::Flows && matches!(key.code, KeyCode::Char('l') | KeyCode::Right) {
+            return self.enter(sh);
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
@@ -1144,6 +1213,28 @@ impl GraphView {
             }
             KeyCode::Enter => return self.enter(sh),
             KeyCode::Esc if self.mode == Mode::Found => self.go_back(sh),
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Flow pane of the Flows mode.
+    fn on_flow_key(&mut self, sh: &mut Shared, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half = (self.flows.step_pos.height / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.flows.move_step(1),
+            KeyCode::Char('k') | KeyCode::Up => self.flows.move_step(-1),
+            KeyCode::Char('d') if ctrl => self.flows.move_step(half),
+            KeyCode::Char('u') if ctrl => self.flows.move_step(-half),
+            KeyCode::PageDown => self.flows.move_step(half * 2),
+            KeyCode::PageUp => self.flows.move_step(-half * 2),
+            KeyCode::Char('G') | KeyCode::End => self.flows.select_step(usize::MAX),
+            KeyCode::Home => self.flows.select_step(0),
+            KeyCode::Char('n') | KeyCode::Char(']') => self.flows.next_change(true),
+            KeyCode::Char('N') | KeyCode::Char('[') => self.flows.next_change(false),
+            KeyCode::Enter => return self.enter(sh),
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => self.focus = Focus::List,
             _ => {}
         }
         Action::None
@@ -1256,11 +1347,15 @@ mod tests {
     }
 
     fn setup(dir: &std::path::Path) -> (Shared, GraphView) {
+        setup_with(dir, CONTROLLER)
+    }
+
+    fn setup_with(dir: &std::path::Path, controller: &str) -> (Shared, GraphView) {
         let diff = survol_core::diff::parse(raw_diff().as_bytes()).unwrap();
         let mut files: Vec<_> = [
             (PATH, SERVICE),
             ("src/main/java/app/owner/OwnerRepository.java", REPO),
-            ("src/main/java/app/web/OwnerController.java", CONTROLLER),
+            ("src/main/java/app/web/OwnerController.java", controller),
             ("src/main/java/app/web/Admin.java", ADMIN),
             ("src/test/java/app/owner/OwnerServiceTest.java", TEST),
         ]
@@ -1438,6 +1533,8 @@ mod tests {
         v.on_key(&mut sh, key('m'));
         assert_eq!(v.mode, Mode::Modules);
         v.on_key(&mut sh, key('m'));
+        assert_eq!(v.mode, Mode::Flows);
+        v.on_key(&mut sh, key('m'));
         assert_eq!(v.mode, Mode::Symbol);
     }
 
@@ -1549,5 +1646,56 @@ mod tests {
             "entry point"
         );
         assert_eq!(Rel::In(EdgeKind::Injects).label(), "← injects");
+    }
+
+    #[test]
+    fn flows_mode_lists_impacted_entries_and_walks_the_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let controller = CONTROLLER
+            .replace(
+                "public class OwnerController {",
+                "@RestController\npublic class OwnerController {",
+            )
+            .replace(
+                "Object show(int id)",
+                "@GetMapping(\"/owners/{id}\")\nObject show(int id)",
+            );
+        let (mut sh, mut v) = setup_with(dir.path(), &controller);
+        v.on_key(&mut sh, key('f'));
+        assert_eq!(v.mode, Mode::Flows);
+        v.flows
+            .tick(&mut sh, &survol_core::config::Config::default());
+        assert!(v.flows.computed);
+        assert_eq!(
+            v.flows.rows,
+            [
+                EntryRow::Kind(survol_core::flows::EntryKind::Http),
+                EntryRow::Flow(0)
+            ]
+        );
+        assert_eq!(v.flows.flows[0].entry.label, "GET /owners/{id}");
+        let g = sh.graph.as_ref().unwrap();
+        assert_eq!(v.target(g).unwrap().sym, sym(&sh, "OwnerController.show"));
+        // Into the flow: the next step is the changed service method.
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(v.focus, Focus::Content);
+        v.on_key(&mut sh, key('n'));
+        let g = sh.graph.as_ref().unwrap();
+        assert_eq!(v.target(g).unwrap().sym, sym(&sh, "OwnerService.find"));
+        // No before / after yet (the base graph cannot be built here).
+        v.on_key(&mut sh, key('b'));
+        assert!(sh.message().unwrap().contains("before / after"));
+        // Enter: the symbol view, and back.
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(v.mode, Mode::Symbol);
+        assert_eq!(
+            v.symbol.as_ref().unwrap().root,
+            sym(&sh, "OwnerService.find")
+        );
+        v.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(v.mode, Mode::Flows);
+        // `m` cycles through the flows too.
+        v.on_key(&mut sh, key('m'));
+        assert_eq!(v.mode, Mode::Symbol);
     }
 }
