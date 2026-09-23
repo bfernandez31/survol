@@ -14,7 +14,7 @@ use survol_core::doctor::{self, Status};
 use survol_core::forge::gitlab::{Gitlab, encode};
 use survol_core::forge::{Capabilities, Forge};
 use survol_core::git::Git;
-use survol_core::graph::{Graph, Link, SymIdx, SymbolKind};
+use survol_core::graph::{EdgeKind, Graph, Link, SymIdx, SymbolKind};
 use survol_core::llm::ClaudeCli;
 use survol_core::review::{self, Target};
 
@@ -84,6 +84,10 @@ enum Cmd {
         /// Rebuild the graph instead of loading it from the cache.
         #[arg(long)]
         no_cache: bool,
+        /// Refine the edges with language servers (`[lsp]`), and print
+        /// edge counts by confidence before and after on stderr.
+        #[arg(long)]
+        lsp: bool,
     },
     /// Ask the LLM a question about a symbol, a Stack group or a hunk. The
     /// answer cites code as `[path:line]`, checked against the context.
@@ -240,15 +244,53 @@ fn run() -> Result<ExitCode> {
             modules,
             mermaid,
             no_cache,
+            lsp,
         } => {
             let repo = repo.context("not inside a git repository")?;
             let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
             let started = Instant::now();
-            let g = review::build_graph(&r, &cfg, progress, !no_cache)?;
+            let mut g = review::build_graph(&r, &cfg, progress, !no_cache)?;
             progress(&format!(
                 "graph ready in {:.2}s",
                 started.elapsed().as_secs_f64()
             ));
+            if lsp {
+                let started = Instant::now();
+                let mut cfg = cfg.clone();
+                cfg.lsp.enabled = true;
+                let before = buckets(&g);
+                match review::refine_graph(&r, &cfg, &g, &progress, !no_cache)? {
+                    Some(refined) => {
+                        progress(&format!(
+                            "refined in {:.2}s{}",
+                            started.elapsed().as_secs_f64(),
+                            if refined.from_cache { " (cached)" } else { "" }
+                        ));
+                        if let Some(s) = refined.lsp_stats() {
+                            for sr in &s.servers {
+                                progress(&format!(
+                                    "  {:<10} {:<22} {:<9} start {:>6} ms, indexing {:>6} ms, {}/{} answered {}",
+                                    sr.family.map_or("?", |f| f.name()),
+                                    sr.server,
+                                    sr.status,
+                                    sr.start_ms,
+                                    sr.ready_ms,
+                                    sr.answered,
+                                    sr.tasks,
+                                    sr.detail
+                                ));
+                            }
+                        }
+                        let after = buckets(&refined);
+                        eprintln!("  edges by confidence   before    after");
+                        for (i, label) in BUCKETS.iter().enumerate() {
+                            eprintln!("  {label:<20} {:>7} {:>8}", before[i], after[i]);
+                        }
+                        g = refined;
+                    }
+                    None => progress("LSP: nothing to refine"),
+                }
+            }
             if mermaid {
                 print!("{}", g.module_map().to_mermaid());
                 return Ok(ExitCode::SUCCESS);
@@ -277,6 +319,7 @@ fn run() -> Result<ExitCode> {
                     "base_sha": r.base_sha,
                     "head_sha": r.head_sha,
                     "stats": g.stats(),
+                    "lsp": g.lsp_stats(),
                     "symbols": syms.iter().map(|&s| symbol_json(&g, s)).collect::<Vec<_>>(),
                 })
             };
@@ -511,19 +554,28 @@ fn symbol_json(g: &Graph, s: SymIdx) -> serde_json::Value {
         "roles": sym.roles,
         "annotations": sym.annotations,
         "hunks": g.hunks_of_symbol(s),
-        "callers": links_json(g, &g.callers(s), true),
-        "callees": links_json(g, &g.callees(s), false),
-        "tests": links_json(g, &g.tests_of(s), true),
+        "callers": links_json(g, s, &g.callers(s), true),
+        "callees": links_json(g, s, &g.callees(s), false),
+        "tests": links_json(g, s, &g.tests_of(s), true),
     })
 }
 
 /// `at_reference`: `line` is where the link's symbol makes the reference
 /// (callers, tests), else where it is defined (callees).
-fn links_json(g: &Graph, links: &[Link], at_reference: bool) -> Vec<serde_json::Value> {
+fn links_json(g: &Graph, s: SymIdx, links: &[Link], at_reference: bool) -> Vec<serde_json::Value> {
     links
         .iter()
         .map(|l| {
             let other = g.symbol(l.symbol);
+            // Confirmed by a language server: the edge behind the link.
+            let (from, to) = if at_reference {
+                (l.symbol, l.via.unwrap_or(s))
+            } else {
+                (s, l.symbol)
+            };
+            let lsp = g
+                .edges_from(from)
+                .any(|e| e.to == to && e.kind == l.kind && e.lsp);
             json!({
                 "id": other.id,
                 "name": g.display_name(l.symbol),
@@ -532,10 +584,41 @@ fn links_json(g: &Graph, links: &[Link], at_reference: bool) -> Vec<serde_json::
                 "file_changed": g.is_file_changed(&other.file),
                 "symbol_changed": other.changed,
                 "confidence": (f64::from(l.confidence) * 100.0).round() / 100.0,
+                "lsp": lsp,
                 "via": l.via.map(|v| g.symbol(v).id.clone()),
             })
         })
         .collect()
+}
+
+const BUCKETS: [&str; 6] = [
+    "1.0 (lsp)",
+    "1.0",
+    "0.85 – 1",
+    "0.5 – 0.85",
+    "< 0.5",
+    "total",
+];
+
+/// Call and test edges by confidence bucket, see [`BUCKETS`].
+fn buckets(g: &Graph) -> [usize; 6] {
+    let mut b = [0; 6];
+    for e in g
+        .edges()
+        .iter()
+        .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Tests))
+    {
+        let i = match e.confidence {
+            _ if e.lsp => 0,
+            c if c >= 1.0 => 1,
+            c if c >= 0.85 => 2,
+            c if c >= 0.5 => 3,
+            _ => 4,
+        };
+        b[i] += 1;
+        b[5] += 1;
+    }
+    b
 }
 
 fn progress(msg: &str) {

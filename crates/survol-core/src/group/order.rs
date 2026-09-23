@@ -327,6 +327,7 @@ mod tests {
                 kind: EdgeKind::Calls,
                 confidence: 0.9,
                 line: 1,
+                lsp: false,
             })
             .collect();
         Graph::new(GraphData {

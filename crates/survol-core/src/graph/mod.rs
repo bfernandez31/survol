@@ -29,7 +29,7 @@ pub use rules::{FrameworkRule, default_rules};
 
 /// Version of the graph construction: part of the cache key. Bump it when
 /// resolution or the built-in rules change.
-pub const GRAPH_VERSION: u32 = 2;
+pub const GRAPH_VERSION: u32 = 3;
 
 /// Index of a symbol in [`Graph::symbols`].
 pub type SymIdx = u32;
@@ -149,6 +149,9 @@ pub struct Edge {
     pub confidence: f32,
     /// Line of the reference in `from`'s file (0 when not applicable).
     pub line: u32,
+    /// Confirmed or found by a language server (see [`crate::lsp`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lsp: bool,
 }
 
 /// A file of the head revision.
@@ -209,6 +212,9 @@ pub struct GraphData {
     /// Symbols changed by each hunk, indexed by hunk id.
     pub hunk_symbols: Vec<Vec<SymIdx>>,
     pub stats: GraphStats,
+    /// Set once refined by language servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsp: Option<crate::lsp::LspStats>,
 }
 
 /// The graph with its lookup tables. Read-only once built; serializes as
@@ -307,6 +313,11 @@ impl Graph {
 
     pub fn stats(&self) -> &GraphStats {
         &self.data.stats
+    }
+
+    /// What the language servers did, once refined.
+    pub fn lsp_stats(&self) -> Option<&crate::lsp::LspStats> {
+        self.data.lsp.as_ref()
     }
 
     pub fn by_id(&self, id: &str) -> Option<SymIdx> {

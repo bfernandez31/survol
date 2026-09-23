@@ -19,6 +19,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 | 3 | Graph (tree-sitter) | engine ✅, TUI view ✅ (framework rules in progress) |
 | 4 | Neovim integration | ✅ |
 | 5 | Questions and GitLab comments | ✅ (to validate on the real GitLab) |
+| 6 | Precision: LSP refinement of the graph | ✅ (flows in progress) |
 
 ## Install
 
@@ -51,6 +52,19 @@ group_model = "sonnet"            # model used to group hunks (default: the CLI'
 # config_dir = "~/.claude-work"   # CLAUDE_CONFIG_DIR for the CLI: use another Claude account
 # max_prompt_chars = 150000       # bigger reviews are grouped module by module, then merged
 # language = "fr"                 # language of titles and summaries (default English; --lang overrides)
+
+[lsp]                             # language servers refining the code graph (optional)
+# enabled = false                 # heuristic graph only (same as `survol --no-lsp`)
+# budget_secs = 60                # hard limit for a whole refinement, server start included
+# request_timeout_secs = 10
+# [lsp.java]                      # default: jdtls -data {data}
+# command = "jdtls"
+# args = ["-data", "{data}"]      # {data}: a per-workspace directory under .git/survol/lsp/
+# [lsp.kotlin]                    # default: kotlin-language-server, else JetBrains kotlin-lsp
+# env = { JAVA_HOME = "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" }
+#                                 # kotlin-language-server fails on JDK 25: point it to a JDK 21
+# [lsp.typescript]                # default: typescript-language-server --stdio (TS/JS);
+# enabled = false                 #   without TypeScript ≤ 6, TypeScript 7's `tsc --lsp --stdio`
 ```
 
 Project-specific architecture conventions can be written in `.survol/instructions.md`;
@@ -72,6 +86,7 @@ survol https://gitlab.corp.example/group/app/-/merge_requests/123
 survol main..feat   # local range, diffed from the merge base
 survol --no-llm 123 # never call the LLM: the Stack view groups by directory
 survol --lang fr 123 # group titles and summaries in French (a code or a name)
+survol --no-lsp 123 # keep the heuristic graph: start no language server
 ```
 
 The MR head is fetched from `refs/merge-requests/<iid>/head` and checked out in a
@@ -109,6 +124,18 @@ Three views, `Tab` / `Shift-Tab` (or `1` / `2` / `3`) to switch:
   `/` finds any symbol by name, `e` opens the node's line in the editor (also in
   unchanged files), `gd` shows the symbol's hunks in the Diff view. Test code calling
   a symbol is listed under *Tests*, not *Called by*.
+
+  **Language servers** (optional): once the graph and the worktree are ready,
+  survol starts the installed servers (jdtls, kotlin-language-server or kotlin-lsp,
+  typescript-language-server; `survol-cli doctor` lists them) on the worktree and
+  checks the call edges around the changed methods: callers found by
+  `references`, uncertain calls checked with `definition` (same-arity overloads,
+  types inferred from a call). Confirmed edges go to confidence 1, wrong guesses are
+  removed, missed callers added. The header shows `⟳ LSP: refining 12/40`, then
+  `LSP ✓n` and the graph is swapped in place; `LSP ✗` means no server could run
+  (the heuristic graph stays). Bounded by `[lsp] budget_secs`, cached per head
+  commit. `survol-cli graph --lsp` runs it and prints edge counts by confidence
+  before / after.
 
 Everywhere: `Ctrl-h` / `Ctrl-l` focus list / content, `B` hide the list, `s` split
 view, `e` open in editor, `?` the keys of the current view.

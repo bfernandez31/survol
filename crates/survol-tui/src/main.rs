@@ -43,6 +43,10 @@ struct Cli {
     /// (`fr`, `français`, `en`...). Overrides `[llm] language`.
     #[arg(long, value_name = "LANG")]
     lang: Option<String>,
+    /// Keep the heuristic graph: do not start language servers
+    /// (same as `[lsp] enabled = false`).
+    #[arg(long)]
+    no_lsp: bool,
 }
 
 fn main() -> Result<()> {
@@ -56,6 +60,7 @@ fn main() -> Result<()> {
     };
     let mut cfg = Config::load(Some(repo.dir()))?;
     cfg.llm.enabled &= !cli.no_llm;
+    cfg.lsp.enabled &= !cli.no_lsp;
     cfg.llm.override_language(cli.lang.as_deref());
     let target = Target::parse(cli.target.as_deref())?;
 
@@ -98,6 +103,7 @@ fn run(
     while !app.quit {
         app.poll_grouping();
         app.poll_graph();
+        app.poll_lsp();
         app.poll_ask();
         app.poll_remote();
         app.poll_publish();
@@ -116,6 +122,8 @@ fn run(
                 Err(e) => app.sh.notify(format!("worktree checkout failed: {e}")),
             }
         }
+        // Graph and worktree ready: refine the graph with language servers.
+        app.maybe_start_lsp();
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),

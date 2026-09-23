@@ -13,6 +13,7 @@ pub mod graph;
 pub mod group;
 pub mod index;
 pub mod llm;
+pub mod lsp;
 pub mod mechanical;
 pub mod model;
 pub mod review;

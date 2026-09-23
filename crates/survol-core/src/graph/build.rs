@@ -268,6 +268,7 @@ impl<'a> GraphBuilder<'a> {
             edges: self.edges,
             hunk_symbols: self.hunk_symbols,
             stats: self.stats,
+            lsp: None,
         })
     }
 
@@ -352,6 +353,7 @@ impl<'a> GraphBuilder<'a> {
                     kind,
                     confidence,
                     line,
+                    lsp: false,
                 });
             }
         }

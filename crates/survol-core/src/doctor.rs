@@ -78,7 +78,44 @@ pub fn run(cwd: &Path, cfg: &Config) -> Vec<Check> {
     });
 
     checks.push(llm_check(cwd, &cfg.llm));
+    checks.extend(lsp_checks(&cfg.lsp));
     checks
+}
+
+/// One check per language server family: found in `PATH` or not (servers
+/// are not started: jdtls alone takes seconds).
+fn lsp_checks(cfg: &crate::config::LspConfig) -> Vec<Check> {
+    use crate::lsp::{self, Family, Unavailable};
+    lsp::detect(cfg)
+        .into_iter()
+        .map(|(family, res)| {
+            let name = match family {
+                Family::Java => "lsp java",
+                Family::Kotlin => "lsp kotlin",
+                Family::Typescript => "lsp ts/js",
+            };
+            match res {
+                Ok(spec) => check(
+                    name,
+                    Status::Ok,
+                    format!("{} ({})", spec.name(), spec.path.display()),
+                ),
+                Err(Unavailable::Disabled) => check(name, Status::Ok, "disabled"),
+                Err(Unavailable::Missing(cmd)) => {
+                    let install: Vec<&str> =
+                        lsp::candidates(family).iter().map(|c| c.install).collect();
+                    check(
+                        name,
+                        Status::Warn,
+                        format!(
+                            "{cmd} not found: heuristic graph only (install: {})",
+                            install.join(" or ")
+                        ),
+                    )
+                }
+            }
+        })
+        .collect()
 }
 
 fn gitlab_checks(cfg: &Config) -> Vec<Check> {

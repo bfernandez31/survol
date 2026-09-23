@@ -11,7 +11,7 @@ use crate::group::{self, Grouping};
 use crate::index::{self, Index};
 use crate::llm::LlmProvider;
 use crate::model::{Diff, FileStatus, MergeRequest};
-use crate::{Error, Result, ask, comments, diff, mechanical};
+use crate::{Error, Result, ask, comments, diff, lsp, mechanical};
 
 /// What to review.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +228,79 @@ pub fn build_graph(
     ));
     graph::save_cache(&path, &g)?;
     Ok(g)
+}
+
+/// A refined graph in the cache, with its key (see [`lsp::cache_key`]).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedRefinement {
+    key: String,
+    graph: Graph,
+}
+
+/// Refines `graph` with language servers started on the review worktree
+/// (checked out if needed), see [`lsp`]. Bounded by `[lsp] budget_secs`;
+/// never fails because of a server: missing or failing ones are reported
+/// in [`Graph::lsp_stats`]. `None` when `[lsp] enabled = false` or nothing
+/// touches a changed callable. With `use_cache`, a refinement cached for
+/// the same graph and servers is returned at once. Blocking: run it on a
+/// background thread.
+pub fn refine_graph(
+    review: &Review,
+    cfg: &Config,
+    graph: &Graph,
+    progress: &(dyn Fn(&str) + Sync),
+    use_cache: bool,
+) -> Result<Option<Graph>> {
+    if !cfg.lsp.enabled {
+        return Ok(None);
+    }
+    let survol = review.repo.survol_dir()?;
+    let key = lsp::cache_key(&graph.data().key, &cfg.lsp);
+    let path = lsp::cache_path(&survol, &review.head_sha);
+    if use_cache
+        && let Ok(bytes) = std::fs::read(&path)
+        && let Ok(c) = serde_json::from_slice::<CachedRefinement>(&bytes)
+        && c.key == key
+    {
+        let mut g = c.graph;
+        g.from_cache = true;
+        if let Some(s) = g.lsp_stats() {
+            progress(&format!("{} (cached)", s.summary()));
+        }
+        return Ok(Some(g));
+    }
+    if !review.worktree.is_dir() {
+        progress("LSP: checking out the worktree");
+        review.ensure_worktree()?;
+    }
+    let data_dir = survol.join("lsp");
+    let opts = lsp::Options {
+        root: &review.worktree,
+        data_dir: Some(&data_dir),
+        cfg: &cfg.lsp,
+    };
+    let (refined, stats) = lsp::refine(graph, &opts, progress);
+    if stats.tasks == 0 {
+        return Ok(None);
+    }
+    progress(&stats.summary());
+    if stats.any_ready() {
+        let cached = CachedRefinement {
+            key,
+            graph: refined,
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(&cached).map_err(std::io::Error::from)?,
+        )?;
+        std::fs::rename(tmp, &path)?;
+        return Ok(Some(cached.graph));
+    }
+    Ok(Some(refined))
 }
 
 /// `.survol/instructions.md`: the team's architecture conventions, if any.
@@ -558,5 +631,23 @@ mod tests {
         let again = build_graph(&r, &Config::default(), |_| {}, true).unwrap();
         assert!(again.from_cache);
         assert_eq!(again.symbols(), graph.symbols());
+
+        // Language servers: a missing one leaves the graph as it was and
+        // caches nothing; disabled, nothing runs.
+        let mut cfg = Config::default();
+        cfg.lsp.java.command = Some("/nonexistent/jdtls".into());
+        let refined = refine_graph(&r, &cfg, &graph, &|_| {}, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(refined.edges(), graph.edges());
+        let stats = refined.lsp_stats().unwrap();
+        assert_eq!(stats.servers[0].status, "missing");
+        assert!(!lsp::cache_path(&g.survol_dir().unwrap(), &r.head_sha).exists());
+        cfg.lsp.enabled = false;
+        assert!(
+            refine_graph(&r, &cfg, &graph, &|_| {}, true)
+                .unwrap()
+                .is_none()
+        );
     }
 }

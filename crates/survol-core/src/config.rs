@@ -26,6 +26,7 @@ pub struct Config {
     pub git: GitConfig,
     pub review: ReviewConfig,
     pub llm: LlmConfig,
+    pub lsp: LspConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -114,6 +115,64 @@ impl LlmConfig {
     pub fn override_language(&mut self, flag: Option<&str>) {
         if let Some(lang) = flag.map(str::trim).filter(|l| !l.is_empty()) {
             self.language = lang.to_string();
+        }
+    }
+}
+
+/// `[lsp]`: language servers that refine the code graph after the
+/// tree-sitter pass (see [`crate::lsp`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LspConfig {
+    /// `false`: keep the heuristic graph, never start a server.
+    pub enabled: bool,
+    /// Hard limit for a whole refinement (server start and indexing
+    /// included), in seconds.
+    pub budget_secs: u64,
+    /// Limit of one request, in seconds.
+    pub request_timeout_secs: u64,
+    pub java: LspServerConfig,
+    pub kotlin: LspServerConfig,
+    /// TypeScript and JavaScript.
+    pub typescript: LspServerConfig,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            budget_secs: 60,
+            request_timeout_secs: 10,
+            java: LspServerConfig::default(),
+            kotlin: LspServerConfig::default(),
+            typescript: LspServerConfig::default(),
+        }
+    }
+}
+
+/// One language server. Without `command`, the built-in candidates are
+/// tried in order (see [`crate::lsp::candidates`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LspServerConfig {
+    pub enabled: bool,
+    /// Executable, looked up in `PATH` (a leading `~` is expanded).
+    pub command: Option<String>,
+    /// Arguments; `{data}` is replaced by a per-workspace directory under
+    /// `.git/survol/lsp/` (jdtls `-data`, kotlin-lsp `--system-path`).
+    pub args: Vec<String>,
+    /// Extra environment variables, e.g. `JAVA_HOME` for a server that
+    /// needs another JDK than the default one.
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for LspServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            command: None,
+            args: Vec::new(),
+            env: Default::default(),
         }
     }
 }
@@ -302,5 +361,21 @@ mod tests {
         let p = dir.path().join("c.toml");
         std::fs::write(&p, "[gitlab]\nhots = \"x\"\n").unwrap();
         assert!(matches!(read_table(&p), Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn reads_lsp_servers() {
+        let cfg: Config = toml::from_str(
+            "[lsp]\nbudget_secs = 30\n[lsp.java]\ncommand = \"jdtls\"\nargs = [\"-data\", \"{data}\"]\n[lsp.kotlin]\nenabled = false\nenv = { JAVA_HOME = \"/jdk21\" }\n",
+        )
+        .unwrap();
+        assert!(cfg.lsp.enabled);
+        assert_eq!(cfg.lsp.budget_secs, 30);
+        assert_eq!(cfg.lsp.request_timeout_secs, 10);
+        assert_eq!(cfg.lsp.java.command.as_deref(), Some("jdtls"));
+        assert_eq!(cfg.lsp.java.args, ["-data", "{data}"]);
+        assert!(!cfg.lsp.kotlin.enabled);
+        assert_eq!(cfg.lsp.kotlin.env["JAVA_HOME"], "/jdk21");
+        assert!(cfg.lsp.typescript.enabled && cfg.lsp.typescript.command.is_none());
     }
 }

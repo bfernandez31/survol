@@ -269,6 +269,21 @@ enum GraphEvent {
     Done(Box<Result<Graph, String>>),
 }
 
+enum LspEvent {
+    Progress(String),
+    Done(Box<Result<Option<Graph>, String>>),
+}
+
+/// State of the background refinement of the graph by language servers.
+pub enum LspStatus {
+    /// Waiting for the graph and the worktree (or disabled).
+    NotStarted,
+    Running(String),
+    /// Refined (`true`: a server answered), or nothing to refine.
+    Done(bool),
+    Failed,
+}
+
 /// State of the background graph build.
 pub enum GraphStatus {
     NotStarted,
@@ -300,6 +315,8 @@ pub struct App {
     group_rx: Option<mpsc::Receiver<GroupEvent>>,
     pub graph_status: GraphStatus,
     graph_rx: Option<mpsc::Receiver<GraphEvent>>,
+    pub lsp_status: LspStatus,
+    lsp_rx: Option<mpsc::Receiver<LspEvent>>,
     pub help: bool,
     pub quit: bool,
 
@@ -343,6 +360,8 @@ impl App {
             group_rx: None,
             graph_status: GraphStatus::NotStarted,
             graph_rx: None,
+            lsp_status: LspStatus::NotStarted,
+            lsp_rx: None,
             help: false,
             quit: false,
             popup: None,
@@ -482,6 +501,97 @@ impl App {
         self.graph.on_graph_ready(&self.sh);
     }
 
+    /// The heuristic graph is ready and the worktree checked out: refine the
+    /// graph with language servers in the background (once).
+    pub fn maybe_start_lsp(&mut self) {
+        if !matches!(self.lsp_status, LspStatus::NotStarted)
+            || !self.cfg.lsp.enabled
+            || !self.sh.worktree_ready
+            || !matches!(self.graph_status, GraphStatus::Done)
+        {
+            return;
+        }
+        let Some(graph) = self.sh.graph.clone() else {
+            return;
+        };
+        if graph.lsp_stats().is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let review = self.sh.review.clone();
+        let cfg = self.cfg.clone();
+        std::thread::spawn(move || {
+            let progress = |m: &str| {
+                let _ = tx.send(LspEvent::Progress(m.to_string()));
+            };
+            let res = review::refine_graph(&review, &cfg, &graph, &progress, true);
+            let _ = tx.send(LspEvent::Done(Box::new(res.map_err(|e| e.to_string()))));
+        });
+        self.lsp_rx = Some(rx);
+        self.lsp_status = LspStatus::Running("LSP: starting".into());
+    }
+
+    /// Applies what the refinement thread reported: progress, then the
+    /// refined graph swapped in place of the heuristic one.
+    pub fn poll_lsp(&mut self) {
+        let Some(rx) = &self.lsp_rx else {
+            return;
+        };
+        let mut done = None;
+        for ev in rx.try_iter() {
+            match ev {
+                LspEvent::Progress(p) => self.lsp_status = LspStatus::Running(p),
+                LspEvent::Done(res) => done = Some(*res),
+            }
+        }
+        let Some(res) = done else {
+            return;
+        };
+        self.lsp_rx = None;
+        match res {
+            Ok(Some(g)) => {
+                let summary = g.lsp_stats().map(|s| s.summary()).unwrap_or_default();
+                let changed = g
+                    .lsp_stats()
+                    .is_some_and(|s| s.confirmed + s.removed + s.added > 0);
+                self.lsp_status = LspStatus::Done(g.lsp_stats().is_some_and(|s| s.any_ready()));
+                if changed {
+                    self.set_graph(g);
+                }
+                self.sh.notify(summary);
+            }
+            Ok(None) => self.lsp_status = LspStatus::Done(true),
+            Err(e) => {
+                self.sh.notify(format!("LSP refinement failed: {e}"));
+                self.lsp_status = LspStatus::Failed;
+            }
+        }
+    }
+
+    /// Short description of the refinement for the header.
+    fn lsp_label(&self) -> String {
+        match &self.lsp_status {
+            LspStatus::NotStarted | LspStatus::Failed => String::new(),
+            LspStatus::Running(p) => {
+                // While a server starts, its status says more than `0/n`.
+                let p = match p.split_once(" · ") {
+                    Some((count, waiting)) if count.contains(" 0/") => {
+                        format!("LSP: {waiting}")
+                    }
+                    Some((count, _)) => count.to_string(),
+                    None => p.clone(),
+                };
+                let p: String = p.chars().take(48).collect();
+                format!(" · ⟳ {p}")
+            }
+            LspStatus::Done(false) => " · LSP ✗".into(),
+            LspStatus::Done(true) => match self.sh.graph.as_ref().and_then(|g| g.lsp_stats()) {
+                Some(s) => format!(" · LSP ✓{}", s.confirmed + s.added),
+                None => String::new(),
+            },
+        }
+    }
+
     /// Short description of the graph for the header.
     pub fn graph_label(&self) -> String {
         match &self.graph_status {
@@ -498,7 +608,7 @@ impl App {
                         .filter(|&s| g.symbol(s).kind != SymbolKind::File)
                         .count();
                     let cached = if g.from_cache { " · cached" } else { "" };
-                    format!("graph: {n} changed symbols{cached}")
+                    format!("graph: {n} changed symbols{cached}{}", self.lsp_label())
                 }
                 None => String::new(),
             },
@@ -1251,6 +1361,16 @@ mod tests {
         assert_eq!(ids, [0, 1, 2]);
         assert_eq!(selected(&app), 0);
         assert!(app.graph_label().starts_with("graph: 0 changed"));
+        // Language servers: status while they work, then the outcome.
+        app.lsp_status = LspStatus::Running("LSP: refining 0/12 · java indexing… Importing".into());
+        assert!(
+            app.graph_label()
+                .ends_with(" · ⟳ LSP: java indexing… Importing")
+        );
+        app.lsp_status = LspStatus::Running("LSP: refining 3/12".into());
+        assert!(app.graph_label().ends_with(" · ⟳ LSP: refining 3/12"));
+        app.lsp_status = LspStatus::Done(false);
+        assert!(app.graph_label().ends_with(" · LSP ✗"));
         // `3` jumps to the Graph view.
         app.on_key(key('3'));
         assert_eq!(app.view, View::Graph);
