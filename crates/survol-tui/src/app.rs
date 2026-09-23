@@ -250,7 +250,7 @@ impl Shared {
             return self.notify("worktree is still being checked out…");
         }
         match editor::open(path, line) {
-            Ok(editor::Opened::Parent) => {
+            Ok(editor::Opened::Plugin | editor::Opened::Parent) => {
                 self.notify(format!("opened in nvim: {}:{line}", path.display()))
             }
             Ok(editor::Opened::Foreground) => self.needs_clear = true,

@@ -267,7 +267,7 @@ Invariant clé : **chaque hunk appartient à exactement un groupe** (le groupe �
   - expose `$NVIM` à la TUI.
 - Depuis la TUI, l'action « ouvrir » exécute `nvim --server "$NVIM" --remote-send` (ou `--remote`) pour ouvrir `fichier:ligne` dans le Neovim parent, en option dans un nouvel onglet ou une nouvelle fenêtre.
 - Hors de Neovim, la TUI lance `$EDITOR +ligne fichier`.
-- Plus tard, éventuellement : commande Neovim pour revenir à la TUI au même endroit.
+- Terminal persistant : ouvrir un fichier masque le flottant sans tuer survol ; `:SurvolBack` / `:SurvolToggle` le réaffichent au même endroit (voir étape 4).
 
 ## 6. État de l'art (septembre 2026) et ce qu'on en retient
 
@@ -314,9 +314,11 @@ Chaque étape doit produire un outil utilisable sur une vraie MR.
 - Règles Spring, Angular et liaison front ↔ back ✅ (`spring`, `angular`, `http-link`, voir §5.2). Limites : injection de collections (`List<T>`), `@Profile` / `@Conditional*`, sélecteurs d'attribut Angular, URL construites dans une autre méthode, routes WebFlux fonctionnelles.
 - **Critère** : pour une méthode modifiée, liste correcte de ses appelants dans des fichiers non modifiés sur un projet réel.
 
-### Étape 4 — Neovim
+### Étape 4 — Neovim ✅
 - Plugin `survol.nvim`, saut vers `fichier:ligne` dans le Neovim parent, retour à la TUI.
-- **Critère** : cycle TUI → Neovim (LSP disponible) → TUI sans perte de position.
+- Fait : terminal flottant **persistant** (le job survol continue quand on saute vers le code ; `:Survol` / `:SurvolToggle` / `:SurvolBack` réaffichent le même terminal ; nouveau job seulement si aucun ne tourne ou si la cible change), `open_mode` (`edit` dans la fenêtre d'origine, `tab`, `split`, `vsplit`), réutilisation d'une fenêtre qui montre déjà le fichier, complétion des options et branches, `:checkhealth survol`. La TUI appelle `require'survol'.open_file(path, line, col)` via `nvim --server $NVIM --remote-expr "luaeval(…, [path, line, col])"` (chemin passé en chaîne Vim : espaces et guillemets sans échappement Lua) ; réponse `ok` / `error: …` (affichée dans la barre d'état) / `noplugin` → repli `:tabedit` par `--remote-send`. Hors Neovim : `$VISUAL` / `$EDITOR` avec suspension / reprise du terminal. Redessin complet sur `Resize` / `FocusGained`.
+- Tests : unitaires Rust (expression, échappement, réponses), tests Neovim headless `nvim/tests/survol_spec.lua` (modes, ligne/colonne, chemin avec espaces et guillemets depuis le mode terminal via RPC réel, masquer/réafficher = même job et même buffer, repli `noplugin`), job CI dédié (Neovim 0.11.4).
+- Critère vérifié en tmux sur spring-petclinic `main..graph-check --no-llm` : vue Diff curseur sur la ligne 130 supprimée → `e` ouvre `Owner.java:129` dans la fenêtre d'origine, flottant masqué ; `:Survol` → flottant identique à la capture d'avant (curseur au même endroit, seul le message d'état change). Idem vue Graphe (`Owner.getPet:126`). Limites : pas de colonne transmise par les vues (ligne seulement) ; le LSP n'est pas testé en CI (Neovim sans config).
 
 ### Étape 5 — Questions et commentaires
 - Question au LLM depuis un nœud ou un groupe, avec réponse contenant des liens navigables. Commentaires en brouillon et publication de la review sur GitLab.
