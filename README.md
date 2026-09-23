@@ -16,7 +16,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 | 0 | Skeleton, config, `survol-cli doctor` | ✅ |
 | 1 | Diff view on a real MR, persistent review state | ✅ |
 | 2 | Stack view (LLM grouping) | ✅ (to validate on a real MR) |
-| 3 | Graph (tree-sitter) | — |
+| 3 | Graph (tree-sitter) | engine ✅, TUI view to do |
 | 4 | Neovim integration | minimal plugin |
 | 5 | Questions and GitLab comments | — |
 
@@ -114,9 +114,20 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 survol-cli diff main..HEAD | jq '.files | length'
 survol-cli group main..HEAD | jq '.groups[] | {title, hunks: (.hunk_ids | length)}'
+survol-cli graph main..HEAD | jq '.symbols[] | {name, callers: [.callers[] | .name]}'
+survol-cli graph main..HEAD --symbol OwnerService.find   # one symbol, changed or not
+survol-cli graph main..HEAD --modules                    # package / directory dependencies
 ```
 
 Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes,
 `--no-llm` groups by directory without calling the LLM, `--lang <LANG>` sets the
 language of titles and summaries.
 `SURVOL_LLM_LOG=<dir>` keeps every prompt and raw LLM answer for debugging.
+
+`survol-cli graph` indexes the head (and the base version of changed files) with
+tree-sitter — Java, Kotlin, TypeScript/TSX, JavaScript — and prints the changed
+symbols with their callers, callees and tests. Each link has a `confidence`
+(1.0 certain, lower when several candidates match or only the name agrees) and
+says whether the other file is part of the diff. Parsed files are cached by blob
+in `.git/survol/cache/index/`, the graph in `.git/survol/cache/<head>/graph.json`
+(`--no-cache` rebuilds it). The index queries live in `crates/survol-core/queries/`.

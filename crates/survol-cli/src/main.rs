@@ -10,6 +10,7 @@ use serde_json::json;
 use survol_core::config::Config;
 use survol_core::doctor::{self, Status};
 use survol_core::git::Git;
+use survol_core::graph::{Graph, Link, SymIdx, SymbolKind};
 use survol_core::llm::ClaudeCli;
 use survol_core::review::{self, Target};
 
@@ -60,6 +61,22 @@ enum Cmd {
         /// `français`, `en`...). Overrides `[llm] language`.
         #[arg(long, value_name = "LANG")]
         lang: Option<String>,
+    },
+    /// Code graph (tree-sitter): changed symbols with their callers, callees
+    /// and tests, as JSON.
+    Graph {
+        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        target: Option<String>,
+        /// Only the symbols with this name (`find`, or `OwnerService.find`),
+        /// changed or not.
+        #[arg(long, value_name = "NAME")]
+        symbol: Option<String>,
+        /// Print the module map (package / directory dependencies) instead.
+        #[arg(long)]
+        modules: bool,
+        /// Rebuild the graph instead of loading it from the cache.
+        #[arg(long)]
+        no_cache: bool,
     },
 }
 
@@ -165,8 +182,92 @@ fn run() -> Result<ExitCode> {
             }
             println!("{}", serde_json::to_string_pretty(&grouping)?);
         }
+        Cmd::Graph {
+            target,
+            symbol,
+            modules,
+            no_cache,
+        } => {
+            let repo = repo.context("not inside a git repository")?;
+            let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
+            let started = Instant::now();
+            let g = review::build_graph(&r, &cfg, progress, !no_cache)?;
+            progress(&format!(
+                "graph ready in {:.2}s",
+                started.elapsed().as_secs_f64()
+            ));
+            let out = if modules {
+                let map = g.module_map();
+                json!({
+                    "modules": map.modules,
+                    "edges": map.edges.iter().map(|e| json!({
+                        "from": map.modules[e.from].name,
+                        "to": map.modules[e.to].name,
+                        "count": e.count,
+                        "kinds": e.kinds,
+                    })).collect::<Vec<_>>(),
+                })
+            } else {
+                let syms: Vec<SymIdx> = match &symbol {
+                    Some(name) => g.find(name),
+                    None => g
+                        .changed_symbols()
+                        .into_iter()
+                        .filter(|&s| g.symbol(s).kind != SymbolKind::File)
+                        .collect(),
+                };
+                json!({
+                    "base_sha": r.base_sha,
+                    "head_sha": r.head_sha,
+                    "stats": g.stats(),
+                    "symbols": syms.iter().map(|&s| symbol_json(&g, s)).collect::<Vec<_>>(),
+                })
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A symbol with its callers, callees and tests.
+fn symbol_json(g: &Graph, s: SymIdx) -> serde_json::Value {
+    let sym = g.symbol(s);
+    json!({
+        "id": sym.id,
+        "name": g.display_name(s),
+        "kind": sym.kind,
+        "file": sym.file,
+        "line": sym.line,
+        "changed": sym.changed,
+        "removed": sym.removed,
+        "roles": sym.roles,
+        "annotations": sym.annotations,
+        "hunks": g.hunks_of_symbol(s),
+        "callers": links_json(g, &g.callers(s), true),
+        "callees": links_json(g, &g.callees(s), false),
+        "tests": links_json(g, &g.tests_of(s), true),
+    })
+}
+
+/// `at_reference`: `line` is where the link's symbol makes the reference
+/// (callers, tests), else where it is defined (callees).
+fn links_json(g: &Graph, links: &[Link], at_reference: bool) -> Vec<serde_json::Value> {
+    links
+        .iter()
+        .map(|l| {
+            let other = g.symbol(l.symbol);
+            json!({
+                "id": other.id,
+                "name": g.display_name(l.symbol),
+                "file": other.file,
+                "line": if at_reference && l.line > 0 { l.line } else { other.line },
+                "file_changed": g.is_file_changed(&other.file),
+                "symbol_changed": other.changed,
+                "confidence": (f64::from(l.confidence) * 100.0).round() / 100.0,
+                "via": l.via.map(|v| g.symbol(v).id.clone()),
+            })
+        })
+        .collect()
 }
 
 fn progress(msg: &str) {

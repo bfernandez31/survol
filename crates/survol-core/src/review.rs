@@ -6,9 +6,11 @@ use crate::config::Config;
 use crate::forge::gitlab::Gitlab;
 use crate::forge::{Forge, ForgeError, MrRef, project_from_remote};
 use crate::git::Git;
+use crate::graph::{self, Graph};
 use crate::group::{self, Grouping};
+use crate::index::{self, Index};
 use crate::llm::LlmProvider;
-use crate::model::{Diff, MergeRequest};
+use crate::model::{Diff, FileStatus, MergeRequest};
 use crate::{Error, Result, diff, mechanical};
 
 /// What to review.
@@ -178,6 +180,60 @@ pub fn group(
     Ok(g)
 }
 
+/// Builds the code graph of the review: tree-sitter index of the head (and
+/// of the base version of the changed files), hunk → symbol mapping,
+/// resolution and [`graph::default_rules`]. Reads everything from git
+/// objects, so it does not need the worktree; safe to run on a background
+/// thread. Parsed files are cached by blob under `.git/survol/cache/index/`
+/// and the graph under `.git/survol/cache/<head_sha>/graph.json`; with
+/// `use_cache`, a graph cached for the same revisions, versions and rules is
+/// returned as is.
+pub fn build_graph(
+    review: &Review,
+    cfg: &Config,
+    mut progress: impl FnMut(&str),
+    use_cache: bool,
+) -> Result<Graph> {
+    let survol = review.repo.survol_dir()?;
+    let rules = graph::default_rules();
+    let globs = &cfg.review.mechanical_globs;
+    let key = graph::cache_key(&review.base_sha, &review.head_sha, &rules, globs);
+    let path = graph::cache_path(&survol, &review.head_sha);
+    if use_cache && let Some(g) = graph::load_cache(&path, &key) {
+        progress("graph loaded from cache");
+        return Ok(g);
+    }
+    let opts = index::Options::new(globs, Some(&survol))?;
+    let base_paths: Vec<String> = review
+        .diff
+        .files
+        .iter()
+        .filter(|f| f.status != FileStatus::Added)
+        .map(|f| f.old_path.clone().unwrap_or_else(|| f.path.clone()))
+        .collect();
+    let index = Index::build(
+        &review.repo,
+        &review.head_sha,
+        Some((&review.base_sha, &base_paths)),
+        &opts,
+        &mut progress,
+    )?;
+    let s = &index.stats;
+    progress(&format!(
+        "indexed {} files in {} ms ({} parsed, {} from cache, {} skipped)",
+        s.files, s.millis, s.parsed, s.cached, s.skipped
+    ));
+    let mut g = graph::build(&index, &review.diff, &rules);
+    g.set_origin(key, review.base_sha.clone(), review.head_sha.clone());
+    let s = g.stats();
+    progress(&format!(
+        "graph: {} symbols, {} edges, {}/{} references resolved in {} ms",
+        s.symbols, s.edges, s.resolved, s.refs, s.millis
+    ));
+    graph::save_cache(&path, &g)?;
+    Ok(g)
+}
+
 /// `.survol/instructions.md`: the team's architecture conventions, if any.
 pub fn instructions_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".survol/instructions.md")
@@ -316,5 +372,48 @@ mod tests {
         assert_ne!(r.worktree, g.dir());
         r.ensure_worktree().unwrap();
         assert!(r.worktree.join("b.txt").exists());
+    }
+
+    #[test]
+    fn builds_and_caches_the_graph() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = repo(tmp.path());
+        let svc = "package app;\nclass Svc {\n  int total(int a) {\n    return a;\n  }\n}\n";
+        let user =
+            "package app;\nclass User {\n  Svc svc;\n  int go() { return svc.total(1); }\n}\n";
+        commit(
+            &g,
+            &[("src/Svc.java", svc), ("src/User.java", user)],
+            "base",
+        );
+        g.bytes(&["checkout", "--quiet", "-b", "feat"]).unwrap();
+        commit(
+            &g,
+            &[("src/Svc.java", &svc.replace("return a;", "return a + 1;"))],
+            "feat",
+        );
+
+        let r = open(
+            &g,
+            &Config::default(),
+            &Target::parse(Some("main..feat")).unwrap(),
+            |_| {},
+        )
+        .unwrap();
+        let graph = build_graph(&r, &Config::default(), |_| {}, true).unwrap();
+        assert!(!graph.from_cache);
+        let changed: Vec<_> = graph
+            .changed_symbols()
+            .iter()
+            .map(|&s| graph.display_name(s))
+            .collect();
+        assert_eq!(changed, ["Svc.total"]);
+        let callers = graph.callers(graph.changed_symbols()[0]);
+        assert_eq!(graph.display_name(callers[0].symbol), "User.go");
+        assert!(!graph.is_file_changed("src/User.java"));
+
+        let again = build_graph(&r, &Config::default(), |_| {}, true).unwrap();
+        assert!(again.from_cache);
+        assert_eq!(again.symbols(), graph.symbols());
     }
 }

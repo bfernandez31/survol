@@ -145,6 +145,79 @@ impl Git {
         self.bytes(&["worktree", "add", "--quiet", "--force", "--detach", &p, sha])
             .map(drop)
     }
+
+    /// Every blob of the tree of `rev` (`git ls-tree -r -l`): files only, no
+    /// symlinks or submodules. Works without a checkout.
+    pub fn ls_tree(&self, rev: &str) -> Result<Vec<TreeEntry>> {
+        let out = self.bytes(&["ls-tree", "-r", "-l", "-z", "--full-tree", rev])?;
+        Ok(out
+            .split(|&b| b == 0)
+            .filter_map(|rec| {
+                // `<mode> SP <type> SP <id> SP+ <size> TAB <path>`
+                let rec = std::str::from_utf8(rec).ok()?;
+                let (meta, path) = rec.split_once('\t')?;
+                let mut it = meta.split_ascii_whitespace();
+                let (mode, kind, id, size) = (it.next()?, it.next()?, it.next()?, it.next()?);
+                (kind == "blob" && mode != "120000").then(|| TreeEntry {
+                    path: path.to_string(),
+                    blob: id.to_string(),
+                    size: size.parse().unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
+    /// Contents of the blobs `ids`, in order, through one `git cat-file --batch`.
+    pub fn read_blobs(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::process::Stdio;
+
+        let args = ["cat-file", "--batch"];
+        let mut child = self
+            .command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let input: String = ids.iter().map(|id| format!("{id}\n")).collect();
+        // Written from another thread: git blocks on a full stdout otherwise.
+        let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+        let mut out = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let mut blobs = Vec::with_capacity(ids.len());
+        let mut header = String::new();
+        for id in ids {
+            header.clear();
+            out.read_line(&mut header)?;
+            // `<id> blob <size>`, or `<id> missing`.
+            let size = header
+                .trim_end()
+                .rsplit_once(' ')
+                .and_then(|(_, s)| s.parse::<usize>().ok())
+                .filter(|_| !header.ends_with("missing\n"))
+                .ok_or_else(|| GitError::Failed {
+                    args: args.join(" "),
+                    stderr: format!("cannot read blob {id}: {}", header.trim()),
+                })?;
+            let mut buf = vec![0; size + 1]; // content + trailing LF
+            out.read_exact(&mut buf)?;
+            buf.pop();
+            blobs.push(buf);
+        }
+        let _ = writer.join();
+        let _ = child.wait();
+        Ok(blobs)
+    }
+}
+
+/// A file of a git tree, see [`Git::ls_tree`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    pub path: String,
+    /// Blob id: identifies the content, whatever the path or commit.
+    pub blob: String,
+    pub size: u64,
 }
 
 #[cfg(test)]
@@ -199,6 +272,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(wt.join("a.txt")).unwrap(),
             "one\n2\n"
+        );
+    }
+
+    #[test]
+    fn lists_tree_and_reads_blobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = repo(tmp.path());
+        let head = commit(&g, &[("a.txt", "one\n"), ("d/b.txt", "")], "base");
+        let tree = g.ls_tree(&head).unwrap();
+        let paths: Vec<_> = tree.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "d/b.txt"]);
+        assert_eq!(tree[0].size, 4);
+        let ids: Vec<_> = tree.iter().map(|e| e.blob.as_str()).collect();
+        let blobs = g.read_blobs(&ids).unwrap();
+        assert_eq!(blobs, [b"one\n".to_vec(), Vec::new()]);
+        assert!(
+            g.read_blobs(&["0000000000000000000000000000000000000000"])
+                .is_err()
         );
     }
 }

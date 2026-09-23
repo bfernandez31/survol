@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-pub use order::{layer_rank, order_groups};
+pub use order::{layer_rank, order_groups, order_groups_with_graph};
 
 use crate::llm::{LlmProvider, LlmRequest};
 use crate::mechanical::{self, Kind};
@@ -125,6 +125,12 @@ pub struct Grouping {
 }
 
 impl Grouping {
+    /// Reorders the groups along the code graph, see [`order_groups_with_graph`].
+    /// [`build`] orders them by layer only; call this once the graph is ready.
+    pub fn order_with_graph(&mut self, graph: &crate::graph::Graph) {
+        order_groups_with_graph(&mut self.groups, graph);
+    }
+
     /// Index in [`Self::groups`] of the group containing `hunk`.
     pub fn group_of_hunk(&self, hunk: usize) -> Option<usize> {
         self.groups.iter().position(|g| g.hunk_ids.contains(&hunk))

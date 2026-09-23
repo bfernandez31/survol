@@ -1,4 +1,5 @@
-//! survol engine: forge access, git, diff parsing, review state, LLM grouping.
+//! survol engine: forge access, git, diff parsing, review state, LLM grouping,
+//! tree-sitter index and code graph.
 //! Everything here is UI-agnostic; the TUI and the JSON CLI build on it.
 
 pub mod config;
@@ -6,7 +7,9 @@ pub mod diff;
 pub mod doctor;
 pub mod forge;
 pub mod git;
+pub mod graph;
 pub mod group;
+pub mod index;
 pub mod llm;
 pub mod mechanical;
 pub mod model;
