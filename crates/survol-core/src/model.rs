@@ -173,7 +173,6 @@ fn tree_key(path: &str) -> (Vec<&str>, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn sorts_files_as_tree() {
