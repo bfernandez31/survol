@@ -2,21 +2,25 @@
 //! the background grouping. Each view lives in `views/`, rendering in `ui/`.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use survol_core::ask::{self, Answer, CodeRef};
 use survol_core::config::Config;
 use survol_core::graph::{Graph, SymIdx, SymbolKind};
 use survol_core::group::{Grouping, Source};
-use survol_core::llm::ClaudeCli;
-use survol_core::model::FileStatus;
+use survol_core::llm::{ClaudeCli, LlmProvider};
+use survol_core::model::{FileStatus, Side};
 use survol_core::review::{self, Review};
 use survol_core::review_state::ReviewState;
 
 use crate::editor;
 use crate::highlight::Highlighter;
 use crate::views::Layout;
+use crate::views::ask::{
+    AnswerOutcome, AnswerView, AskInput, HistoryOutcome, HistoryView, InputOutcome, Pending,
+};
 use crate::views::diff::DiffView;
 use crate::views::graph::GraphView;
 use crate::views::stack::StackView;
@@ -53,7 +57,24 @@ pub enum Action {
     Regroup,
     /// Show this symbol in the Graph view.
     ShowSymbol(SymIdx),
+    /// Show this line (index in the hunk) in the Diff view.
+    ShowLine {
+        hunk: usize,
+        line: usize,
+    },
 }
+
+/// A modal window over the views.
+pub enum Popup {
+    AskInput(AskInput),
+    /// Waiting for the LLM.
+    Pending(Pending),
+    Answer(AnswerView),
+    History(HistoryView),
+}
+
+/// Something that answers questions; `Send` to run on a background thread.
+pub type Llm = Arc<dyn LlmProvider + Send>;
 
 /// State shared by all views.
 pub struct Shared {
@@ -203,12 +224,28 @@ pub struct App {
     graph_rx: Option<mpsc::Receiver<GraphEvent>>,
     pub help: bool,
     pub quit: bool,
+
+    pub popup: Option<Popup>,
+    /// Answers questions (the Claude CLI; a fake in tests).
+    pub llm: Llm,
+    /// Question being answered in the background.
+    pub ask_pending: Option<Pending>,
+    ask_rx: Option<mpsc::Receiver<Result<Answer, String>>>,
+    /// Questions of this review, oldest first.
+    pub history: Vec<Answer>,
+    /// Last answer shown: `A` reopens it.
+    last_answer: Option<AnswerView>,
 }
 
 impl App {
     pub fn new(review: Review, state: ReviewState, state_path: PathBuf, cfg: Config) -> Self {
         let sh = Shared::new(review, state, state_path);
         let diff = DiffView::new(&sh);
+        let history = review::questions_path(&sh.review)
+            .ok()
+            .and_then(|p| ask::load_history(&p).ok())
+            .unwrap_or_default();
+        let llm: Llm = Arc::new(ClaudeCli::from_config(&cfg.llm));
         Self {
             sh,
             view: View::Diff,
@@ -222,6 +259,12 @@ impl App {
             graph_rx: None,
             help: false,
             quit: false,
+            popup: None,
+            llm,
+            ask_pending: None,
+            ask_rx: None,
+            history,
+            last_answer: None,
         }
     }
 
@@ -435,6 +478,10 @@ impl App {
                 self.diff.reveal_file(&self.sh, f);
                 self.switch(View::Diff);
             }
+            Action::ShowLine { hunk, line } => {
+                self.diff.reveal_line(&self.sh, hunk, line);
+                self.switch(View::Diff);
+            }
             Action::ShowSymbol(s) => {
                 if self.sh.graph.is_some() {
                     self.graph.show_symbol(&self.sh, s);
@@ -467,6 +514,9 @@ impl App {
             self.help = false;
             return;
         }
+        if self.popup.is_some() {
+            return self.on_popup_key(key);
+        }
         let captured = match self.view {
             View::Diff => self.diff.captures_keys(),
             View::Stack => self.stack.captures_keys(),
@@ -475,12 +525,220 @@ impl App {
         if !captured && self.on_global_key(key) {
             return;
         }
+        if !captured && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            match key.code {
+                KeyCode::Char('a') => return self.ask_here(),
+                KeyCode::Char('A') => return self.reopen_answer(),
+                _ => {}
+            }
+        }
         let action = match self.view {
             View::Diff => self.diff.on_key(&mut self.sh, key),
             View::Stack => self.stack.on_key(&mut self.sh, key, self.cfg.llm.enabled),
             View::Graph => self.graph.on_key(&mut self.sh, key),
         };
         self.apply(action);
+    }
+
+    // ----- questions to the LLM -----------------------------------------
+
+    /// `a`: asks about the node under the cursor of the current view.
+    fn ask_here(&mut self) {
+        if !self.cfg.llm.enabled {
+            return self
+                .sh
+                .notify("the LLM is disabled (--no-llm): questions are unavailable");
+        }
+        if let Some(p) = &self.ask_pending {
+            self.popup = Some(Popup::Pending(p.clone()));
+            return;
+        }
+        let subject = match self.view {
+            View::Diff => self.diff.ask_subject(&mut self.sh),
+            View::Stack => self.stack.ask_subject(&mut self.sh),
+            View::Graph => self.graph.ask_subject(&mut self.sh),
+        };
+        if let Some((subject, label)) = subject {
+            self.popup = Some(Popup::AskInput(AskInput::new(subject, label)));
+        }
+    }
+
+    /// Sends the question in the background; the answer shows when ready.
+    pub fn submit_question(&mut self, input: &AskInput, question: &str) {
+        let prompt = match review::ask_prompt(
+            &self.sh.review,
+            &self.cfg,
+            self.sh.graph.as_ref(),
+            self.stack.grouping.as_ref(),
+            &input.subject,
+            question,
+        ) {
+            Ok(p) => p,
+            Err(e) => return self.sh.notify(format!("cannot ask: {e}")),
+        };
+        let params = match review::ask_params(&self.sh.review, &self.cfg, true) {
+            Ok(p) => p,
+            Err(e) => return self.sh.notify(format!("cannot ask: {e}")),
+        };
+        let pending = Pending {
+            label: prompt.label.clone(),
+            question: question.to_string(),
+            since: Instant::now(),
+        };
+        let (tx, rx) = mpsc::channel();
+        let llm = self.llm.clone();
+        std::thread::spawn(move || {
+            let res = ask::ask(&prompt, llm.as_ref(), &params).map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+        self.ask_rx = Some(rx);
+        self.ask_pending = Some(pending.clone());
+        self.popup = Some(Popup::Pending(pending));
+    }
+
+    /// Applies the answer of the background question, if it arrived.
+    pub fn poll_ask(&mut self) {
+        let Some(rx) = &self.ask_rx else {
+            return;
+        };
+        let res = match rx.try_recv() {
+            Ok(res) => res,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("the question was lost".into()),
+        };
+        self.ask_rx = None;
+        self.ask_pending = None;
+        let waiting = matches!(self.popup, Some(Popup::Pending(_)));
+        match res {
+            Ok(answer) => {
+                if let Ok(path) = review::questions_path(&self.sh.review) {
+                    match ask::append_history(&path, &answer) {
+                        Ok(all) => self.history = all,
+                        Err(e) => self.sh.notify(format!("cannot save the question: {e}")),
+                    }
+                }
+                let view = AnswerView::new(answer);
+                if waiting {
+                    self.popup = Some(Popup::Answer(view));
+                } else {
+                    self.last_answer = Some(view);
+                    self.sh.notify("the answer is ready: A to read it");
+                }
+            }
+            Err(e) => {
+                if waiting {
+                    self.popup = None;
+                }
+                self.sh.notify(format!("question failed: {e}"));
+            }
+        }
+    }
+
+    /// `A`: the last answer, else the history.
+    fn reopen_answer(&mut self) {
+        if let Some(p) = &self.ask_pending {
+            self.popup = Some(Popup::Pending(p.clone()));
+        } else if let Some(v) = self.last_answer.take() {
+            self.popup = Some(Popup::Answer(v));
+        } else if self.history.is_empty() {
+            self.sh
+                .notify("no question asked in this review yet (a on a node)");
+        } else {
+            self.popup = Some(Popup::History(HistoryView::default()));
+        }
+    }
+
+    /// Where a reference of an answer leads: the Graph view of the symbol
+    /// around it, or the Diff view (`diff`, or when no symbol is there).
+    pub fn follow_ref(&mut self, r: &CodeRef, diff: bool) -> Action {
+        let d = &self.sh.review.diff;
+        let in_diff = d.files.iter().position(|f| match r.side {
+            Side::New => f.path == r.path && f.status != FileStatus::Deleted,
+            Side::Old => f.old_path.as_deref().unwrap_or(&f.path) == r.path,
+        });
+        let line = in_diff.and_then(|fi| {
+            d.file_hunks(fi).find_map(|h| {
+                let i = h.lines.iter().position(|l| match r.side {
+                    Side::New => l.new_line == Some(r.line),
+                    Side::Old => l.old_line == Some(r.line),
+                })?;
+                Some(Action::ShowLine {
+                    hunk: h.id,
+                    line: i,
+                })
+            })
+        });
+        let symbol = match (&self.sh.graph, r.side) {
+            (Some(g), Side::New) => g
+                .symbol_at(&r.path, r.line)
+                .filter(|&s| g.symbol(s).kind != SymbolKind::File),
+            _ => None,
+        };
+        match (diff, line, symbol) {
+            (true, Some(a), _) | (false, Some(a), None) => a,
+            (_, _, Some(s)) => Action::ShowSymbol(s),
+            (_, None, None) => {
+                self.sh.notify(format!(
+                    "{}:{} is not in the diff nor in a known symbol: e opens it",
+                    r.path, r.line
+                ));
+                Action::None
+            }
+        }
+    }
+
+    fn on_popup_key(&mut self, key: KeyEvent) {
+        let Some(popup) = self.popup.take() else {
+            return;
+        };
+        match popup {
+            Popup::AskInput(mut input) => match input.on_key(key) {
+                InputOutcome::Continue => self.popup = Some(Popup::AskInput(input)),
+                InputOutcome::Cancel => {}
+                InputOutcome::Submit(q) => self.submit_question(&input, &q),
+            },
+            Popup::Pending(p) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self
+                    .sh
+                    .notify("still asking in the background: A to come back"),
+                _ => self.popup = Some(Popup::Pending(p)),
+            },
+            Popup::Answer(mut v) => match v.on_key(key) {
+                AnswerOutcome::Continue => self.popup = Some(Popup::Answer(v)),
+                AnswerOutcome::Close => self.last_answer = Some(v),
+                AnswerOutcome::History => {
+                    self.last_answer = Some(v);
+                    self.popup = Some(Popup::History(HistoryView::default()));
+                }
+                AnswerOutcome::Follow { r, diff } => {
+                    let action = self.follow_ref(&r, diff);
+                    if action == Action::None {
+                        self.popup = Some(Popup::Answer(v));
+                    } else {
+                        self.last_answer = Some(v);
+                        self.sh.notify("A: back to the answer");
+                        self.apply(action);
+                    }
+                }
+                AnswerOutcome::Edit(r) => {
+                    if r.side == Side::Old {
+                        self.sh.notify(
+                            "this line only exists in the base revision: d shows it in the diff",
+                        );
+                    } else {
+                        self.sh.open_path(&r.path, r.line);
+                    }
+                    self.popup = Some(Popup::Answer(v));
+                }
+            },
+            Popup::History(mut h) => match h.on_key(key, self.history.len()) {
+                HistoryOutcome::Continue => self.popup = Some(Popup::History(h)),
+                HistoryOutcome::Close => {}
+                HistoryOutcome::Open(i) => {
+                    self.popup = Some(Popup::Answer(AnswerView::new(self.history[i].clone())))
+                }
+            },
+        }
     }
 
     /// Keys valid in every view. Returns whether the key was used.
@@ -544,6 +802,101 @@ mod tests {
         // `3` jumps to the Graph view.
         app.on_key(key('3'));
         assert_eq!(app.view, View::Graph);
+    }
+
+    struct FakeLlm(&'static str);
+
+    impl LlmProvider for FakeLlm {
+        fn complete(&self, req: &survol_core::llm::LlmRequest) -> survol_core::llm::Result<String> {
+            assert!(req.prompt.contains("## Subject: group 1 of 3"));
+            Ok(self.0.to_string())
+        }
+    }
+
+    fn wait_answer(app: &mut App) {
+        for _ in 0..200 {
+            app.poll_ask();
+            if app.ask_pending.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no answer");
+    }
+
+    #[test]
+    fn asks_about_a_group_and_follows_the_links() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let (review, grouping) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.llm = Arc::new(FakeLlm(
+            "It changes the model [src/a.rs:1] and the API [src/a.rs:10], not [src/zz.rs:4].",
+        ));
+        app.stack.set_grouping(&app.sh, grouping);
+        app.on_key(key('2'));
+        app.on_key(key('a'));
+        let Some(Popup::AskInput(input)) = &app.popup else {
+            panic!("no question input");
+        };
+        assert_eq!(input.subject, ask::Subject::Group(0));
+        // `1`: the first suggestion.
+        app.on_key(key('1'));
+        assert!(matches!(app.popup, Some(Popup::Pending(_))));
+        wait_answer(&mut app);
+        let Some(Popup::Answer(v)) = &app.popup else {
+            panic!("no answer shown");
+        };
+        assert_eq!(v.answer.refs.len(), 3);
+        assert_eq!(v.answer.unknown_refs(), 1);
+        assert_eq!(app.history.len(), 1);
+        assert!(review::questions_path(&app.sh.review).unwrap().exists());
+
+        // Tab to the second link, Enter: the Diff view on that line.
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.popup.is_none());
+        assert_eq!(app.view, View::Diff);
+        assert_eq!(
+            app.diff.rows[app.diff.pos.cursor],
+            Row::Line { hunk: 1, line: 1 }
+        );
+        // A: back to the answer; Esc, then A again; history after that.
+        app.on_key(key('A'));
+        assert!(matches!(app.popup, Some(Popup::Answer(_))));
+        app.on_key(key('A'));
+        assert!(matches!(app.popup, Some(Popup::History(_))));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.popup, Some(Popup::Answer(_))));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.popup.is_none());
+
+        // Same question again: from the cache.
+        app.on_key(key('2'));
+        app.on_key(key('a'));
+        app.on_key(key('1'));
+        wait_answer(&mut app);
+        let Some(Popup::Answer(v)) = &app.popup else {
+            panic!("no answer shown");
+        };
+        assert!(v.answer.from_cache);
+        assert_eq!(app.history.len(), 1);
+
+        // Without LLM: a message, no popup.
+        app.popup = None;
+        app.cfg.llm.enabled = false;
+        app.on_key(key('a'));
+        assert!(app.popup.is_none());
+        assert!(app.sh.message().unwrap().contains("--no-llm"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 | 2 | Stack view (LLM grouping) | ✅ (to validate on a real MR) |
 | 3 | Graph (tree-sitter) | engine ✅, TUI view ✅ (framework rules in progress) |
 | 4 | Neovim integration | minimal plugin |
-| 5 | Questions and GitLab comments | — |
+| 5 | Questions and GitLab comments | questions ✅, comments in progress |
 
 ## Install
 
@@ -111,7 +111,18 @@ Three views, `Tab` / `Shift-Tab` (or `1` / `2` / `3`) to switch:
   a symbol is listed under *Tests*, not *Called by*.
 
 Everywhere: `Ctrl-h` / `Ctrl-l` focus list / content, `B` hide the list, `s` split
-view, `e` open in editor, `?` the keys of the current view. In the Diff and Stack
+view, `e` open in editor, `?` the keys of the current view.
+
+**Questions to the LLM**: `a` asks about the node under the cursor (a symbol in the
+Graph view, a group or the hunk under the cursor in the Stack view, a hunk in the
+Diff view). Pick a suggested question (`↑`/`↓` or its number) or type one; it runs
+in the background. The answer only uses what survol computed (the node's code, its
+callers / callees / tests with `file:line`, the group summary, the hunks,
+`.survol/instructions.md`) and cites code as `[path:line]`: `Tab` / `n` selects the
+next link, `Enter` opens the Graph view of the symbol there (or the line in the
+Diff view), `d` the line in the Diff view, `e` the editor. References to lines the
+model was not given are struck out. `A` reopens the last answer, then the review's
+questions. Answers are cached; `[llm] ask_model` picks the model, `--lang` the language. In the Diff and Stack
 views, `gs` opens the Graph view on the symbol under the cursor.
 
 "Reviewed" is keyed by hunk content: when new commits are pushed, only the hunks
@@ -138,6 +149,8 @@ survol-cli graph main..HEAD | jq '.symbols[] | {name, callers: [.callers[] | .na
 survol-cli graph main..HEAD --symbol OwnerService.find   # one symbol, changed or not
 survol-cli graph main..HEAD --modules                    # package / directory dependencies
 survol-cli graph main..HEAD --mermaid                    # the same, as a Mermaid flowchart
+survol-cli ask main..HEAD --symbol Owner.addPet "What does this component do?"
+survol-cli ask main..HEAD --group 2 --prompt "How do the pieces fit together?"  # prompt only
 ```
 
 Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes,

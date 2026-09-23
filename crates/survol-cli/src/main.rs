@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use survol_core::ask::Subject;
 use survol_core::config::Config;
 use survol_core::doctor::{self, Status};
 use survol_core::git::Git;
@@ -80,6 +81,32 @@ enum Cmd {
         /// Rebuild the graph instead of loading it from the cache.
         #[arg(long)]
         no_cache: bool,
+    },
+    /// Ask the LLM a question about a symbol, a Stack group or a hunk. The
+    /// answer cites code as `[path:line]`, checked against the context.
+    Ask {
+        /// `[TARGET] QUESTION`: the target as for the other commands (empty:
+        /// MR of the current branch), then the question.
+        #[arg(num_args = 1..=2, required = true, value_name = "[TARGET] QUESTION")]
+        args: Vec<String>,
+        /// A symbol by name (`find`, `OwnerService.find`).
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["group", "hunk"])]
+        symbol: Option<String>,
+        /// A group of the Stack view, numbered as displayed (1 = first).
+        #[arg(long, value_name = "N", conflicts_with = "hunk")]
+        group: Option<usize>,
+        /// A hunk, by its id in `survol-cli diff`.
+        #[arg(long, value_name = "ID")]
+        hunk: Option<usize>,
+        /// Ask again instead of reusing a cached answer.
+        #[arg(long)]
+        no_cache: bool,
+        /// Print the prompt instead of asking (no LLM call).
+        #[arg(long)]
+        prompt: bool,
+        /// Language of the answer: a name or a code. Overrides `[llm] language`.
+        #[arg(long, value_name = "LANG")]
+        lang: Option<String>,
     },
 }
 
@@ -233,8 +260,128 @@ fn run() -> Result<ExitCode> {
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
+        Cmd::Ask {
+            args,
+            symbol,
+            group,
+            hunk,
+            no_cache,
+            prompt,
+            lang,
+        } => ask(repo, cfg, args, symbol, group, hunk, no_cache, prompt, lang)?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ask(
+    repo: Option<Git>,
+    mut cfg: Config,
+    args: Vec<String>,
+    symbol: Option<String>,
+    group: Option<usize>,
+    hunk: Option<usize>,
+    no_cache: bool,
+    print_prompt: bool,
+    lang: Option<String>,
+) -> Result<()> {
+    cfg.llm.override_language(lang.as_deref());
+    if !cfg.llm.enabled && !print_prompt {
+        anyhow::bail!("the LLM is disabled ([llm] enabled = false)");
+    }
+    let (target, question) = match args.as_slice() {
+        [q] => (None, q.clone()),
+        [t, q] => (Some(t.as_str()), q.clone()),
+        _ => anyhow::bail!("expected [TARGET] QUESTION"),
+    };
+    let repo = repo.context("not inside a git repository")?;
+    let r = review::open(&repo, &cfg, &Target::parse(target)?, progress)?;
+    let graph = review::build_graph(&r, &cfg, progress, true)?;
+    let llm = ClaudeCli::from_config(&cfg.llm);
+    let (subject, grouping) = match (symbol, group, hunk) {
+        (Some(name), _, _) => {
+            let mut hits: Vec<SymIdx> = graph
+                .find(&name)
+                .into_iter()
+                .filter(|&s| graph.symbol(s).kind != SymbolKind::File)
+                .collect();
+            if hits.len() > 1 && hits.iter().any(|&s| graph.symbol(s).changed) {
+                hits.retain(|&s| graph.symbol(s).changed);
+            }
+            match hits.as_slice() {
+                [] => anyhow::bail!("no symbol named `{name}`"),
+                [s] => (Subject::Symbol(graph.symbol(*s).id.clone()), None),
+                many => anyhow::bail!(
+                    "`{name}` is ambiguous: {}",
+                    many.iter()
+                        .map(|&s| graph.symbol(s).id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+        (None, Some(n), _) => {
+            let mut g = review::group(&r, &cfg, &llm, progress, true)?;
+            g.order_with_graph(&graph);
+            let id = n
+                .checked_sub(1)
+                .and_then(|i| g.groups.get(i))
+                .map(|gr| gr.id)
+                .with_context(|| format!("no group {n} (there are {})", g.groups.len()))?;
+            (Subject::Group(id), Some(g))
+        }
+        (None, None, Some(h)) => {
+            let hunk = r
+                .diff
+                .hunks
+                .get(h)
+                .with_context(|| format!("no hunk {h} (there are {})", r.diff.hunks.len()))?;
+            (Subject::Hunk(hunk.content_hash.clone()), None)
+        }
+        (None, None, None) => {
+            anyhow::bail!("say what the question is about: --symbol, --group or --hunk")
+        }
+    };
+    // The group summary gives context to symbol and hunk questions too.
+    let grouping = match grouping {
+        Some(g) => Some(g),
+        None if cfg.llm.enabled => {
+            let path = survol_core::group::cache_path(&repo.survol_dir()?, &r.head_sha);
+            std::fs::read(path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<survol_core::group::Grouping>(&b).ok())
+        }
+        None => None,
+    };
+    let prompt = review::ask_prompt(
+        &r,
+        &cfg,
+        Some(&graph),
+        grouping.as_ref(),
+        &subject,
+        &question,
+    )?;
+    if print_prompt {
+        print!("{}", prompt.text);
+        return Ok(());
+    }
+    progress(&format!(
+        "asking about {} ({} chars of context)",
+        prompt.label,
+        prompt.text.len()
+    ));
+    let started = Instant::now();
+    let answer = survol_core::ask::ask(&prompt, &llm, &review::ask_params(&r, &cfg, !no_cache)?)?;
+    progress(&format!(
+        "answered in {:.1}s{}, {} reference(s), {} unknown",
+        started.elapsed().as_secs_f64(),
+        if answer.from_cache { " (cached)" } else { "" },
+        answer.refs.len(),
+        answer.unknown_refs()
+    ));
+    survol_core::ask::append_history(&review::questions_path(&r)?, &answer)?;
+    println!("{}", serde_json::to_string_pretty(&answer)?);
+    Ok(())
 }
 
 /// A symbol with its callers, callees and tests.

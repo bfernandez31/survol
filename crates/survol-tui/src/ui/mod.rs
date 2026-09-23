@@ -1,5 +1,6 @@
 //! Rendering: header, footer and help shared by the views, then each view.
 
+mod ask;
 mod diff;
 mod graph;
 mod rows;
@@ -11,7 +12,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::app::{App, GraphStatus, GroupStatus, View};
+use crate::app::{App, GraphStatus, GroupStatus, Popup, View};
 use crate::views::graph::Mode;
 
 const ADDED_BG: Color = Color::Rgb(22, 52, 34);
@@ -34,6 +35,19 @@ pub fn render(f: &mut Frame, app: &mut App) {
         View::Graph => graph::render(f, body, app),
     }
     render_footer(f, footer, app);
+    let model = app
+        .cfg
+        .llm
+        .ask_model
+        .clone()
+        .unwrap_or_else(|| "default".into());
+    match &mut app.popup {
+        Some(Popup::AskInput(i)) => ask::render_input(f, body, i, &model),
+        Some(Popup::Pending(p)) => ask::render_pending(f, body, p),
+        Some(Popup::Answer(v)) => ask::render_answer(f, body, v),
+        Some(Popup::History(h)) => ask::render_history(f, body, h, &app.history),
+        None => {}
+    }
     if app.help {
         render_help(f, f.area(), app.view);
     }
@@ -102,6 +116,13 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         };
         spans.push(Span::styled(format!(" {graph} "), style));
     }
+    if let Some(p) = &app.ask_pending {
+        let e = p.since.elapsed();
+        spans.push(Span::styled(
+            format!(" {} asking… {}s ", ask::spinner(e.as_millis()), e.as_secs()),
+            Style::new().fg(ACCENT),
+        ));
+    }
     if !sh.worktree_ready {
         spans.push("  ⟳ worktree".dim());
     }
@@ -134,20 +155,20 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(
             match app.view {
                 View::Diff => {
-                    " j/k move  n/N hunk  J/K file  space hunk ✓  r file ✓  u next unreviewed  o fold  e edit  gs graph  / filter  Tab view  ? help  q quit"
+                    " j/k move  n/N hunk  J/K file  space hunk ✓  r file ✓  u next unreviewed  e edit  gs graph  a ask  / filter  Tab view  ? help  q quit"
                 }
                 View::Stack => {
-                    " j/k move  h/l fold  space ✓ + next  u next unreviewed  J/K group  Enter/gd to diff  gs graph  e edit  R regroup  Tab view  ? help"
+                    " j/k move  h/l fold  space ✓ + next  u next unreviewed  J/K group  Enter/gd to diff  gs graph  a ask  e edit  R regroup  ? help"
                 }
                 View::Graph => match app.graph.mode {
                     Mode::Symbol => {
-                        " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  / find  m mode  a ask LLM (step 5)  ? help"
+                        " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  / find  m mode  a ask  A answers  ? help"
                     }
                     Mode::Modules => {
                         " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x Mermaid export  / find  m mode  ? help"
                     }
                     _ => {
-                        " j/k move  Enter symbol graph  J/K module  e edit  gd diff  / find symbol  m mode (changed/modules/symbol)  C-l preview  ? help"
+                        " j/k move  Enter symbol graph  J/K module  e edit  gd diff  a ask  / find symbol  m mode  C-l preview  ? help"
                     }
                 },
             }
@@ -170,6 +191,8 @@ const HELP: &[(&str, &str)] = &[
     ("h / l, 0", "scroll content horizontally, reset"),
     ("s", "unified ↔ split"),
     ("e", "open in editor (parent nvim if any)"),
+    ("a", "ask the LLM about the node / group / hunk"),
+    ("A", "last answer, then the review's questions"),
     ("q", "quit (state is saved on each change)"),
     ("# Diff", ""),
     ("n / N  ({ })", "next / previous hunk"),
@@ -203,7 +226,10 @@ const HELP: &[(&str, &str)] = &[
     ("gd", "the symbol's hunks in the Diff view"),
     ("Ctrl-l, j / k", "preview pane, scroll it"),
     ("x", "write the module map as Mermaid (.git/survol/exports)"),
-    ("a", "ask the LLM about a node (step 5, not yet)"),
+    (
+        "a (answer: Tab, Enter, d, e)",
+        "ask; answer links: next, graph, diff, editor",
+    ),
 ];
 
 /// Keys of all views, then of `view`.

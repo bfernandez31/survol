@@ -2,6 +2,7 @@
 //! tree-sitter index and code graph.
 //! Everything here is UI-agnostic; the TUI and the JSON CLI build on it.
 
+pub mod ask;
 pub mod config;
 pub mod diff;
 pub mod doctor;
@@ -30,6 +31,8 @@ pub enum Error {
     Glob(#[from] globset::Error),
     #[error(transparent)]
     Llm(#[from] llm::LlmError),
+    #[error(transparent)]
+    Ask(#[from] ask::AskError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("{0}")]

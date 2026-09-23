@@ -94,6 +94,7 @@ fn run(
     while !app.quit {
         app.poll_grouping();
         app.poll_graph();
+        app.poll_ask();
         if std::mem::take(&mut app.sh.needs_clear) {
             terminal.clear()?;
         }

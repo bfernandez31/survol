@@ -11,7 +11,7 @@ use crate::group::{self, Grouping};
 use crate::index::{self, Index};
 use crate::llm::LlmProvider;
 use crate::model::{Diff, FileStatus, MergeRequest};
-use crate::{Error, Result, diff, mechanical};
+use crate::{Error, Result, ask, diff, mechanical};
 
 /// What to review.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,11 +150,7 @@ pub fn group(
     mut progress: impl FnMut(&str),
     use_cache: bool,
 ) -> Result<Grouping> {
-    let cwd = if review.worktree.is_dir() {
-        review.worktree.clone()
-    } else {
-        review.repo.dir().to_path_buf()
-    };
+    let cwd = llm_cwd(review);
     let params = group::Params {
         model: cfg.llm.group_model.clone(),
         effort: cfg.llm.group_effort.clone(),
@@ -237,6 +233,75 @@ pub fn build_graph(
 /// `.survol/instructions.md`: the team's architecture conventions, if any.
 pub fn instructions_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".survol/instructions.md")
+}
+
+/// The project's `.survol/instructions.md`, if any.
+pub fn instructions(review: &Review) -> Result<Option<String>> {
+    read_instructions(review.repo.dir())
+}
+
+/// `path` at `rev`, read from git objects; `None` if it does not exist there.
+pub fn read_file(repo: &Git, rev: &str, path: &str) -> Option<String> {
+    let bytes = repo.bytes(&["show", &format!("{rev}:{path}")]).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Where the LLM runs: the worktree once checked out, else the repository.
+pub fn llm_cwd(review: &Review) -> PathBuf {
+    if review.worktree.is_dir() {
+        review.worktree.clone()
+    } else {
+        review.repo.dir().to_path_buf()
+    }
+}
+
+/// Builds the prompt of a question about `subject`, from the review, its
+/// graph and grouping when available. Reads code from git objects.
+pub fn ask_prompt(
+    review: &Review,
+    cfg: &Config,
+    graph: Option<&Graph>,
+    grouping: Option<&Grouping>,
+    subject: &ask::Subject,
+    question: &str,
+) -> Result<ask::Prompt> {
+    let read = |rev: &str, path: &str| read_file(&review.repo, rev, path);
+    let src = ask::Sources {
+        diff: &review.diff,
+        graph,
+        grouping,
+        read: &read,
+        base_sha: &review.base_sha,
+        head_sha: &review.head_sha,
+    };
+    let instructions = instructions(review)?;
+    Ok(ask::build_prompt(
+        &src,
+        subject,
+        question,
+        instructions.as_deref(),
+        &cfg.llm.language(),
+    )?)
+}
+
+/// How to ask questions about this review: `[llm] ask_model`, answers cached
+/// under `.git/survol/cache/<head>/ask/`.
+pub fn ask_params(review: &Review, cfg: &Config, use_cache: bool) -> Result<ask::Params> {
+    Ok(ask::Params {
+        model: cfg.llm.ask_model.clone(),
+        cwd: llm_cwd(review),
+        cache_dir: Some(ask::cache_dir(&review.repo.survol_dir()?, &review.head_sha)),
+        use_cache,
+        head_sha: review.head_sha.clone(),
+    })
+}
+
+/// `.git/survol/reviews/<key>/questions.json`
+pub fn questions_path(review: &Review) -> Result<PathBuf> {
+    Ok(ask::history_path(
+        &review.repo.survol_dir()?,
+        &review.state_key,
+    ))
 }
 
 fn read_instructions(repo_root: &Path) -> Result<Option<String>> {

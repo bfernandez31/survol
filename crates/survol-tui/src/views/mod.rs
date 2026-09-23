@@ -1,5 +1,6 @@
 //! State and key handling of each view. Rendering lives in `ui/`.
 
+pub mod ask;
 pub mod diff;
 pub mod graph;
 pub mod stack;

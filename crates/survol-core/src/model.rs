@@ -61,6 +61,17 @@ pub struct LineRange {
     pub len: u32,
 }
 
+/// Side of a diff: the base (old) or the head (new) revision.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    Old,
+    #[default]
+    New,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LineKind {

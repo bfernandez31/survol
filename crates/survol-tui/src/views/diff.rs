@@ -190,6 +190,22 @@ impl DiffView {
         self.goto_top(row);
     }
 
+    /// Puts the cursor on line `line` of `hunk`, unfolding its file.
+    pub fn reveal_line(&mut self, sh: &Shared, hunk: usize, line: usize) {
+        let file = sh.review.diff.hunks[hunk].file;
+        self.unfold(sh, file);
+        let row = self.locate(Anchor {
+            file,
+            hunk: Some(hunk),
+            line: Some(line),
+        });
+        self.focus = Focus::Content;
+        self.pos.cursor = row;
+        self.pos.scroll = row.saturating_sub(self.pos.height / 3);
+        self.clamp();
+        self.sync_sidebar();
+    }
+
     pub fn reveal_file(&mut self, sh: &Shared, file: usize) {
         self.unfold(sh, file);
         self.focus = Focus::Content;
@@ -357,6 +373,20 @@ impl DiffView {
             .and_then(|a| a.hunk.map(|h| (Some(h), a.line)))
             .unwrap_or((None, None));
         sh.open_in_editor(self.current_file(), hunk, line);
+    }
+
+    /// `a`: the hunk under the cursor, for a question to the LLM.
+    pub fn ask_subject(&self, sh: &mut Shared) -> Option<(survol_core::ask::Subject, String)> {
+        let Some(h) = self.anchor().and_then(|a| a.hunk) else {
+            sh.notify("move to a hunk to ask about it (or use the Graph / Stack views)");
+            return None;
+        };
+        let d = &sh.review.diff;
+        let hunk = &d.hunks[h];
+        Some((
+            survol_core::ask::Subject::Hunk(hunk.content_hash.clone()),
+            format!("hunk {}:{}", d.files[hunk.file].path, hunk.new_range.start),
+        ))
     }
 
     /// `gs`: the Graph view of the symbol under the cursor.

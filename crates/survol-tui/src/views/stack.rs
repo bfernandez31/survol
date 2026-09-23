@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use survol_core::ask::Subject;
 use survol_core::graph::Graph;
 use survol_core::group::Grouping;
 use survol_core::model::Diff;
@@ -629,6 +630,30 @@ impl StackView {
                 Action::None
             }
         }
+    }
+
+    /// `a`: the hunk under the cursor (content), else the selected group.
+    pub fn ask_subject(&self, sh: &mut Shared) -> Option<(Subject, String)> {
+        let (Some(g), Some(node)) = (&self.grouping, self.selected()) else {
+            sh.notify("the groups are not ready yet");
+            return None;
+        };
+        let hunk = match (self.focus, node) {
+            (Focus::Content, _) => self.cursor_hunk().map(|(h, _)| h),
+            (_, Node::Hunk { hunk, .. }) => Some(hunk),
+            _ => None,
+        };
+        if let Some(h) = hunk {
+            let d = &sh.review.diff;
+            let hunk = &d.hunks[h];
+            let label = format!("hunk {}:{}", d.files[hunk.file].path, hunk.new_range.start);
+            return Some((Subject::Hunk(hunk.content_hash.clone()), label));
+        }
+        let group = &g.groups[node.group()];
+        Some((
+            Subject::Group(group.id),
+            format!("group {}. {}", node.group() + 1, group.title),
+        ))
     }
 
     fn open_in_editor(&self, sh: &mut Shared) {

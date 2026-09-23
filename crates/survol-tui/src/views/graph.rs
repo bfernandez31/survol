@@ -852,6 +852,24 @@ impl GraphView {
         Action::None
     }
 
+    /// `a`: the selected symbol, for a question to the LLM.
+    pub fn ask_subject(&self, sh: &mut Shared) -> Option<(survol_core::ask::Subject, String)> {
+        let Some(g) = &sh.graph else {
+            sh.notify("the code graph is still being built…");
+            return None;
+        };
+        match self.target(g) {
+            Some(t) => Some((
+                survol_core::ask::Subject::Symbol(g.symbol(t.sym).id.clone()),
+                g.display_name(t.sym),
+            )),
+            None => {
+                sh.notify("select a symbol to ask about");
+                None
+            }
+        }
+    }
+
     /// `gd`: the hunks of the selected symbol in the Diff view.
     fn to_diff(&self, sh: &mut Shared) -> Action {
         let Some(g) = &sh.graph else {
@@ -1064,9 +1082,6 @@ impl GraphView {
             }
             KeyCode::Char('e') => self.open_in_editor(sh),
             KeyCode::Char('x') => self.export_mermaid(sh),
-            KeyCode::Char('a') => {
-                sh.notify("asking the LLM about a node comes with step 5");
-            }
             KeyCode::Char('o') => self.toggle_fold(g),
             KeyCode::Char('0') => self.hscroll = 0,
             _ => match self.focus {
