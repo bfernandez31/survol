@@ -81,7 +81,10 @@ fn main() -> Result<()> {
     let mut app = App::new(review, state, state_path, cfg);
     app.start_grouping(true);
     let mut terminal = ratatui::init();
+    // Focus events tell when the Neovim float is shown again.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange);
     let result = run(&mut terminal, &mut app, rx);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
     ratatui::restore();
     result
 }
@@ -112,6 +115,9 @@ fn run(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
+                // Shown again (survol.nvim float, tmux pane...): repaint
+                // everything rather than trust the terminal's copy.
+                Event::Resize(..) | Event::FocusGained => app.sh.needs_clear = true,
                 _ => {}
             }
         }

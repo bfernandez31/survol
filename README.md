@@ -17,7 +17,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 | 1 | Diff view on a real MR, persistent review state | ✅ |
 | 2 | Stack view (LLM grouping) | ✅ (to validate on a real MR) |
 | 3 | Graph (tree-sitter) | engine ✅, TUI view ✅ (framework rules in progress) |
-| 4 | Neovim integration | minimal plugin |
+| 4 | Neovim integration | ✅ |
 | 5 | Questions and GitLab comments | — |
 
 ## Install
@@ -119,13 +119,38 @@ that changed come back as unreviewed.
 
 ### Neovim
 
+survol.nvim (Neovim ≥ 0.10) runs survol in a floating terminal that stays
+alive while you read code, like lazygit.nvim.
+
 ```lua
 -- lazy.nvim
-{ dir = "path/to/survol/nvim", config = function() require("survol").setup() end }
+{
+  dir = "path/to/survol/nvim",
+  cmd = { "Survol", "SurvolToggle" },
+  keys = { { "<leader>sv", "<cmd>SurvolToggle<cr>", desc = "survol" } },
+  opts = {
+    -- cmd = "survol", args = { "--no-llm" },
+    -- width = 0.95, height = 0.92, border = "rounded",
+    -- open_mode = "edit",   -- "edit" (window survol was opened from), "tab", "split", "vsplit"
+    -- toggle_key = "<C-g>", -- also hides the float from inside the TUI
+  },
+}
 ```
 
-`:Survol [mr]` opens survol in a floating terminal; `e` opens files in that Neovim.
-Outside Neovim, `e` runs `$VISUAL` / `$EDITOR`.
+| Command | |
+|---|---|
+| `:Survol [mr\|url\|base..head] [--no-llm] [--lang fr]` | Shows the running review, or starts one (a different target restarts it). Completes flags and branches. |
+| `:SurvolToggle` | Hides / shows the float; survol keeps running. |
+| `:SurvolBack` | Back to the review, where you left it. |
+| `:SurvolClose` | Stops survol. |
+| `:checkhealth survol` | Binary, version, RPC socket. |
+
+The loop: `e` in the TUI calls `require("survol").open_file(path, line, col)` in
+the parent Neovim (`nvim --server $NVIM --remote-expr`); the float is hidden,
+not closed, and the file opens at the line with your LSP and keymaps.
+`:SurvolBack` (or your toggle key) shows the same TUI at the same position.
+Without the plugin loaded, survol falls back to `:tabedit +line`. Outside
+Neovim, `e` suspends the TUI and runs `$VISUAL` / `$EDITOR`.
 
 ## Develop
 
@@ -138,6 +163,7 @@ survol-cli graph main..HEAD | jq '.symbols[] | {name, callers: [.callers[] | .na
 survol-cli graph main..HEAD --symbol OwnerService.find   # one symbol, changed or not
 survol-cli graph main..HEAD --modules                    # package / directory dependencies
 survol-cli graph main..HEAD --mermaid                    # the same, as a Mermaid flowchart
+nvim --headless -u NONE -i NONE -c "luafile nvim/tests/survol_spec.lua"   # survol.nvim tests
 ```
 
 Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes,
