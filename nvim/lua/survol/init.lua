@@ -262,7 +262,7 @@ function M.open_file(path, line, col, mode)
   return "ok"
 end
 
-local flags = { "--no-llm", "--lang", "--repo", "-C", "--help", "--version" }
+local flags = { "--no-llm", "--no-lsp", "--lang", "--repo", "-C", "--help", "--version" }
 
 --- Completion for `:Survol`: flags, `--lang` values, and branches for ranges.
 function M.complete(arglead, cmdline)
