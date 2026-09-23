@@ -51,6 +51,15 @@ Lire le code modifié isolément donne souvent l'impression que tout est correct
 | Fournisseur LLM | **CLI Claude Code uniquement** (`claude -p`) en v1 | Seul fournisseur autorisé. L'authentification est déléguée au CLI, `survol` ne stocke aucune clé. L'abstraction fournisseur reste en place pour plus tard. |
 | GitLab | **Instance auto-hébergée** | `GITLAB_HOST` obligatoire dans la config, certificats d'entreprise (CA personnalisée) à supporter, pas d'URL gitlab.com codée en dur. |
 | Nom | **survol** | Nom français assumé, à la manière de Vue : court, sans accent, sans sens gênant en anglais, et porteur de l'idée (vue d'ensemble puis descente dans le détail). Accroche anglaise : *a bird's-eye view of large pull requests*. Homonymes hors domaine (appli de notes IA, appli de vol). Écartés : `revu`, `vigie` (même créneau), `trame`, `sextant`, `gestalt`, `grasp` (pris ou peu parlants), `diffmap`, `difflens`, `diffsense`, `diffscope`, `changemap` (pris dans la review / l'analyse d'impact, ou peu appréciés). |
+| Accès git | **Binaire `git`** (pas `git2` / `gix`) | Comportement identique à la ligne de commande : identifiants, SSH, `refs/merge-requests/*`, `diff -M`. Pas de libgit2 à compiler. |
+| Mode local | `survol base..head` en plus des MR | Diff depuis la merge-base comme GitLab. Permet de tester et d'utiliser l'outil sans GitLab. |
+| État « relu » | Clé = `content_hash` du hunk (fichier + lignes, sans numéros), stocké dans `.git/survol/reviews/<mr-iid>/state.json` | Un nouveau commit ne remet « à relire » que les hunks réellement modifiés, sans calcul de correspondance. |
+| Ordre des fichiers | En arbre : fichiers d'un répertoire, puis ses sous-répertoires | Le tri git par chemin complet éclate les répertoires dans la sidebar. |
+| Coloration (étape 1) | `syntect` + `two-face` (TS, Kotlin…), thème `ansi` | Suit la palette du terminal (clair ou sombre). tree-sitter prendra le relais avec l'index (étape 3). |
+| TLS GitLab | `reqwest` + rustls avec le vérificateur de la plateforme, `ca_cert` ajouté au magasin système | La CA d'entreprise installée dans le trousseau fonctionne sans configuration. |
+| Jeton GitLab | `GITLAB_TOKEN`, sinon `glab config get token --host <host>` | Réutilise glab sans parser son fichier (ni le trousseau). |
+| Worktree | Créé en arrière-plan, la vue Diff est utilisable tout de suite | Le diff ne dépend pas du checkout. |
+| Vue Diff | Réécrite en s'inspirant de tuicr, pas de fork | Voir §9. |
 
 ## 4. Les trois vues
 
@@ -244,11 +253,11 @@ Invariant clé : **chaque hunk appartient à exactement un groupe** (le groupe �
 
 Chaque étape doit produire un outil utilisable sur une vraie MR.
 
-### Étape 0 — Squelette
+### Étape 0 — Squelette ✅
 - Workspace Cargo, CI (fmt, clippy, tests), config (`~/.config/survol/config.toml` + `.survol/` dans le projet).
 - **Critère** : `survol --help` et `survol-cli doctor` (vérifie git, glab ou token, nvim, CLI LLM).
 
-### Étape 1 — Vue Diff sur une vraie MR
+### Étape 1 — Vue Diff sur une vraie MR ✅ (validée sur une plage locale de 869 fichiers : affichage en ~1 s ; reste à valider sur une vraie MR GitLab)
 - Fetch de la MR, worktree, diff local, TUI diff (flux continu + sidebar, raccourcis vim), état « relu » persistant.
 - **Critère** : ouvrir une MR de plus de 500 fichiers en moins de 5 s (hors fetch réseau) et naviguer de façon fluide.
 
@@ -287,7 +296,6 @@ Chaque étape doit produire un outil utilisable sur une vraie MR.
 Tranchées : langages (Java / Kotlin Spring, puis TS / JS avec **Angular**), LLM (CLI Claude Code), GitLab (auto-hébergé), TUI (ratatui), nom (`survol`). Voir §3.
 
 1. **Version de l'instance GitLab** auto-hébergée (pour les brouillons de review et les endpoints disponibles).
-2. Base de la vue Diff : **forker tuicr** ou réécrire en s'en inspirant ? Recommandation : commencer en s'inspirant de tuicr, et le forker seulement si ça fait vraiment gagner du temps.
 
 ## 10. Pour démarrer avec Claude Code
 
