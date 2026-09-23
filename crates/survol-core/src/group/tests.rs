@@ -469,3 +469,32 @@ fn fallback_is_not_cached() {
     assert_eq!(first.source, Source::Fallback);
     assert!(!cache_path(&g.survol_dir().unwrap(), &r.head_sha).exists());
 }
+
+#[test]
+fn disabled_llm_groups_by_directory_without_calling_it() {
+    use crate::config::Config;
+    use crate::git::testutil::*;
+    use crate::review::{self, Target};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let g = repo(tmp.path());
+    commit(&g, &[("src/a.rs", "1\n"), ("Cargo.lock", "1\n")], "base");
+    commit(&g, &[("src/a.rs", "2\n"), ("Cargo.lock", "2\n")], "head");
+    let r = review::open(
+        &g,
+        &Config::default(),
+        &Target::parse(Some("HEAD~1..")).unwrap(),
+        |_| {},
+    )
+    .unwrap();
+    let mut cfg = Config::default();
+    cfg.llm.enabled = false;
+    let llm = Fake::scripted(&["unused"]);
+    let grouping = review::group(&r, &cfg, &llm, |_| {}, true).unwrap();
+    assert_eq!(llm.calls(), 0);
+    assert_eq!(grouping.source, Source::Fallback);
+    assert!(grouping.warnings.is_empty());
+    assert_invariants(&grouping, &r.diff);
+    assert!(grouping.groups.last().unwrap().mechanical);
+    assert!(!cache_path(&g.survol_dir().unwrap(), &r.head_sha).exists());
+}

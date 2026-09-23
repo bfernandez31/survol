@@ -19,3 +19,6 @@ survol-core = { version = "0.1.0", path = "../survol-core" }
 syntect = "5.3.0"
 two-face = "0.5.2"
 unicode-width = "0.2.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"

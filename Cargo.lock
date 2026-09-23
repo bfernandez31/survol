@@ -2449,6 +2449,7 @@ dependencies = [
  "ratatui",
  "survol-core",
  "syntect",
+ "tempfile",
  "two-face",
  "unicode-width",
 ]

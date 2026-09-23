@@ -62,6 +62,9 @@ pub struct ReviewConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
+    /// `false`: never call the LLM (privacy, offline); the Stack view groups
+    /// by directory.
+    pub enabled: bool,
     pub command: String,
     /// Fast model used to group hunks (`None`: the CLI's default).
     pub group_model: Option<String>,
@@ -81,6 +84,7 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             command: "claude".into(),
             group_model: None,
             group_effort: Some("low".into()),
@@ -221,6 +225,7 @@ mod tests {
         assert!(dir.is_absolute(), "{dir:?}");
         assert!(dir.ends_with(".claude-pro"));
         assert_eq!(cfg.llm.max_prompt_chars, 150_000);
+        assert!(cfg.llm.enabled);
         assert_eq!(expand_home(Path::new("/abs/~x")), Path::new("/abs/~x"));
     }
 

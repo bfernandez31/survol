@@ -175,6 +175,21 @@ pub fn build(
     llm: &dyn LlmProvider,
     progress: &mut dyn FnMut(&str),
 ) -> Grouping {
+    build_with(diff, params, Some(llm), progress)
+}
+
+/// Groups the hunks of `diff` without LLM: mechanical group plus grouping by
+/// directory (source [`Source::Fallback`], no warning).
+pub fn build_offline(diff: &Diff, params: &Params) -> Grouping {
+    build_with(diff, params, None, &mut |_| {})
+}
+
+fn build_with(
+    diff: &Diff,
+    params: &Params,
+    llm: Option<&dyn LlmProvider>,
+    progress: &mut dyn FnMut(&str),
+) -> Grouping {
     let mut mech: BTreeMap<Kind, Vec<usize>> = BTreeMap::new();
     let mut rest = Vec::new();
     for h in &diff.hunks {
@@ -194,6 +209,8 @@ pub fn build(
     };
     let (drafts, source) = if rest.is_empty() {
         (Vec::new(), Source::Mechanical)
+    } else if run.llm.is_none() {
+        (fallback::by_directory(diff, &rest), Source::Fallback)
     } else {
         run.group_all(&rest, progress)
     };
@@ -289,7 +306,8 @@ fn capitalize(s: &str) -> String {
 struct Run<'a> {
     diff: &'a Diff,
     params: &'a Params,
-    llm: &'a dyn LlmProvider,
+    /// `None`: LLM disabled, only [`build_offline`] runs.
+    llm: Option<&'a dyn LlmProvider>,
     calls: AtomicUsize,
     warnings: Mutex<Vec<String>>,
 }
@@ -301,7 +319,8 @@ impl Run<'_> {
 
     fn complete(&self, prompt: String) -> Result<String, crate::llm::LlmError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.llm.complete(&LlmRequest {
+        let llm = self.llm.expect("the LLM is only called when enabled");
+        llm.complete(&LlmRequest {
             prompt,
             model: self.params.model.clone(),
             effort: self.params.effort.clone(),

@@ -15,7 +15,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 |---|---|---|
 | 0 | Skeleton, config, `survol-cli doctor` | ✅ |
 | 1 | Diff view on a real MR, persistent review state | ✅ |
-| 2 | Stack view (LLM grouping) | engine ✅ (`survol-cli group`), UI to do |
+| 2 | Stack view (LLM grouping) | ✅ (to validate on a real MR) |
 | 3 | Graph (tree-sitter) | — |
 | 4 | Neovim integration | minimal plugin |
 | 5 | Questions and GitLab comments | — |
@@ -43,6 +43,7 @@ remote = "origin"
 mechanical_globs = ["**/openapi/generated/**"]  # on top of the built-in lockfile/generated globs
 
 [llm]
+# enabled = false                 # never call the LLM (same as --no-llm): group by directory
 command = "claude"
 group_model = "sonnet"            # model used to group hunks (default: the CLI's default)
 # group_effort = "low"            # reasoning effort for grouping (default low: much faster)
@@ -68,15 +69,28 @@ survol              # MR of the current branch
 survol 123          # MR !123 of this repo's project
 survol https://gitlab.corp.example/group/app/-/merge_requests/123
 survol main..feat   # local range, diffed from the merge base
+survol --no-llm 123 # never call the LLM: the Stack view groups by directory
 ```
 
 The MR head is fetched from `refs/merge-requests/<iid>/head` and checked out in a
 dedicated worktree under `.git/survol/worktrees/`, so your working branch is never
 touched. Review state lives in `.git/survol/reviews/`.
 
-Press `?` in the UI for all keys. The essentials: `j/k`, `n/N` hunk, `J/K` file,
-`space` mark hunk reviewed, `r` mark file reviewed, `u` next unreviewed, `s` split
-view, `/` filter files, `e` open in editor.
+Two views, `Tab` / `Shift-Tab` (or `1` / `2`) to switch:
+
+- **Diff**: every file in one stream. `j/k`, `n/N` hunk, `J/K` file, `space` mark
+  hunk reviewed, `r` mark file reviewed, `u` next unreviewed, `/` filter files.
+- **Stack**: hunks grouped by functional capability, then by layer, in reading
+  order, with a short functional summary per group. Grouping runs in the
+  background when survol opens (the Diff view is usable meanwhile) and is cached.
+  `space` validates the selected group / layer / hunk and moves on, `u` next
+  unreviewed group, `J/K` group, `h/l` fold / unfold, `Enter` or `gd` shows the
+  hunk in the Diff view, `w` grouping warnings, `R` regroups (new LLM call, asks first).
+  The mechanical group (lockfiles, generated code, whitespace, pure renames) comes
+  last, folded, and is validated with one `space`.
+
+Everywhere: `Ctrl-h` / `Ctrl-l` focus list / content, `B` hide the list, `s` split
+view, `e` open in editor, `?` all keys.
 
 "Reviewed" is keyed by hunk content: when new commits are pushed, only the hunks
 that changed come back as unreviewed.
@@ -100,5 +114,6 @@ survol-cli diff main..HEAD | jq '.files | length'
 survol-cli group main..HEAD | jq '.groups[] | {title, hunks: (.hunk_ids | length)}'
 ```
 
-Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes.
+Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes,
+`--no-llm` groups by directory without calling the LLM.
 `SURVOL_LLM_LOG=<dir>` keeps every prompt and raw LLM answer for debugging.

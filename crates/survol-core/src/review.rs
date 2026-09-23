@@ -139,7 +139,8 @@ pub fn open(
 /// Groups the review's hunks for the Stack view. With `use_cache`, a grouping
 /// cached for the same hunks, prompts, model and instructions is returned
 /// without calling the LLM. Directory fallbacks are not cached, so that the
-/// next run tries the LLM again.
+/// next run tries the LLM again. With `[llm] enabled = false`, `llm` is never
+/// called: hunks are grouped by directory and nothing is cached.
 pub fn group(
     review: &Review,
     cfg: &Config,
@@ -159,6 +160,10 @@ pub fn group(
         instructions: read_instructions(review.repo.dir())?,
         cwd,
     };
+    if !cfg.llm.enabled {
+        progress("LLM disabled: grouping by directory");
+        return Ok(group::build_offline(&review.diff, &params));
+    }
     let path = group::cache_path(&review.repo.survol_dir()?, &review.head_sha);
     if use_cache && let Some(g) = group::load_cache(&path, &group::cache_key(&review.diff, &params))
     {

@@ -71,6 +71,10 @@ Lire le code modifié isolément donne souvent l'impression que tout est correct
 | Effort de raisonnement | `[llm] group_effort = "low"` par défaut (`--effort`) | Mesuré sur whisper.cpp (683 hunks, sonnet) : effort par défaut ≈ 90 % de tokens de réflexion, ~5 min et ~0,65 $ par appel ; `low` : ~25 s, ~0,35 $, groupes un peu plus gros. `medium` possible pour des groupes plus fins. |
 | Debug LLM | `SURVOL_LLM_LOG=<dir>` garde chaque prompt et réponse brute | Diagnostic du coût, de la latence et des prompts. |
 | Validation d'un groupe | Pas d'état dédié : `Group::set_reviewed` marque ses hunks (et fichiers sans hunk) dans le `ReviewState` commun | Les trois vues partagent le même état « relu ». |
+| Navigation entre vues | `Tab` / `Shift-Tab` et `1` / `2` changent de vue ; `Ctrl-h` / `Ctrl-l` changent de panneau (liste ↔ contenu) | `Tab` est réservé aux vues (3 à terme) ; `Ctrl-h/l` comme les fenêtres Neovim. |
+| Regroupement dans la TUI | Lancé en arrière-plan à l'ouverture, cache d'abord ; `R` régénère sans cache après confirmation y/n | La vue Diff reste utilisable pendant l'appel LLM ; pas d'appel payant par erreur. |
+| Mode sans LLM | `--no-llm` ou `[llm] enabled = false` : groupe mécanique + regroupement par répertoire, sans cache | Confidentialité, hors ligne, tests. |
+| `space` dans la vue Stack | Valide tout le nœud (groupe, couche, hunk). Groupe terminé → replié, passage au groupe suivant non relu ; sinon nœud suivant non relu du même groupe | Valider un groupe d'un coup, sans quitter un groupe à moitié relu. |
 | Langue des résumés | Anglais (prompts en anglais) | À rediscuter si le relecteur préfère le français (option de config possible). |
 
 ## 4. Les trois vues
@@ -273,9 +277,10 @@ Chaque étape doit produire un outil utilisable sur une vraie MR.
 - Fetch de la MR, worktree, diff local, TUI diff (flux continu + sidebar, raccourcis vim), état « relu » persistant.
 - **Critère** : ouvrir une MR de plus de 500 fichiers en moins de 5 s (hors fetch réseau) et naviguer de façon fluide.
 
-### Étape 2 — Vue Stack (moteur ✅, TUI à faire)
+### Étape 2 — Vue Stack ✅ (reste à valider sur une vraie MR GitLab)
 - Tri mécanique déterministe, regroupement LLM, validation des invariants, explications par groupe, validation par groupe.
-- Moteur fait : `llm` (trait `LlmProvider`, `ClaudeCli`), `mechanical` (généré, blancs, fichiers sans hunk), `group` (compression, découpage par module + fusion, validation, nouvelle tentative, repli, ordre provisoire, cache), `review::group`, `survol-cli group [--no-cache]`. Smoke test sur whisper.cpp `HEAD~15..HEAD` (104 fichiers, 683 hunks) : 16 groupes pertinents, 100 % des hunks attribués après une nouvelle tentative, ~60 s, réouverture depuis le cache en 0,25 s. Reste : la vue Stack dans la TUI, puis validation sur une vraie MR.
+- Moteur : `llm` (trait `LlmProvider`, `ClaudeCli`), `mechanical` (généré, blancs, fichiers sans hunk), `group` (compression, découpage par module + fusion, validation, nouvelle tentative, repli, ordre provisoire, cache), `review::group`, `survol-cli group [--no-cache] [--no-llm]`. Smoke test sur whisper.cpp `HEAD~15..HEAD` (104 fichiers, 683 hunks) : 16 groupes pertinents, 100 % des hunks attribués après une nouvelle tentative, ~60 s, réouverture depuis le cache en 0,25 s.
+- TUI : vues Diff et Stack (`Tab` / `1` `2`), regroupement en arrière-plan au lancement, arbre groupes → couches → hunks à gauche, résumé + diff du nœud à droite (même rendu que la vue Diff), validation par `space`, saut vers la vue Diff (`Enter` / `gd`), `R` pour régénérer (confirmation), `--no-llm`. Testé sur whisper.cpp : 14 groupes LLM en ~30 s, réouverture instantanée depuis le cache.
 - **Critère** : sur une MR réelle, 100 % des hunks sont attribués, les groupes sont jugés pertinents par le relecteur, et tout est mis en cache (réouverture instantanée).
 
 ### Étape 3 — Graphe

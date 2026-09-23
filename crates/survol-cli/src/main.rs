@@ -53,6 +53,9 @@ enum Cmd {
         /// Ignore the cached grouping and call the LLM again.
         #[arg(long)]
         no_cache: bool,
+        /// Do not call the LLM: group by directory (same as `[llm] enabled = false`).
+        #[arg(long)]
+        no_llm: bool,
     },
 }
 
@@ -132,7 +135,13 @@ fn run() -> Result<ExitCode> {
             });
             println!("{}", serde_json::to_string(&out)?);
         }
-        Cmd::Group { target, no_cache } => {
+        Cmd::Group {
+            target,
+            no_cache,
+            no_llm,
+        } => {
+            let mut cfg = cfg;
+            cfg.llm.enabled &= !no_llm;
             let repo = repo.context("not inside a git repository")?;
             let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
             let llm = ClaudeCli::from_config(&cfg.llm);

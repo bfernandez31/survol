@@ -4,6 +4,7 @@ mod app;
 mod editor;
 mod highlight;
 mod ui;
+mod views;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -34,6 +35,10 @@ struct Cli {
     /// Repository to work in (defaults to the current directory).
     #[arg(short = 'C', long)]
     repo: Option<PathBuf>,
+    /// Never call the LLM: the Stack view groups by directory
+    /// (same as `[llm] enabled = false`).
+    #[arg(long)]
+    no_llm: bool,
 }
 
 fn main() -> Result<()> {
@@ -45,7 +50,8 @@ fn main() -> Result<()> {
     let Some(repo) = Git::discover(&cwd) else {
         bail!("{} is not inside a git repository", cwd.display());
     };
-    let cfg = Config::load(Some(repo.dir()))?;
+    let mut cfg = Config::load(Some(repo.dir()))?;
+    cfg.llm.enabled &= !cli.no_llm;
     let target = Target::parse(cli.target.as_deref())?;
 
     let review = review::open(&repo, &cfg, &target, |m| eprintln!("· {m}"))?;
@@ -67,7 +73,8 @@ fn main() -> Result<()> {
         });
     }
 
-    let mut app = App::new(review, state, state_path);
+    let mut app = App::new(review, state, state_path, cfg);
+    app.start_grouping(true);
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app, rx);
     ratatui::restore();
@@ -80,15 +87,16 @@ fn run(
     worktree: mpsc::Receiver<Result<(), String>>,
 ) -> Result<()> {
     while !app.quit {
-        if std::mem::take(&mut app.needs_clear) {
+        app.poll_grouping();
+        if std::mem::take(&mut app.sh.needs_clear) {
             terminal.clear()?;
         }
         terminal.draw(|f| ui::render(f, app))?;
 
         if let Ok(res) = worktree.try_recv() {
             match res {
-                Ok(()) => app.worktree_ready = true,
-                Err(e) => app.notify(format!("worktree checkout failed: {e}")),
+                Ok(()) => app.sh.worktree_ready = true,
+                Err(e) => app.sh.notify(format!("worktree checkout failed: {e}")),
             }
         }
         if event::poll(Duration::from_millis(250))? {
