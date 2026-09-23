@@ -227,7 +227,7 @@ test("job exit closes the float and forgets the job", function()
 end)
 
 test("completion", function()
-  eq(survol.complete("--n", "Survol --n"), { "--no-llm" })
+  eq(survol.complete("--n", "Survol --n"), { "--no-llm", "--no-lsp" })
   assert(vim.tbl_contains(survol.complete("f", "Survol --lang f"), "fr"))
 end)
 
