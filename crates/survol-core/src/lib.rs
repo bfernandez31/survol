@@ -1,4 +1,4 @@
-//! survol engine: forge access, git, diff parsing, review state.
+//! survol engine: forge access, git, diff parsing, review state, LLM grouping.
 //! Everything here is UI-agnostic; the TUI and the JSON CLI build on it.
 
 pub mod config;
@@ -6,6 +6,8 @@ pub mod diff;
 pub mod doctor;
 pub mod forge;
 pub mod git;
+pub mod group;
+pub mod llm;
 pub mod mechanical;
 pub mod model;
 pub mod review;
@@ -23,6 +25,8 @@ pub enum Error {
     Diff(#[from] diff::ParseError),
     #[error("invalid mechanical glob: {0}")]
     Glob(#[from] globset::Error),
+    #[error(transparent)]
+    Llm(#[from] llm::LlmError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("{0}")]

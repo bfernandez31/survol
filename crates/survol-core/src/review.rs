@@ -1,11 +1,13 @@
 //! Opening a review: resolve the target, fetch, diff, and locate the worktree.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::forge::gitlab::Gitlab;
 use crate::forge::{Forge, ForgeError, MrRef, project_from_remote};
 use crate::git::Git;
+use crate::group::{self, Grouping};
+use crate::llm::LlmProvider;
 use crate::model::{Diff, MergeRequest};
 use crate::{Error, Result, diff, mechanical};
 
@@ -132,6 +134,55 @@ pub fn open(
         state_key,
         repo: repo.clone(),
     })
+}
+
+/// Groups the review's hunks for the Stack view. With `use_cache`, a grouping
+/// cached for the same hunks, prompts, model and instructions is returned
+/// without calling the LLM. Directory fallbacks are not cached, so that the
+/// next run tries the LLM again.
+pub fn group(
+    review: &Review,
+    cfg: &Config,
+    llm: &dyn LlmProvider,
+    mut progress: impl FnMut(&str),
+    use_cache: bool,
+) -> Result<Grouping> {
+    let cwd = if review.worktree.is_dir() {
+        review.worktree.clone()
+    } else {
+        review.repo.dir().to_path_buf()
+    };
+    let params = group::Params {
+        model: cfg.llm.group_model.clone(),
+        effort: cfg.llm.group_effort.clone(),
+        max_prompt_chars: cfg.llm.max_prompt_chars,
+        instructions: read_instructions(review.repo.dir())?,
+        cwd,
+    };
+    let path = group::cache_path(&review.repo.survol_dir()?, &review.head_sha);
+    if use_cache && let Some(g) = group::load_cache(&path, &group::cache_key(&review.diff, &params))
+    {
+        progress("groups loaded from cache");
+        return Ok(g);
+    }
+    let g = group::build(&review.diff, &params, llm, &mut progress);
+    if g.source != group::Source::Fallback {
+        group::save_cache(&path, &g)?;
+    }
+    Ok(g)
+}
+
+/// `.survol/instructions.md`: the team's architecture conventions, if any.
+pub fn instructions_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".survol/instructions.md")
+}
+
+fn read_instructions(repo_root: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(instructions_path(repo_root)) {
+        Ok(s) => Ok(Some(s).filter(|s| !s.trim().is_empty())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn resolve_mr(

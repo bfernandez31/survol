@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -9,6 +10,7 @@ use serde_json::json;
 use survol_core::config::Config;
 use survol_core::doctor::{self, Status};
 use survol_core::git::Git;
+use survol_core::llm::ClaudeCli;
 use survol_core::review::{self, Target};
 
 #[derive(Parser)]
@@ -43,6 +45,14 @@ enum Cmd {
     Diff {
         /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
         target: Option<String>,
+    },
+    /// Group the hunks by functional capability and layer (Stack view), as JSON.
+    Group {
+        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        target: Option<String>,
+        /// Ignore the cached grouping and call the LLM again.
+        #[arg(long)]
+        no_cache: bool,
     },
 }
 
@@ -121,6 +131,24 @@ fn run() -> Result<ExitCode> {
                 "hunks": r.diff.hunks,
             });
             println!("{}", serde_json::to_string(&out)?);
+        }
+        Cmd::Group { target, no_cache } => {
+            let repo = repo.context("not inside a git repository")?;
+            let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
+            let llm = ClaudeCli::from_config(&cfg.llm);
+            let started = Instant::now();
+            let grouping = review::group(&r, &cfg, &llm, progress, !no_cache)?;
+            progress(&format!(
+                "{} groups ({:?}, {} LLM call(s), {:.1}s)",
+                grouping.groups.len(),
+                grouping.source,
+                grouping.llm_calls,
+                started.elapsed().as_secs_f64()
+            ));
+            for w in &grouping.warnings {
+                eprintln!("warning: {w}");
+            }
+            println!("{}", serde_json::to_string_pretty(&grouping)?);
         }
     }
     Ok(ExitCode::SUCCESS)

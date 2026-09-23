@@ -63,8 +63,19 @@ pub struct ReviewConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     pub command: String,
+    /// Fast model used to group hunks (`None`: the CLI's default).
     pub group_model: Option<String>,
+    /// Reasoning effort for grouping (`low`, `medium`, `high`...). Low keeps
+    /// big groupings fast: extended thinking dominated latency and cost.
+    pub group_effort: Option<String>,
+    /// Stronger model used to answer questions.
     pub ask_model: Option<String>,
+    /// Claude Code configuration directory (`CLAUDE_CONFIG_DIR`), to use
+    /// another account than the default one. A leading `~` is expanded.
+    pub config_dir: Option<PathBuf>,
+    /// Maximum prompt size in characters, a proxy for the token budget.
+    /// Bigger reviews are grouped by module, then merged.
+    pub max_prompt_chars: usize,
 }
 
 impl Default for LlmConfig {
@@ -72,8 +83,30 @@ impl Default for LlmConfig {
         Self {
             command: "claude".into(),
             group_model: None,
+            group_effort: Some("low".into()),
             ask_model: None,
+            config_dir: None,
+            max_prompt_chars: 150_000,
         }
+    }
+}
+
+impl LlmConfig {
+    /// [`Self::config_dir`] with `~` expanded.
+    pub fn config_dir(&self) -> Option<PathBuf> {
+        self.config_dir.as_deref().map(expand_home)
+    }
+}
+
+/// Expands a leading `~` to the home directory.
+pub fn expand_home(path: &Path) -> PathBuf {
+    let home = || directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+    match path.strip_prefix("~") {
+        Ok(rest) => match home() {
+            Some(h) => h.join(rest),
+            None => path.to_path_buf(),
+        },
+        Err(_) => path.to_path_buf(),
     }
 }
 
@@ -179,6 +212,16 @@ mod tests {
 
         cfg.apply_env(|k| (k == "GITLAB_HOST").then(|| "env.example".to_string()));
         assert_eq!(cfg.gitlab.host.as_deref(), Some("env.example"));
+    }
+
+    #[test]
+    fn expands_home_in_llm_config_dir() {
+        let cfg: Config = toml::from_str("[llm]\nconfig_dir = \"~/.claude-pro\"\n").unwrap();
+        let dir = cfg.llm.config_dir().unwrap();
+        assert!(dir.is_absolute(), "{dir:?}");
+        assert!(dir.ends_with(".claude-pro"));
+        assert_eq!(cfg.llm.max_prompt_chars, 150_000);
+        assert_eq!(expand_home(Path::new("/abs/~x")), Path::new("/abs/~x"));
     }
 
     #[test]

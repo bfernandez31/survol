@@ -15,7 +15,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 |---|---|---|
 | 0 | Skeleton, config, `survol-cli doctor` | ✅ |
 | 1 | Diff view on a real MR, persistent review state | ✅ |
-| 2 | Stack view (LLM grouping) | — |
+| 2 | Stack view (LLM grouping) | engine ✅ (`survol-cli group`), UI to do |
 | 3 | Graph (tree-sitter) | — |
 | 4 | Neovim integration | minimal plugin |
 | 5 | Questions and GitLab comments | — |
@@ -44,7 +44,15 @@ mechanical_globs = ["**/openapi/generated/**"]  # on top of the built-in lockfil
 
 [llm]
 command = "claude"
+group_model = "sonnet"            # model used to group hunks (default: the CLI's default)
+# group_effort = "low"            # reasoning effort for grouping (default low: much faster)
+# ask_model = "opus"              # model used to answer questions
+# config_dir = "~/.claude-work"   # CLAUDE_CONFIG_DIR for the CLI: use another Claude account
+# max_prompt_chars = 150000       # bigger reviews are grouped module by module, then merged
 ```
+
+Project-specific architecture conventions can be written in `.survol/instructions.md`;
+they are added to the grouping prompt.
 
 The token comes from `GITLAB_TOKEN`, or from glab's config for that host
 (`glab auth login --hostname <host>`). Check everything with:
@@ -89,4 +97,8 @@ Outside Neovim, `e` runs `$VISUAL` / `$EDITOR`.
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 survol-cli diff main..HEAD | jq '.files | length'
+survol-cli group main..HEAD | jq '.groups[] | {title, hunks: (.hunk_ids | length)}'
 ```
+
+Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes.
+`SURVOL_LLM_LOG=<dir>` keeps every prompt and raw LLM answer for debugging.

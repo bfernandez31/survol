@@ -5,10 +5,11 @@ use std::process::Command;
 
 use serde::Serialize;
 
-use crate::config::Config;
+use crate::config::{Config, LlmConfig};
 use crate::forge::Forge;
 use crate::forge::gitlab::{self, Gitlab};
 use crate::git::Git;
+use crate::llm::claude_command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,14 +39,7 @@ fn check(name: &'static str, status: Status, detail: impl Into<String>) -> Check
 /// First line of `cmd args` stdout, if it runs successfully.
 fn probe(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string()
-    })
+    out.status.success().then(|| first_line(&out.stdout))
 }
 
 pub fn run(cwd: &Path, cfg: &Config) -> Vec<Check> {
@@ -83,7 +77,7 @@ pub fn run(cwd: &Path, cfg: &Config) -> Vec<Check> {
         None => check("nvim", Status::Warn, "not installed: files open in $EDITOR"),
     });
 
-    checks.push(llm_check(&cfg.llm.command));
+    checks.push(llm_check(cwd, &cfg.llm));
     checks
 }
 
@@ -130,31 +124,98 @@ fn gitlab_checks(cfg: &Config) -> Vec<Check> {
     checks
 }
 
-fn llm_check(command: &str) -> Check {
-    let Some(version) = probe(command, &["--version"]) else {
+fn llm_check(cwd: &Path, cfg: &LlmConfig) -> Check {
+    let command = cfg.command.as_str();
+    let config_dir = cfg.config_dir();
+    let run = |args: &[&str]| {
+        claude_command(command, config_dir.as_deref(), cwd)
+            .args(args)
+            .output()
+            .ok()
+    };
+    let Some(version) = run(&["--version"])
+        .filter(|o| o.status.success())
+        .map(|o| first_line(&o.stdout))
+    else {
         return check(
             "llm",
             Status::Warn,
             format!("`{command}` not found: no grouping nor questions"),
         );
     };
-    let logged_in = Command::new(command)
-        .args(["auth", "status"])
-        .output()
-        .ok()
-        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-        .and_then(|v| v.get("loggedIn").and_then(|b| b.as_bool()));
-    match logged_in {
-        Some(true) => check(
-            "llm",
-            Status::Ok,
-            format!("{command} {version}, authenticated"),
-        ),
-        Some(false) => check(
+    let status = run(&["auth", "status"])
+        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok());
+    let dir = match &config_dir {
+        Some(d) => format!("CLAUDE_CONFIG_DIR={}", d.display()),
+        None => "default config dir".into(),
+    };
+    let Some(status) = status else {
+        return check("llm", Status::Ok, format!("{command} {version} ({dir})"));
+    };
+    if status.get("loggedIn").and_then(|b| b.as_bool()) == Some(false) {
+        let env = config_dir
+            .as_ref()
+            .map(|d| format!("CLAUDE_CONFIG_DIR={} ", d.display()))
+            .unwrap_or_default();
+        return check(
             "llm",
             Status::Warn,
-            format!("{command} {version}, not authenticated: run `{command}` and log in"),
-        ),
-        None => check("llm", Status::Ok, format!("{command} {version}")),
+            format!(
+                "{command} {version}, not authenticated ({dir}): run `{env}{command}` and log in"
+            ),
+        );
+    }
+    check(
+        "llm",
+        Status::Ok,
+        format!("{command} {version}, {} ({dir})", account(&status)),
+    )
+}
+
+/// "authenticated as <email>, <org>, <plan>" from `claude auth status` JSON,
+/// with whatever fields are present.
+fn account(status: &serde_json::Value) -> String {
+    let field = |k: &str| {
+        status
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let mut s = "authenticated".to_string();
+    if let Some(email) = field("email") {
+        s.push_str(&format!(" as {email}"));
+    }
+    let details: Vec<&str> = ["orgName", "subscriptionType", "authMethod"]
+        .iter()
+        .filter_map(|k| field(k))
+        .collect();
+    if !details.is_empty() {
+        s.push_str(&format!(" [{}]", details.join(", ")));
+    }
+    s
+}
+
+fn first_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describes_account() {
+        let v = serde_json::json!({"loggedIn": true, "email": "me@corp.example",
+            "orgName": "Corp", "subscriptionType": "team", "authMethod": "claude.ai"});
+        assert_eq!(
+            account(&v),
+            "authenticated as me@corp.example [Corp, team, claude.ai]"
+        );
+        assert_eq!(account(&serde_json::json!({})), "authenticated");
     }
 }

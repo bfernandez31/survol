@@ -60,6 +60,18 @@ Lire le code modifié isolément donne souvent l'impression que tout est correct
 | Jeton GitLab | `GITLAB_TOKEN`, sinon `glab config get token --host <host>` | Réutilise glab sans parser son fichier (ni le trousseau). |
 | Worktree | Créé en arrière-plan, la vue Diff est utilisable tout de suite | Le diff ne dépend pas du checkout. |
 | Vue Diff | Réécrite en s'inspirant de tuicr, pas de fork | Voir §9. |
+| Appel du CLI Claude | `claude -p --output-format json --tools "" --strict-mcp-config --disable-slash-commands --no-session-persistence --setting-sources "" --system-prompt …`, prompt sur stdin | Complétion pure en un tour : aucun outil, MCP, skill ni réglage utilisateur. Le LLM ne répond qu'à partir du prompt. |
+| Compte Claude | `[llm] config_dir` → `CLAUDE_CONFIG_DIR` du processus enfant (`~` développé), affiché par `doctor` avec le compte connecté | Utiliser le compte pro pour le code pro sans toucher au compte par défaut. |
+| Groupe mécanique | Hunks des fichiers `is_generated`, hunks « blancs seulement » (lignes retirées = ajoutées une fois tous les blancs supprimés), et tous les fichiers sans hunk (renommages/copies purs, binaires, modes) via `Group::file_ids` | Déterministe, sans LLM, placé en dernier. |
+| Identifiants envoyés au LLM | Index numériques des hunks (`[12]`), une ligne compressée par hunk : section `@@`, +/-, 3 premières lignes modifiées tronquées à 80 caractères, précédées d'une ligne `file` (chemin, statut, langage) | Compact (~150 caractères par hunk) ; le LLM ne répond qu'avec des ids. |
+| Budget de prompt | `[llm] max_prompt_chars` (150 000 par défaut). Au-delà : découpage par répertoire (sans couper un répertoire qui tient dans un morceau), morceaux traités en parallèle (4), puis prompt de fusion qui ne renvoie que les groupes à fusionner | Fusion simple et vérifiable en code. |
+| Échec du LLM | Réponse invalide → une nouvelle tentative avec la réponse rejetée et l'erreur (le modèle corrige au lieu de tout refaire). Puis on garde les groupes valides et on regroupe le reste par répertoire (`partial`) ; sinon tout par répertoire (`fallback`). Erreur d'appel (CLI absent, non connecté) → repli direct, sans nouvelle tentative. Chemin suivi et erreurs dans `Grouping.source` / `warnings` | Toujours 100 % des hunks attribués ; l'outil reste utilisable sans LLM. |
+| Ordre des groupes (provisoire) | Rang de la couche dominante : modèle/persistance/config/build → services/autre → api/ui/points d'entrée → tests/docs ; groupe mécanique en dernier. Tri stable (l'ordre proposé par le LLM départage). Isolé dans `group::order_groups` | Remplacé par le tri topologique à l'étape 3. |
+| Cache des groupes | `.git/survol/cache/<head_sha>/groups.json`, clé = hash des `content_hash` + classement mécanique + `PROMPT_VERSION` + modèle + budget + consignes projet. Les replis complets par répertoire ne sont pas mis en cache | Réouverture sans appel LLM ; un nouvel essai LLM au prochain lancement si le LLM était indisponible. |
+| Effort de raisonnement | `[llm] group_effort = "low"` par défaut (`--effort`) | Mesuré sur whisper.cpp (683 hunks, sonnet) : effort par défaut ≈ 90 % de tokens de réflexion, ~5 min et ~0,65 $ par appel ; `low` : ~25 s, ~0,35 $, groupes un peu plus gros. `medium` possible pour des groupes plus fins. |
+| Debug LLM | `SURVOL_LLM_LOG=<dir>` garde chaque prompt et réponse brute | Diagnostic du coût, de la latence et des prompts. |
+| Validation d'un groupe | Pas d'état dédié : `Group::set_reviewed` marque ses hunks (et fichiers sans hunk) dans le `ReviewState` commun | Les trois vues partagent le même état « relu ». |
+| Langue des résumés | Anglais (prompts en anglais) | À rediscuter si le relecteur préfère le français (option de config possible). |
 
 ## 4. Les trois vues
 
@@ -261,8 +273,9 @@ Chaque étape doit produire un outil utilisable sur une vraie MR.
 - Fetch de la MR, worktree, diff local, TUI diff (flux continu + sidebar, raccourcis vim), état « relu » persistant.
 - **Critère** : ouvrir une MR de plus de 500 fichiers en moins de 5 s (hors fetch réseau) et naviguer de façon fluide.
 
-### Étape 2 — Vue Stack
+### Étape 2 — Vue Stack (moteur ✅, TUI à faire)
 - Tri mécanique déterministe, regroupement LLM, validation des invariants, explications par groupe, validation par groupe.
+- Moteur fait : `llm` (trait `LlmProvider`, `ClaudeCli`), `mechanical` (généré, blancs, fichiers sans hunk), `group` (compression, découpage par module + fusion, validation, nouvelle tentative, repli, ordre provisoire, cache), `review::group`, `survol-cli group [--no-cache]`. Smoke test sur whisper.cpp `HEAD~15..HEAD` (104 fichiers, 683 hunks) : 16 groupes pertinents, 100 % des hunks attribués après une nouvelle tentative, ~60 s, réouverture depuis le cache en 0,25 s. Reste : la vue Stack dans la TUI, puis validation sur une vraie MR.
 - **Critère** : sur une MR réelle, 100 % des hunks sont attribués, les groupes sont jugés pertinents par le relecteur, et tout est mis en cache (réouverture instantanée).
 
 ### Étape 3 — Graphe
