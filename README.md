@@ -16,7 +16,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 | 0 | Skeleton, config, `survol-cli doctor` | ✅ |
 | 1 | Diff view on a real MR, persistent review state | ✅ |
 | 2 | Stack view (LLM grouping) | ✅ (to validate on a real MR) |
-| 3 | Graph (tree-sitter) | engine ✅, TUI view to do |
+| 3 | Graph (tree-sitter) | engine ✅, TUI view ✅ (framework rules in progress) |
 | 4 | Neovim integration | minimal plugin |
 | 5 | Questions and GitLab comments | — |
 
@@ -78,7 +78,7 @@ The MR head is fetched from `refs/merge-requests/<iid>/head` and checked out in 
 dedicated worktree under `.git/survol/worktrees/`, so your working branch is never
 touched. Review state lives in `.git/survol/reviews/`.
 
-Two views, `Tab` / `Shift-Tab` (or `1` / `2`) to switch:
+Three views, `Tab` / `Shift-Tab` (or `1` / `2` / `3`) to switch:
 
 - **Diff**: every file in one stream. `j/k`, `n/N` hunk, `J/K` file, `space` mark
   hunk reviewed, `r` mark file reviewed, `u` next unreviewed, `/` filter files.
@@ -89,10 +89,30 @@ Two views, `Tab` / `Shift-Tab` (or `1` / `2`) to switch:
   unreviewed group, `J/K` group, `h/l` fold / unfold, `Enter` or `gd` shows the
   hunk in the Diff view, `w` grouping warnings, `R` regroups (new LLM call, asks first).
   The mechanical group (lockfiles, generated code, whitespace, pure renames) comes
-  last, folded, and is validated with one `space`.
+  last, folded, and is validated with one `space`. Once the code graph is built,
+  groups are reordered along it (a group whose symbols others use comes first).
+- **Graph**: the code graph around the changes, built in the background when survol
+  opens (tree-sitter, from git objects; cached). `m` switches between:
+  - *changed symbols*, by module and file, with their callers and how many of them
+    live in files the diff does not touch (impact on untouched code);
+  - *symbol view*: a tree "Called by / Calls / Tests", then any other edge kind
+    (`uses`, `injects`, `http calls`…), each node with its `file:line`, whether it
+    is modified / in the diff / intact, the link's confidence when below 1, and
+    `via` for calls through an interface. `l` / `h` expand / collapse a node to walk
+    the same relation further (callers of callers…), `Enter` makes a node the new
+    root, `Backspace` / `Ctrl-o` goes back. The right pane previews the code at the
+    node (changed lines highlighted);
+  - *module map*: packages / directories with their dependencies in and out;
+    `Enter` lists a module's changed symbols, `x` writes the map as Mermaid to
+    `.git/survol/exports/`.
+
+  `/` finds any symbol by name, `e` opens the node's line in the editor (also in
+  unchanged files), `gd` shows the symbol's hunks in the Diff view. Test code calling
+  a symbol is listed under *Tests*, not *Called by*.
 
 Everywhere: `Ctrl-h` / `Ctrl-l` focus list / content, `B` hide the list, `s` split
-view, `e` open in editor, `?` all keys.
+view, `e` open in editor, `?` the keys of the current view. In the Diff and Stack
+views, `gs` opens the Graph view on the symbol under the cursor.
 
 "Reviewed" is keyed by hunk content: when new commits are pushed, only the hunks
 that changed come back as unreviewed.
@@ -117,6 +137,7 @@ survol-cli group main..HEAD | jq '.groups[] | {title, hunks: (.hunk_ids | length
 survol-cli graph main..HEAD | jq '.symbols[] | {name, callers: [.callers[] | .name]}'
 survol-cli graph main..HEAD --symbol OwnerService.find   # one symbol, changed or not
 survol-cli graph main..HEAD --modules                    # package / directory dependencies
+survol-cli graph main..HEAD --mermaid                    # the same, as a Mermaid flowchart
 ```
 
 Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes,

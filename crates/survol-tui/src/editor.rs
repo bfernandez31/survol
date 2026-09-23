@@ -3,7 +3,7 @@
 
 use std::io;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crossterm::execute;
 use crossterm::terminal::{
@@ -26,6 +26,10 @@ pub fn open(path: &Path, line: u32) -> io::Result<Opened> {
                 "--remote-send",
                 &remote_keys(path, line),
             ])
+            // Keep the client off the TUI's terminal.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()?;
         return if status.success() {
             Ok(Opened::Parent)

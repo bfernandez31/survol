@@ -2,15 +2,17 @@
 //! reading order. Left: the groups as a foldable tree. Right: the summary of
 //! the selected group and the diff of the selected node.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use survol_core::graph::Graph;
 use survol_core::group::Grouping;
 use survol_core::model::Diff;
 use survol_core::review_state::ReviewState;
 
 use super::{Focus, Row, Scroll, push_hunk_rows};
 use crate::app::{Action, Shared};
+use crate::views::graph::symbol_at_position;
 
 /// A line of the groups tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +174,63 @@ impl StackView {
         self.grouping = Some(g);
         self.tree = self.flatten();
         self.select_node(sh, Node::Group(first));
+    }
+
+    /// Reorders the groups along the code graph, keeping folds, the
+    /// selected node and the content scroll.
+    pub fn reorder_with_graph(&mut self, sh: &Shared, graph: &Graph) {
+        let Some(g) = &mut self.grouping else {
+            return;
+        };
+        let before: Vec<usize> = g.groups.iter().map(|gr| gr.id).collect();
+        g.order_with_graph(graph);
+        // Old index → new index, by group id (in order, should ids repeat).
+        let mut slots: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, gr) in g.groups.iter().enumerate().rev() {
+            slots.entry(gr.id).or_default().push(i);
+        }
+        let to_new: Vec<usize> = before
+            .iter()
+            .enumerate()
+            .map(|(old, id)| slots.get_mut(id).and_then(Vec::pop).unwrap_or(old))
+            .collect();
+        let mut folded = vec![false; self.folded.len()];
+        for (old, &f) in self.folded.iter().enumerate() {
+            if let Some(&n) = to_new.get(old) {
+                folded[n] = f;
+            }
+        }
+        self.folded = folded;
+        self.open_layers = self
+            .open_layers
+            .iter()
+            .map(|&(gi, li)| (to_new.get(gi).copied().unwrap_or(gi), li))
+            .collect();
+        let remap = |gi: usize| to_new.get(gi).copied().unwrap_or(gi);
+        let selected = self.selected().map(|n| match n {
+            Node::Group(gi) => Node::Group(remap(gi)),
+            Node::Layer { group, layer } => Node::Layer {
+                group: remap(group),
+                layer,
+            },
+            Node::Hunk { group, layer, hunk } => Node::Hunk {
+                group: remap(group),
+                layer,
+                hunk,
+            },
+            Node::File { group, file } => Node::File {
+                group: remap(group),
+                file,
+            },
+        });
+        self.tree = self.flatten();
+        let pos = self.pos;
+        if let Some(i) = selected.and_then(|n| self.tree.iter().position(|x| *x == n)) {
+            self.sel = i;
+        }
+        self.build_content(sh);
+        self.pos = pos;
+        self.pos.clamp(self.rows.len());
     }
 
     fn flatten(&self) -> Vec<Node> {
@@ -548,6 +607,30 @@ impl StackView {
         }
     }
 
+    /// `gs`: the Graph view of the symbol changed by the hunk under the
+    /// cursor (content) or the first hunk of the node (tree).
+    fn show_symbol(&self, sh: &mut Shared) -> Action {
+        let Action::ShowHunk(h) = self.jump_target() else {
+            return Action::None;
+        };
+        let line = match (self.focus, self.cursor_hunk()) {
+            (Focus::Content, Some((ch, l))) if ch == h => l,
+            _ => None,
+        };
+        let Some(g) = &sh.graph else {
+            sh.notify("the code graph is still being built…");
+            return Action::None;
+        };
+        let file = sh.review.diff.hunks[h].file;
+        match symbol_at_position(g, &sh.review.diff, file, Some(h), line) {
+            Some(s) => Action::ShowSymbol(s),
+            None => {
+                sh.notify("no symbol here (language not indexed?)");
+                Action::None
+            }
+        }
+    }
+
     fn open_in_editor(&self, sh: &mut Shared) {
         if let Action::ShowHunk(h) = self.jump_target() {
             let line = match (self.focus, self.cursor_hunk()) {
@@ -584,6 +667,7 @@ impl StackView {
                     Focus::Content => self.pos.goto_top(0, self.rows.len()),
                 },
                 ('g', KeyCode::Char('d')) => return self.jump_target(),
+                ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
                 ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_fold(sh),
                 ('z', KeyCode::Char('M')) => self.set_all_folded(sh, true),
                 ('z', KeyCode::Char('R')) => self.set_all_folded(sh, false),
