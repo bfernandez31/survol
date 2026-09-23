@@ -9,6 +9,7 @@ use super::{ACCENT, ADDED_BG, CURSOR_BG, REMOVED_BG};
 use crate::app::Shared;
 use crate::highlight::{Spans, expand_tabs};
 use crate::views::Row;
+use crate::views::comments::NoteStyle;
 
 pub fn status_letter(s: FileStatus) -> (&'static str, Color) {
     match s {
@@ -33,18 +34,31 @@ pub struct RowOpts {
     pub hscroll: usize,
     /// Fold state of a file header.
     pub folded: bool,
+    /// Inside a `V` selection.
+    pub selected: bool,
 }
+
+const SELECT_BG: Color = Color::Rgb(110, 90, 20);
 
 pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
     let Shared {
         review,
         state,
         highlighter,
+        notes,
         ..
     } = sh;
     let diff = &review.diff;
     let (width, hscroll) = (o.width, o.hscroll);
-    let cursor_style = |s: Style| if o.cursor { s.bg(CURSOR_BG) } else { s };
+    let cursor_style = |s: Style| {
+        if o.cursor {
+            s.bg(CURSOR_BG)
+        } else if o.selected {
+            s.bg(SELECT_BG)
+        } else {
+            s
+        }
+    };
 
     match row {
         Row::File(fi) => {
@@ -176,6 +190,26 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
             Line::from(spans)
         }
         Row::Spacer => Line::default(),
+        Row::Comment { note, part, .. } => {
+            let n = &notes.items[note as usize];
+            let (style, text) = &n.lines[part as usize];
+            let (bar, text_style) = match style {
+                NoteStyle::DraftHead => (Color::Yellow, Style::new().fg(Color::Yellow).bold()),
+                NoteStyle::Draft => (Color::Yellow, Style::new().fg(Color::Yellow)),
+                NoteStyle::RemoteHead => (Color::Magenta, Style::new().fg(Color::Magenta).bold()),
+                NoteStyle::Remote => (Color::Magenta, Style::new()),
+                NoteStyle::Resolved => (Color::DarkGray, Style::new().dim()),
+                NoteStyle::Reply => (Color::Magenta, Style::new().dim()),
+            };
+            Line::from(vec![
+                Span::styled(" ".repeat(12), cursor_style(Style::new())),
+                Span::styled("┃ ", Style::new().fg(bar)),
+                Span::styled(
+                    truncate_right(text, width.saturating_sub(15)),
+                    cursor_style(text_style),
+                ),
+            ])
+        }
     }
 }
 

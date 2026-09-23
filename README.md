@@ -18,7 +18,7 @@ See [HANDOFF.md](HANDOFF.md) for the vision, decisions and roadmap.
 | 2 | Stack view (LLM grouping) | ✅ (to validate on a real MR) |
 | 3 | Graph (tree-sitter) | engine ✅, TUI view ✅ (framework rules in progress) |
 | 4 | Neovim integration | minimal plugin |
-| 5 | Questions and GitLab comments | questions ✅, comments in progress |
+| 5 | Questions and GitLab comments | ✅ (to validate on the real GitLab) |
 
 ## Install
 
@@ -122,7 +122,21 @@ callers / callees / tests with `file:line`, the group summary, the hunks,
 next link, `Enter` opens the Graph view of the symbol there (or the line in the
 Diff view), `d` the line in the Diff view, `e` the editor. References to lines the
 model was not given are struck out. `A` reopens the last answer, then the review's
-questions. Answers are cached; `[llm] ask_model` picks the model, `--lang` the language. In the Diff and Stack
+questions. Answers are cached; `[llm] ask_model` picks the model, `--lang` the language.
+
+**Comments**: in the Diff and Stack views, `c` comments the line under the cursor
+(on a draft: edits it; on a GitLab discussion: replies to it), `V` then `c` a range
+of lines of one hunk, `C` the whole file. In the editor, `Ctrl-s` (or `Alt-Enter`)
+saves, `Enter` adds a line, `Esc` cancels. Drafts are local
+(`.git/survol/reviews/<key>/comments.json`) and follow their line when new commits
+arrive (a draft whose line is gone is marked stale). For a merge request, existing
+discussions are fetched in the background and shown under their line, with author
+and resolved state. `P` opens the Review panel: the overall comment (`S`), the
+drafts (`Enter` go, `e` edit, `d` delete), the discussions (`e` reply), and `p`
+publish: it shows what will be sent (`J` for the exact JSON) and waits for `y`.
+Publishing creates GitLab draft notes then publishes them at once; an instance
+without draft notes (before 15.10) gets the comments one by one, after a warning.
+A local range keeps its drafts local. In the Diff and Stack
 views, `gs` opens the Graph view on the symbol under the cursor.
 
 "Reviewed" is keyed by hunk content: when new commits are pushed, only the hunks
@@ -151,6 +165,9 @@ survol-cli graph main..HEAD --modules                    # package / directory d
 survol-cli graph main..HEAD --mermaid                    # the same, as a Mermaid flowchart
 survol-cli ask main..HEAD --symbol Owner.addPet "What does this component do?"
 survol-cli ask main..HEAD --group 2 --prompt "How do the pieces fit together?"  # prompt only
+survol-cli comments 123            # drafts (and where they land) + the MR's discussions
+survol-cli publish 123 --dry-run   # the exact API requests, nothing sent
+survol-cli publish 123 --yes       # publish the drafts
 ```
 
 Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes,

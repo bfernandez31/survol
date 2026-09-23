@@ -3,6 +3,7 @@
 //! Everything here is UI-agnostic; the TUI and the JSON CLI build on it.
 
 pub mod ask;
+pub mod comments;
 pub mod config;
 pub mod diff;
 pub mod doctor;

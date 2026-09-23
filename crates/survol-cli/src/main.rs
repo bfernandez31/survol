@@ -8,8 +8,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use survol_core::ask::Subject;
+use survol_core::comments::{self, CommentStore};
 use survol_core::config::Config;
 use survol_core::doctor::{self, Status};
+use survol_core::forge::gitlab::{Gitlab, encode};
+use survol_core::forge::{Capabilities, Forge};
 use survol_core::git::Git;
 use survol_core::graph::{Graph, Link, SymIdx, SymbolKind};
 use survol_core::llm::ClaudeCli;
@@ -107,6 +110,25 @@ enum Cmd {
         /// Language of the answer: a name or a code. Overrides `[llm] language`.
         #[arg(long, value_name = "LANG")]
         lang: Option<String>,
+    },
+    /// The local draft comments (with where they land in the current diff)
+    /// and, for a merge request, its discussions, as JSON.
+    Comments {
+        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        target: Option<String>,
+    },
+    /// Publish the draft comments to the merge request: GitLab draft notes,
+    /// then one bulk publish (or discussions one by one on instances without
+    /// draft notes).
+    Publish {
+        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        target: Option<String>,
+        /// Print the exact API requests without sending anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Send without asking (required to publish from the command line).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -269,6 +291,97 @@ fn run() -> Result<ExitCode> {
             prompt,
             lang,
         } => ask(repo, cfg, args, symbol, group, hunk, no_cache, prompt, lang)?,
+        Cmd::Comments { target } => {
+            let repo = repo.context("not inside a git repository")?;
+            let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
+            let store = CommentStore::load(&review::comments_path(&r)?)?;
+            let drafts: Vec<serde_json::Value> = store
+                .drafts
+                .iter()
+                .map(|d| {
+                    let p = comments::place(&d.anchor, &r.diff);
+                    json!({
+                        "id": d.id,
+                        "body": d.body,
+                        "where": comments::describe(&r.diff, p),
+                        "stale": p.is_stale(),
+                        "placement": p,
+                        "anchor": d.anchor,
+                        "remote_id": d.remote_id,
+                    })
+                })
+                .collect();
+            let (remote, remote_error) = if r.mr.is_some() {
+                progress("fetching discussions");
+                match review::fetch_remote(&r, &cfg) {
+                    Ok(x) => (x, None),
+                    Err(e) => (None, Some(e.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+            let out = json!({
+                "review": r.title(),
+                "drafts": drafts,
+                "summary": store.summary,
+                "published": store.published.len(),
+                "capabilities": remote.as_ref().map(|x| &x.capabilities),
+                "pending_drafts": remote.as_ref().map(|x| x.pending_drafts),
+                "discussions": remote.as_ref().map(|x| &x.discussions),
+                "remote_error": remote_error,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        Cmd::Publish {
+            target,
+            dry_run,
+            yes,
+        } => {
+            let repo = repo.context("not inside a git repository")?;
+            let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
+            let path = review::comments_path(&r)?;
+            let mut store = CommentStore::load(&path)?;
+            let caps = match &r.mr {
+                Some(_) => {
+                    let forge = Gitlab::from_config(&cfg.gitlab)?;
+                    Capabilities::from_version(&forge.server_version()?)
+                }
+                // A local range: nothing to ask, assume a recent instance.
+                None => Capabilities::from_version("unknown"),
+            };
+            let plan = comments::plan(&store, &r.diff, &review::shas(&r), &caps);
+            let (project, iid) = match &r.mr {
+                Some(mr) => (encode(&mr.project), mr.iid.to_string()),
+                None => (":project".to_string(), ":iid".to_string()),
+            };
+            let out = json!({
+                "review": r.title(),
+                "mode": plan.mode,
+                "capabilities": caps,
+                "skipped": plan.skipped,
+                "requests": plan.requests(&project, &iid),
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            if dry_run {
+                return Ok(ExitCode::SUCCESS);
+            }
+            if r.mr.is_none() {
+                anyhow::bail!("a local range cannot be published: its drafts stay local");
+            }
+            if plan.comments.is_empty() {
+                progress("nothing to publish");
+                return Ok(ExitCode::SUCCESS);
+            }
+            if !yes {
+                eprintln!(
+                    "not sent: run again with --yes to send these {} request(s)",
+                    plan.requests(&project, &iid).len()
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+            let n = review::publish(&r, &cfg, &plan, &mut store, &path, &mut |m| progress(m))?;
+            progress(&format!("published {n} comment(s)"));
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

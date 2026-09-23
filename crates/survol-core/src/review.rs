@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::forge::gitlab::Gitlab;
-use crate::forge::{Forge, ForgeError, MrRef, project_from_remote};
+use crate::forge::{Capabilities, Discussion, Forge, ForgeError, MrRef, project_from_remote};
 use crate::git::Git;
 use crate::graph::{self, Graph};
 use crate::group::{self, Grouping};
 use crate::index::{self, Index};
 use crate::llm::LlmProvider;
 use crate::model::{Diff, FileStatus, MergeRequest};
-use crate::{Error, Result, ask, diff, mechanical};
+use crate::{Error, Result, ask, comments, diff, mechanical};
 
 /// What to review.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +302,84 @@ pub fn questions_path(review: &Review) -> Result<PathBuf> {
         &review.repo.survol_dir()?,
         &review.state_key,
     ))
+}
+
+/// `.git/survol/reviews/<key>/comments.json`
+pub fn comments_path(review: &Review) -> Result<PathBuf> {
+    Ok(comments::comments_path(
+        &review.repo.survol_dir()?,
+        &review.state_key,
+    ))
+}
+
+/// The SHAs positions refer to: the merge request's, or for a local range
+/// its merge base (as base and start) and head.
+pub fn shas(review: &Review) -> comments::Shas {
+    match &review.mr {
+        Some(mr) => comments::Shas {
+            base: mr.base_sha.clone(),
+            start: mr.start_sha.clone(),
+            head: mr.head_sha.clone(),
+        },
+        None => comments::Shas {
+            base: review.base_sha.clone(),
+            start: review.base_sha.clone(),
+            head: review.head_sha.clone(),
+        },
+    }
+}
+
+/// What the forge knows about a merge request's review.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RemoteReview {
+    pub capabilities: Capabilities,
+    pub discussions: Vec<Discussion>,
+    /// The current user's draft notes not published yet (made in the
+    /// browser, or left by an interrupted publication).
+    pub pending_drafts: usize,
+}
+
+/// Instance version, discussions and pending drafts of the review's merge
+/// request; `None` for a local range. Network calls: run in the background.
+pub fn fetch_remote(review: &Review, cfg: &Config) -> Result<Option<RemoteReview>> {
+    let Some(mr) = &review.mr else {
+        return Ok(None);
+    };
+    let forge = Gitlab::from_config(&cfg.gitlab)?;
+    let capabilities = Capabilities::from_version(&forge.server_version()?);
+    let discussions = forge.discussions(&mr.project, mr.iid)?;
+    let pending_drafts = if capabilities.draft_notes {
+        forge
+            .draft_notes(&mr.project, mr.iid)
+            .map_or(0, |d| d.len())
+    } else {
+        0
+    };
+    Ok(Some(RemoteReview {
+        capabilities,
+        discussions,
+        pending_drafts,
+    }))
+}
+
+/// Publishes the drafts of `store` (saved at `path`) to the merge request
+/// with `plan`, see [`comments::publish`].
+pub fn publish(
+    review: &Review,
+    cfg: &Config,
+    plan: &comments::Plan,
+    store: &mut comments::CommentStore,
+    path: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<usize> {
+    let Some(mr) = &review.mr else {
+        return Err(Error::Target(
+            "publishing needs a merge request: the drafts of a local range stay local".into(),
+        ));
+    };
+    let forge = Gitlab::from_config(&cfg.gitlab)?;
+    comments::publish(&forge, &mr.project, mr.iid, plan, store, path, progress)
+        .map_err(|e| Error::Target(e.to_string()))
 }
 
 fn read_instructions(repo_root: &Path) -> Result<Option<String>> {

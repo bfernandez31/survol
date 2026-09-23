@@ -13,6 +13,7 @@ use survol_core::review_state::ReviewState;
 
 use super::{Focus, Row, Scroll, push_hunk_rows};
 use crate::app::{Action, Shared};
+use crate::views::comments::{CommentTarget, row_target};
 use crate::views::graph::symbol_at_position;
 
 /// A line of the groups tree.
@@ -149,6 +150,8 @@ pub struct StackView {
     pub confirm_regroup: bool,
     pub show_warnings: bool,
     pending: Option<char>,
+    /// Other end of a `V` selection (content row index).
+    pub visual: Option<usize>,
 }
 
 impl StackView {
@@ -295,6 +298,7 @@ impl StackView {
 
     fn build_content(&mut self, sh: &Shared) {
         self.rows.clear();
+        self.visual = None;
         self.pos = Scroll {
             height: self.pos.height,
             ..Scroll::default()
@@ -304,6 +308,13 @@ impl StackView {
         };
         let diff = &sh.review.diff;
         let mut rows = Vec::new();
+        let file_head = |rows: &mut Vec<StackRow>, f: usize| {
+            rows.push(StackRow::File(f));
+            let mut buf = Vec::new();
+            sh.notes
+                .push_rows(&mut buf, sh.notes.at_file(f), None, None);
+            rows.extend(buf.into_iter().map(StackRow::Diff));
+        };
         let push_hunks = |rows: &mut Vec<StackRow>, ids: &[usize]| {
             let mut last_file = None;
             let mut buf = Vec::new();
@@ -313,17 +324,17 @@ impl StackView {
                     if last_file.is_some() {
                         rows.push(StackRow::Diff(Row::Spacer));
                     }
-                    rows.push(StackRow::File(f));
+                    file_head(rows, f);
                     last_file = Some(f);
                 }
                 buf.clear();
-                push_hunk_rows(&mut buf, h, &diff.hunks[h].lines, sh.layout);
+                push_hunk_rows(&mut buf, h, &diff.hunks[h].lines, sh.layout, &sh.notes);
                 rows.extend(buf.iter().map(|r| StackRow::Diff(*r)));
             }
         };
         let push_files = |rows: &mut Vec<StackRow>, ids: &[usize]| {
             for &f in ids {
-                rows.push(StackRow::File(f));
+                file_head(rows, f);
                 rows.push(StackRow::Diff(Row::Note(f)));
             }
         };
@@ -355,16 +366,30 @@ impl StackView {
         self.rows = rows;
     }
 
-    /// Rebuilds the content (after a layout change), keeping the cursor on
-    /// the same hunk.
+    /// Rebuilds the content (after a layout change or new notes), keeping
+    /// the cursor on the same line, else the same hunk.
     pub fn relayout(&mut self, sh: &Shared) {
-        let hunk = self.cursor_hunk();
+        let at = self.cursor_hunk();
+        let offset = self.pos.cursor.saturating_sub(self.pos.scroll);
         self.build_content(sh);
-        if let Some((h, _)) = hunk
-            && let Some(r) = self
-                .rows
-                .iter()
-                .position(|r| *r == StackRow::Diff(Row::Hunk(h)))
+        let Some((h, line)) = at else {
+            return;
+        };
+        let same_line = |r: &StackRow| match (r, line) {
+            (StackRow::Diff(Row::Line { hunk, line: l }), Some(x)) => *hunk == h && *l == x,
+            (StackRow::Diff(Row::Pair { hunk, left, right }), Some(x)) => {
+                *hunk == h && (*left == Some(x) || *right == Some(x))
+            }
+            _ => false,
+        };
+        if let Some(r) = self.rows.iter().position(same_line) {
+            self.pos.cursor = r;
+            self.pos.scroll = r.saturating_sub(offset);
+            self.pos.clamp(self.rows.len());
+        } else if let Some(r) = self
+            .rows
+            .iter()
+            .position(|r| *r == StackRow::Diff(Row::Hunk(h)))
         {
             self.pos.goto_top(r, self.rows.len());
         }
@@ -656,6 +681,42 @@ impl StackView {
         ))
     }
 
+    /// `c`: comment on the content line (or `V` range, file, draft) under
+    /// the cursor.
+    fn comment(&mut self, sh: &mut Shared) -> Action {
+        let visual = self.visual.take().and_then(|v| match self.rows.get(v) {
+            Some(StackRow::Diff(r)) => Some(*r),
+            _ => None,
+        });
+        let row = match self.rows.get(self.pos.cursor) {
+            Some(StackRow::Diff(r)) => *r,
+            Some(StackRow::File(f)) => Row::File(*f),
+            _ => {
+                sh.notify("move to a diff line");
+                return Action::None;
+            }
+        };
+        match row_target(&sh.notes, row, visual) {
+            Ok(t) => Action::Comment(t),
+            Err(e) => {
+                sh.notify(e);
+                Action::None
+            }
+        }
+    }
+
+    /// File of the content row under the cursor.
+    fn cursor_file(&self, sh: &Shared) -> Option<usize> {
+        self.rows[..=self.pos.cursor.min(self.rows.len().checked_sub(1)?)]
+            .iter()
+            .rev()
+            .find_map(|r| match r {
+                StackRow::File(f) => Some(*f),
+                StackRow::Diff(r) => r.hunk_line().map(|(h, _)| sh.review.diff.hunks[h].file),
+                _ => None,
+            })
+    }
+
     fn open_in_editor(&self, sh: &mut Shared) {
         if let Action::ShowHunk(h) = self.jump_target() {
             let line = match (self.focus, self.cursor_hunk()) {
@@ -737,6 +798,18 @@ impl StackView {
             KeyCode::Char('o') => self.toggle_fold(sh),
             KeyCode::Char('e') => self.open_in_editor(sh),
             KeyCode::Char('0') => self.hscroll = 0,
+            KeyCode::Char('c') if self.focus == Focus::Content => return self.comment(sh),
+            KeyCode::Char('C') if self.focus == Focus::Content => match self.cursor_file(sh) {
+                Some(f) => return Action::Comment(CommentTarget::File(f)),
+                None => sh.notify("move to a file"),
+            },
+            KeyCode::Char('V') if self.focus == Focus::Content => {
+                self.visual = match self.visual {
+                    Some(_) => None,
+                    None => Some(self.pos.cursor),
+                };
+            }
+            KeyCode::Esc if self.visual.is_some() => self.visual = None,
             _ => match self.focus {
                 Focus::List => return self.on_tree_key(sh, key),
                 Focus::Content => return self.on_content_key(key),

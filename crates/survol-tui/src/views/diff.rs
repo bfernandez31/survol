@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{Focus, Row, Scroll, push_hunk_rows};
 use crate::app::{Action, Shared};
+use crate::views::comments::{CommentTarget, row_target};
 use crate::views::graph::symbol_at_position;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +38,8 @@ pub struct DiffView {
     pub filter: String,
     pub filter_editing: bool,
     pending: Option<char>,
+    /// Other end of a `V` selection (row index).
+    pub visual: Option<usize>,
 }
 
 impl DiffView {
@@ -62,6 +65,7 @@ impl DiffView {
             filter: String::new(),
             filter_editing: false,
             pending: None,
+            visual: None,
         };
         v.build_rows(sh);
         v.build_sidebar(sh);
@@ -88,11 +92,13 @@ impl DiffView {
             file_row.push(start);
             rows.push(Row::File(f));
             if !self.collapsed[f] {
+                sh.notes
+                    .push_rows(&mut rows, sh.notes.at_file(f), None, None);
                 if file.hunk_ids.is_empty() {
                     rows.push(Row::Note(f));
                 }
                 for &h in &file.hunk_ids {
-                    push_hunk_rows(&mut rows, h, &diff.hunks[h].lines, sh.layout);
+                    push_hunk_rows(&mut rows, h, &diff.hunks[h].lines, sh.layout, &sh.notes);
                 }
             }
             rows.push(Row::Spacer);
@@ -114,6 +120,7 @@ impl DiffView {
 
     /// Rebuilds the rows, keeping the cursor on the same content.
     pub fn relayout(&mut self, sh: &Shared) {
+        self.visual = None;
         let anchor = self.anchor();
         let offset = self.pos.cursor.saturating_sub(self.pos.scroll);
         self.build_rows(sh);
@@ -389,6 +396,22 @@ impl DiffView {
         ))
     }
 
+    /// `c`: comment on the line (or the `V` range, the file header, the
+    /// draft) under the cursor.
+    fn comment(&mut self, sh: &mut Shared) -> Action {
+        let Some(&row) = self.rows.get(self.pos.cursor) else {
+            return Action::None;
+        };
+        let visual = self.visual.take().and_then(|v| self.rows.get(v).copied());
+        match row_target(&sh.notes, row, visual) {
+            Ok(t) => Action::Comment(t),
+            Err(e) => {
+                sh.notify(e);
+                Action::None
+            }
+        }
+    }
+
     /// `gs`: the Graph view of the symbol under the cursor.
     fn show_symbol(&self, sh: &mut Shared) -> Action {
         let Some(a) = self.anchor() else {
@@ -472,6 +495,15 @@ impl DiffView {
             KeyCode::Char('r') | KeyCode::Char('v') => self.toggle_file(sh),
             KeyCode::Char('o') => self.toggle_collapse(sh),
             KeyCode::Char('e') => self.open_in_editor(sh),
+            KeyCode::Char('C') => return Action::Comment(CommentTarget::File(self.current_file())),
+            KeyCode::Char('c') if self.focus == Focus::Content => return self.comment(sh),
+            KeyCode::Char('V') if self.focus == Focus::Content => {
+                self.visual = match self.visual {
+                    Some(_) => None,
+                    None => Some(self.pos.cursor),
+                };
+            }
+            KeyCode::Esc if self.visual.is_some() => self.visual = None,
             KeyCode::Char('h') | KeyCode::Left if self.focus == Focus::Content => {
                 self.hscroll = self.hscroll.saturating_sub(8);
             }

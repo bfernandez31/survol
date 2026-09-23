@@ -8,7 +8,10 @@ use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{Forge, ForgeError, Result};
+use super::{
+    Discussion, DraftNote, Forge, ForgeError, NewComment, Result, draft_note_payload,
+    post_comment_request,
+};
 use crate::config::GitlabConfig;
 use crate::model::MergeRequest;
 
@@ -50,12 +53,21 @@ impl Gitlab {
 
     fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Response> {
         let url = format!("{}{}", self.api, path);
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.token)
-            .query(query)
-            .send()?;
+        let req = self.client.get(&url).query(query);
+        self.send(req, url)
+    }
+
+    fn post(&self, path: &str, body: Option<&serde_json::Value>) -> Result<Response> {
+        let url = format!("{}{}", self.api, path);
+        let mut req = self.client.post(&url);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        self.send(req, url)
+    }
+
+    fn send(&self, req: reqwest::blocking::RequestBuilder, url: String) -> Result<Response> {
+        let resp = req.bearer_auth(&self.token).send()?;
         let status = resp.status();
         if status.is_success() {
             return Ok(resp);
@@ -72,9 +84,40 @@ impl Gitlab {
     fn get_json<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
         Ok(self.get(path, query)?.json()?)
     }
+
+    /// Every page of a list endpoint, following `X-Next-Page`.
+    fn get_all<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        let mut page = "1".to_string();
+        for _ in 0..MAX_PAGES {
+            let resp = self.get(path, &[("per_page", "100"), ("page", &page)])?;
+            let next = resp
+                .headers()
+                .get("x-next-page")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string);
+            out.extend(resp.json::<Vec<T>>()?);
+            match next {
+                Some(n) => page = n,
+                None => break,
+            }
+        }
+        Ok(out)
+    }
 }
 
-fn encode(project: &str) -> String {
+/// Safety stop for pagination (10 000 items).
+const MAX_PAGES: usize = 100;
+
+#[derive(Deserialize)]
+struct Created<T> {
+    id: T,
+}
+
+/// Project path as a URL path segment (`group%2Fapp`).
+pub fn encode(project: &str) -> String {
     utf8_percent_encode(project, NON_ALPHANUMERIC).to_string()
 }
 
@@ -149,6 +192,43 @@ impl Forge for Gitlab {
             head_sha: head.ok_or_else(missing)?,
             web_url: mr.web_url,
         })
+    }
+
+    fn discussions(&self, project: &str, iid: u64) -> Result<Vec<Discussion>> {
+        self.get_all(&format!(
+            "/projects/{}/merge_requests/{iid}/discussions",
+            encode(project)
+        ))
+    }
+
+    fn draft_notes(&self, project: &str, iid: u64) -> Result<Vec<DraftNote>> {
+        self.get_all(&format!(
+            "/projects/{}/merge_requests/{iid}/draft_notes",
+            encode(project)
+        ))
+    }
+
+    fn create_draft_note(&self, project: &str, iid: u64, c: &NewComment) -> Result<u64> {
+        let path = format!(
+            "/projects/{}/merge_requests/{iid}/draft_notes",
+            encode(project)
+        );
+        let created: Created<u64> = self.post(&path, Some(&draft_note_payload(c)))?.json()?;
+        Ok(created.id)
+    }
+
+    fn publish_drafts(&self, project: &str, iid: u64) -> Result<()> {
+        let path = format!(
+            "/projects/{}/merge_requests/{iid}/draft_notes/bulk_publish",
+            encode(project)
+        );
+        self.post(&path, None).map(drop)
+    }
+
+    fn post_comment(&self, project: &str, iid: u64, c: &NewComment) -> Result<()> {
+        let (sub, body) = post_comment_request(c);
+        let path = format!("/projects/{}/merge_requests/{iid}{sub}", encode(project));
+        self.post(&path, Some(&body)).map(drop)
     }
 
     fn merge_request_for_branch(&self, project: &str, branch: &str) -> Result<u64> {
@@ -310,5 +390,52 @@ mod http_tests {
             }) => assert!(body.contains("Project Not Found")),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn lists_discussions_across_pages() {
+        use crate::forge::fake::{self, Response, ok};
+        let page1 = r#"[{"id":"a1","individual_note":false,"notes":[
+            {"id":1,"body":"Why here?","author":{"username":"alice","name":"Alice"},
+             "created_at":"2026-09-01T10:00:00Z","system":false,"resolvable":true,"resolved":false,
+             "position":{"base_sha":"b","start_sha":"s","head_sha":"h","old_path":"src/Old.java",
+               "new_path":"src/New.java","position_type":"text","old_line":null,"new_line":12,
+               "line_range":null}},
+            {"id":2,"body":"Because.","author":{"username":"bob","name":"Bob"},
+             "system":false,"resolvable":true,"resolved":false}]}]"#;
+        let page2 = r#"[{"id":"a2","individual_note":true,"notes":[
+            {"id":3,"body":"added 2 commits","author":{"username":"bob"},"system":true}]}]"#;
+        let (addr, rx) = fake::serve(vec![
+            Response {
+                status: "200 OK",
+                headers: vec![("X-Next-Page", "2".into())],
+                body: page1.into(),
+            },
+            Response {
+                status: "200 OK",
+                headers: vec![("X-Next-Page", "".into())],
+                body: page2.into(),
+            },
+            ok(r#"[{"id":9,"note":"pending","position":null}]"#),
+        ]);
+        let gl = Gitlab::new(&addr, "tok".into(), None).unwrap();
+        let all = gl.discussions("grp/app", 7).unwrap();
+        assert_eq!(all.len(), 2);
+        let d = &all[0];
+        assert_eq!(d.notes[0].author.username, "alice");
+        assert!(d.is_resolvable() && !d.is_resolved());
+        let p = d.position().unwrap();
+        assert_eq!(
+            (p.new_path.as_str(), p.new_line, p.old_line),
+            ("src/New.java", Some(12), None)
+        );
+        assert!(all[1].is_system());
+        let reqs: Vec<_> = rx.try_iter().collect();
+        assert_eq!(
+            reqs[0].path,
+            "/api/v4/projects/grp%2Fapp/merge_requests/7/discussions?per_page=100&page=1"
+        );
+        assert!(reqs[1].path.ends_with("&page=2"));
+        assert_eq!(gl.draft_notes("grp/app", 7).unwrap()[0].id, 9);
     }
 }

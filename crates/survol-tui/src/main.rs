@@ -80,6 +80,7 @@ fn main() -> Result<()> {
 
     let mut app = App::new(review, state, state_path, cfg);
     app.start_grouping(true);
+    app.start_remote();
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app, rx);
     ratatui::restore();
@@ -95,6 +96,8 @@ fn run(
         app.poll_grouping();
         app.poll_graph();
         app.poll_ask();
+        app.poll_remote();
+        app.poll_publish();
         if std::mem::take(&mut app.sh.needs_clear) {
             terminal.clear()?;
         }

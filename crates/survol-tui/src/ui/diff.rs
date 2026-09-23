@@ -104,6 +104,7 @@ fn render_diff(f: &mut Frame, area: Rect, app: &mut App) {
     app.diff.set_view_height(inner.height as usize);
 
     let v = &app.diff;
+    let sel = v.visual.map(|x| (x.min(v.pos.cursor), x.max(v.pos.cursor)));
     let end = (v.pos.scroll + inner.height as usize).min(v.rows.len());
     let mut lines = Vec::with_capacity(end.saturating_sub(v.pos.scroll));
     for i in v.pos.scroll..end {
@@ -117,6 +118,7 @@ fn render_diff(f: &mut Frame, area: Rect, app: &mut App) {
             cursor: focused && i == app.diff.pos.cursor,
             hscroll: app.diff.hscroll,
             folded,
+            selected: sel.is_some_and(|(a, b)| i >= a && i <= b),
         };
         lines.push(render_row(&mut app.sh, row, opts));
     }

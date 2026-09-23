@@ -7,12 +7,14 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::ask::{self, Answer, CodeRef};
+use survol_core::comments::{self, Anchor, CommentStore, Placement};
 use survol_core::config::Config;
+use survol_core::forge::Discussion;
 use survol_core::graph::{Graph, SymIdx, SymbolKind};
 use survol_core::group::{Grouping, Source};
 use survol_core::llm::{ClaudeCli, LlmProvider};
-use survol_core::model::{FileStatus, Side};
-use survol_core::review::{self, Review};
+use survol_core::model::{FileStatus, LineKind, Side};
+use survol_core::review::{self, RemoteReview, Review};
 use survol_core::review_state::ReviewState;
 
 use crate::editor;
@@ -20,6 +22,10 @@ use crate::highlight::Highlighter;
 use crate::views::Layout;
 use crate::views::ask::{
     AnswerOutcome, AnswerView, AskInput, HistoryOutcome, HistoryView, InputOutcome, Pending,
+};
+use crate::views::comments::{
+    CommentTarget, Confirm, Editor, EditorOutcome, NoteIndex, PanelOutcome, PanelRow, ReviewPanel,
+    panel_rows,
 };
 use crate::views::diff::DiffView;
 use crate::views::graph::GraphView;
@@ -62,6 +68,8 @@ pub enum Action {
         hunk: usize,
         line: usize,
     },
+    /// Write or edit a comment.
+    Comment(CommentTarget),
 }
 
 /// A modal window over the views.
@@ -71,6 +79,24 @@ pub enum Popup {
     Pending(Pending),
     Answer(AnswerView),
     History(HistoryView),
+    /// Writing a comment.
+    Comment(Editor),
+    /// The Review panel ([`App::panel`]).
+    Review,
+}
+
+/// The merge request's side of the review.
+pub enum RemoteStatus {
+    /// A local range: nothing to fetch, drafts stay local.
+    Local,
+    Fetching(Instant),
+    Ready,
+    Failed(String),
+}
+
+enum PublishEvent {
+    Progress(String),
+    Done(Result<usize, String>),
 }
 
 /// Something that answers questions; `Send` to run on a background thread.
@@ -89,11 +115,30 @@ pub struct Shared {
     /// Set when the terminal must be fully redrawn (after an external editor).
     pub needs_clear: bool,
     message: Option<(String, Instant)>,
+    /// Local draft comments.
+    pub comments: CommentStore,
+    comments_path: PathBuf,
+    /// Instance capabilities and discussions of the merge request, once fetched.
+    pub remote: Option<RemoteReview>,
+    /// Drafts and discussions placed in the diff.
+    pub notes: NoteIndex,
 }
 
 impl Shared {
     pub fn new(review: Review, state: ReviewState, state_path: PathBuf) -> Self {
         let worktree_ready = review.worktree == review.repo.dir();
+        let comments_path = state_path.with_file_name("comments.json");
+        let (comments, message) = match CommentStore::load(&comments_path) {
+            Ok(c) => (c, None),
+            Err(e) => (
+                CommentStore::default(),
+                Some((
+                    format!("cannot read the draft comments: {e}"),
+                    Instant::now(),
+                )),
+            ),
+        };
+        let notes = NoteIndex::build(&review.diff, &comments, &[]);
         Self {
             review,
             state,
@@ -103,8 +148,41 @@ impl Shared {
             worktree_ready,
             graph: None,
             needs_clear: false,
-            message: None,
+            message,
+            comments,
+            comments_path,
+            remote: None,
+            notes,
         }
+    }
+
+    pub fn discussions(&self) -> &[Discussion] {
+        self.remote
+            .as_ref()
+            .map_or(&[], |r| r.discussions.as_slice())
+    }
+
+    /// Places drafts and discussions again (views must relayout after).
+    pub fn rebuild_notes(&mut self) {
+        let discussions = self.remote.as_ref().map_or(&[][..], |r| &r.discussions);
+        self.notes = NoteIndex::build(&self.review.diff, &self.comments, discussions);
+    }
+
+    /// Writes the draft comments; called after every change.
+    pub fn save_comments(&mut self) {
+        if let Err(e) = self.comments.save(&self.comments_path) {
+            self.notify(format!("cannot save the draft comments: {e}"));
+        }
+        self.rebuild_notes();
+    }
+
+    /// Reads the draft comments again (after a publication in the background).
+    pub fn reload_comments(&mut self) {
+        match CommentStore::load(&self.comments_path) {
+            Ok(c) => self.comments = c,
+            Err(e) => self.notify(format!("cannot read the draft comments: {e}")),
+        }
+        self.rebuild_notes();
     }
 
     pub fn message(&self) -> Option<&str> {
@@ -235,6 +313,14 @@ pub struct App {
     pub history: Vec<Answer>,
     /// Last answer shown: `A` reopens it.
     last_answer: Option<AnswerView>,
+
+    /// The Review panel (`P`), kept between openings.
+    pub panel: ReviewPanel,
+    pub remote_status: RemoteStatus,
+    remote_rx: Option<mpsc::Receiver<Result<Option<RemoteReview>, String>>>,
+    /// Progress of a publication running in the background.
+    pub publishing: Option<String>,
+    publish_rx: Option<mpsc::Receiver<PublishEvent>>,
 }
 
 impl App {
@@ -265,6 +351,11 @@ impl App {
             ask_rx: None,
             history,
             last_answer: None,
+            panel: ReviewPanel::default(),
+            remote_status: RemoteStatus::Local,
+            remote_rx: None,
+            publishing: None,
+            publish_rx: None,
         }
     }
 
@@ -482,6 +573,7 @@ impl App {
                 self.diff.reveal_line(&self.sh, hunk, line);
                 self.switch(View::Diff);
             }
+            Action::Comment(t) => self.open_editor(t, false),
             Action::ShowSymbol(s) => {
                 if self.sh.graph.is_some() {
                     self.graph.show_symbol(&self.sh, s);
@@ -529,6 +621,10 @@ impl App {
             match key.code {
                 KeyCode::Char('a') => return self.ask_here(),
                 KeyCode::Char('A') => return self.reopen_answer(),
+                KeyCode::Char('P') => {
+                    self.popup = Some(Popup::Review);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -731,6 +827,21 @@ impl App {
                     self.popup = Some(Popup::Answer(v));
                 }
             },
+            Popup::Comment(mut e) => match e.on_key(key) {
+                EditorOutcome::Continue => self.popup = Some(Popup::Comment(e)),
+                EditorOutcome::Cancel => {
+                    if e.from_panel {
+                        self.popup = Some(Popup::Review);
+                    }
+                }
+                EditorOutcome::Save(text) => {
+                    self.save_comment(e.target, &text);
+                    if e.from_panel {
+                        self.popup = Some(Popup::Review);
+                    }
+                }
+            },
+            Popup::Review => self.on_panel_key(key),
             Popup::History(mut h) => match h.on_key(key, self.history.len()) {
                 HistoryOutcome::Continue => self.popup = Some(Popup::History(h)),
                 HistoryOutcome::Close => {}
@@ -739,6 +850,347 @@ impl App {
                 }
             },
         }
+    }
+
+    // ----- comments ------------------------------------------------------
+
+    /// Fetches the instance version and the discussions of the merge request
+    /// in the background (nothing for a local range).
+    pub fn start_remote(&mut self) {
+        if self.sh.review.mr.is_none() {
+            self.remote_status = RemoteStatus::Local;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let review = self.sh.review.clone();
+        let cfg = self.cfg.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(review::fetch_remote(&review, &cfg).map_err(|e| e.to_string()));
+        });
+        self.remote_rx = Some(rx);
+        self.remote_status = RemoteStatus::Fetching(Instant::now());
+    }
+
+    pub fn poll_remote(&mut self) {
+        let Some(rx) = &self.remote_rx else {
+            return;
+        };
+        let res = match rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("the request was lost".into()),
+        };
+        self.remote_rx = None;
+        match res {
+            Ok(remote) => self.set_remote(remote),
+            Err(e) => {
+                self.sh.notify(format!("GitLab discussions: {e}"));
+                self.remote_status = RemoteStatus::Failed(e);
+            }
+        }
+    }
+
+    /// Installs what the forge said about the review.
+    pub fn set_remote(&mut self, remote: Option<RemoteReview>) {
+        self.remote_status = if remote.is_some() {
+            RemoteStatus::Ready
+        } else {
+            RemoteStatus::Local
+        };
+        self.sh.remote = remote;
+        self.refresh_notes();
+    }
+
+    /// After a change of drafts or discussions: place them again and redraw.
+    fn refresh_notes(&mut self) {
+        self.sh.rebuild_notes();
+        self.diff.relayout(&self.sh);
+        self.stack.relayout(&self.sh);
+    }
+
+    /// Opens the comment editor on `target`.
+    pub fn open_editor(&mut self, target: CommentTarget, from_panel: bool) {
+        if self.publishing.is_some() {
+            return self
+                .sh
+                .notify("publishing in progress: the drafts are locked until it ends");
+        }
+        let d = &self.sh.review.diff;
+        let code = |hunk: usize, from: usize, to: usize| -> Vec<String> {
+            let lines = &d.hunks[hunk].lines;
+            let from = from.max(to.saturating_sub(5));
+            (from..=to)
+                .map(|i| {
+                    let l = &lines[i];
+                    let sign = match l.kind {
+                        LineKind::Added => '+',
+                        LineKind::Removed => '-',
+                        LineKind::Context => ' ',
+                    };
+                    format!("{sign}{}", l.text)
+                })
+                .collect()
+        };
+        let (title, context, text) = match target {
+            CommentTarget::Line { hunk, line, start } => {
+                let p = Placement::Line {
+                    file: d.hunks[hunk].file,
+                    hunk,
+                    line,
+                    start,
+                    moved: false,
+                };
+                (
+                    format!("comment on {}", comments::describe(d, p)),
+                    code(hunk, start.unwrap_or(line), line),
+                    String::new(),
+                )
+            }
+            CommentTarget::File(f) => (
+                format!("comment on the file {}", d.files[f].display_path()),
+                Vec::new(),
+                String::new(),
+            ),
+            CommentTarget::Draft(id) => {
+                let Some(draft) = self.sh.comments.get(id) else {
+                    return;
+                };
+                let p = comments::place(&draft.anchor, d);
+                let context = match p {
+                    Placement::Line {
+                        hunk, line, start, ..
+                    } => code(hunk, start.unwrap_or(line), line),
+                    _ => Vec::new(),
+                };
+                (
+                    format!("edit draft · {}", comments::describe(d, p)),
+                    context,
+                    draft.body.clone(),
+                )
+            }
+            CommentTarget::Reply(di) => {
+                let Some(disc) = self.sh.discussions().get(di) else {
+                    return;
+                };
+                let first = &disc.notes[0];
+                (
+                    format!("reply to @{}", first.author.username),
+                    first.body.lines().take(4).map(str::to_string).collect(),
+                    String::new(),
+                )
+            }
+            CommentTarget::Summary => (
+                "overall comment of the review".to_string(),
+                Vec::new(),
+                self.sh.comments.summary.clone(),
+            ),
+        };
+        let mut e = Editor::new(target, title, context, text);
+        e.from_panel = from_panel;
+        self.popup = Some(Popup::Comment(e));
+    }
+
+    /// Saves what the editor wrote for `target`.
+    pub fn save_comment(&mut self, target: CommentTarget, text: &str) {
+        let d = &self.sh.review.diff;
+        let empty = text.trim().is_empty();
+        let anchor = match target {
+            CommentTarget::Line { hunk, line, start } => Some(Anchor::Line {
+                start: start.map(|s| comments::line_anchor(d, hunk, s)),
+                line: comments::line_anchor(d, hunk, line),
+            }),
+            CommentTarget::File(f) => Some(comments::file_anchor(d, f)),
+            CommentTarget::Reply(di) => self.sh.discussions().get(di).map(|x| Anchor::Reply {
+                discussion: x.id.clone(),
+                author: x.notes[0].author.username.clone(),
+            }),
+            CommentTarget::Draft(id) => {
+                self.sh.comments.update(id, text);
+                if empty {
+                    self.sh.notify("empty draft deleted");
+                }
+                None
+            }
+            CommentTarget::Summary => {
+                self.sh.comments.summary = text.trim_end().to_string();
+                None
+            }
+        };
+        if let Some(anchor) = anchor {
+            if empty {
+                return self.sh.notify("empty comment: nothing saved");
+            }
+            self.sh.comments.add(anchor, text);
+            let n = self.sh.comments.drafts.len();
+            self.sh.notify(format!(
+                "draft saved ({n} in this review): P to review and publish"
+            ));
+        }
+        self.sh.save_comments();
+        self.diff.relayout(&self.sh);
+        self.stack.relayout(&self.sh);
+    }
+
+    fn on_panel_key(&mut self, key: KeyEvent) {
+        let rows = panel_rows(
+            &self.sh.review.diff,
+            &self.sh.comments,
+            self.sh.discussions(),
+        );
+        self.popup = Some(Popup::Review);
+        match self.panel.on_key(key, &rows) {
+            PanelOutcome::Continue => {}
+            PanelOutcome::Close => self.popup = None,
+            PanelOutcome::Edit(t) => self.open_editor(t, true),
+            PanelOutcome::Jump(row) => {
+                let action = self.panel_jump(row);
+                if action != Action::None {
+                    self.popup = None;
+                    self.apply(action);
+                }
+            }
+            PanelOutcome::Delete(id) => {
+                self.sh.comments.remove(id);
+                self.sh.save_comments();
+                self.diff.relayout(&self.sh);
+                self.stack.relayout(&self.sh);
+                self.sh.notify("draft deleted");
+            }
+            PanelOutcome::AskPublish => self.prepare_publish(),
+            PanelOutcome::Publish(plan) => self.start_publish(plan),
+            PanelOutcome::Refresh => self.start_remote(),
+        }
+    }
+
+    /// Where a row of the Review panel is in the diff.
+    fn panel_jump(&mut self, row: PanelRow) -> Action {
+        let d = &self.sh.review.diff;
+        let at_discussion = |disc: &Discussion| {
+            let pos = disc.position()?;
+            match comments::place_position(pos, d)? {
+                (_, Some((hunk, line))) => Some(Action::ShowLine { hunk, line }),
+                (file, None) => Some(Action::ShowFile(file)),
+            }
+        };
+        let action = match row {
+            PanelRow::Summary => None,
+            PanelRow::Draft(id) => match self.sh.comments.get(id) {
+                Some(draft) => match (&draft.anchor, comments::place(&draft.anchor, d)) {
+                    (_, Placement::Line { hunk, line, .. }) => {
+                        Some(Action::ShowLine { hunk, line })
+                    }
+                    (_, Placement::File { file }) => Some(Action::ShowFile(file)),
+                    (Anchor::Reply { discussion, .. }, _) => self
+                        .sh
+                        .discussions()
+                        .iter()
+                        .find(|x| &x.id == discussion)
+                        .and_then(at_discussion),
+                    _ => None,
+                },
+                None => None,
+            },
+            PanelRow::Discussion(i) => self.sh.discussions().get(i).and_then(at_discussion),
+        };
+        action.unwrap_or_else(|| {
+            self.sh.notify("not in the diff shown here");
+            Action::None
+        })
+    }
+
+    /// `p` in the Review panel: what would be sent, to confirm.
+    fn prepare_publish(&mut self) {
+        if self.sh.review.mr.is_none() {
+            return self.sh.notify(
+                "local range: drafts stay local (publishing needs a merge request; survol-cli publish --dry-run shows the requests)",
+            );
+        }
+        if self.publishing.is_some() {
+            return self.sh.notify("already publishing");
+        }
+        let caps = match (&self.remote_status, &self.sh.remote) {
+            (RemoteStatus::Ready, Some(r)) => r.capabilities.clone(),
+            (RemoteStatus::Fetching(_), _) => {
+                return self
+                    .sh
+                    .notify("still asking GitLab for its version and discussions…");
+            }
+            (RemoteStatus::Failed(e), _) => {
+                return self
+                    .sh
+                    .notify(format!("cannot reach GitLab ({e}): r to retry"));
+            }
+            _ => return self.sh.notify("GitLab is not reachable: r to retry"),
+        };
+        let plan = comments::plan(
+            &self.sh.comments,
+            &self.sh.review.diff,
+            &review::shas(&self.sh.review),
+            &caps,
+        );
+        if plan.comments.is_empty() {
+            let stale = plan.skipped.len();
+            return self.sh.notify(if stale > 0 {
+                format!("nothing to publish: {stale} stale draft(s) only")
+            } else {
+                "nothing to publish: write comments with c / C, a summary with S".to_string()
+            });
+        }
+        self.panel.confirm = Some(Confirm::Publish {
+            plan,
+            json: false,
+            scroll: 0,
+        });
+    }
+
+    /// Publishes in the background; drafts are locked meanwhile.
+    fn start_publish(&mut self, plan: comments::Plan) {
+        let (tx, rx) = mpsc::channel();
+        let review = self.sh.review.clone();
+        let cfg = self.cfg.clone();
+        let mut store = self.sh.comments.clone();
+        let path = self.sh.comments_path.clone();
+        std::thread::spawn(move || {
+            let mut progress = |m: &str| {
+                let _ = tx.send(PublishEvent::Progress(m.to_string()));
+            };
+            let res = review::publish(&review, &cfg, &plan, &mut store, &path, &mut progress)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(PublishEvent::Done(res));
+        });
+        self.publish_rx = Some(rx);
+        self.publishing = Some("starting".into());
+    }
+
+    pub fn poll_publish(&mut self) {
+        let Some(rx) = &self.publish_rx else {
+            return;
+        };
+        let mut done = None;
+        for ev in rx.try_iter() {
+            match ev {
+                PublishEvent::Progress(p) => self.publishing = Some(p),
+                PublishEvent::Done(r) => done = Some(r),
+            }
+        }
+        let Some(res) = done else {
+            return;
+        };
+        self.publish_rx = None;
+        self.publishing = None;
+        self.sh.reload_comments();
+        match res {
+            Ok(n) => self
+                .sh
+                .notify(format!("review published: {n} comment(s) on GitLab")),
+            Err(e) => self.sh.notify(format!(
+                "publication failed: {e} (p retries, without duplicates)"
+            )),
+        }
+        // The published comments come back as discussions.
+        self.start_remote();
+        self.diff.relayout(&self.sh);
+        self.stack.relayout(&self.sh);
     }
 
     /// Keys valid in every view. Returns whether the key was used.
@@ -897,6 +1349,255 @@ mod tests {
         app.on_key(key('a'));
         assert!(app.popup.is_none());
         assert!(app.sh.message().unwrap().contains("--no-llm"));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(key(c));
+        }
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn code(c: KeyCode) -> KeyEvent {
+        KeyEvent::new(c, KeyModifiers::NONE)
+    }
+
+    fn cursor_to(app: &mut App, row: Row) {
+        app.diff.pos.cursor = app.diff.rows.iter().position(|r| *r == row).unwrap();
+    }
+
+    fn comment_rows(app: &App) -> Vec<Row> {
+        app.diff
+            .rows
+            .iter()
+            .copied()
+            .filter(|r| matches!(r, Row::Comment { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn comments_lines_ranges_and_files_in_the_diff_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        // `c` on the added line of hunk 0.
+        cursor_to(&mut app, Row::Line { hunk: 0, line: 1 });
+        app.on_key(key('c'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no editor");
+        };
+        assert_eq!(e.title, "comment on src/a.rs:1");
+        assert_eq!(e.context, ["+b"]);
+        type_text(&mut app, "Why b?");
+        app.on_key(ctrl('s'));
+        assert!(app.popup.is_none());
+        assert_eq!(app.sh.comments.drafts.len(), 1);
+        assert!(dir.path().join("comments.json").exists());
+        // Shown under its line; the cursor stays on the line.
+        let i = app
+            .diff
+            .rows
+            .iter()
+            .position(|r| *r == Row::Line { hunk: 0, line: 1 })
+            .unwrap();
+        assert!(matches!(
+            app.diff.rows[i + 1],
+            Row::Comment {
+                hunk: Some(0),
+                line: Some(1),
+                part: 0,
+                ..
+            }
+        ));
+        assert_eq!(app.diff.pos.cursor, i);
+
+        // V, k, c: a range over both lines of the hunk.
+        app.on_key(key('V'));
+        app.on_key(key('k'));
+        app.on_key(key('c'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no editor");
+        };
+        assert_eq!(e.title, "comment on src/a.rs:1 (old)-1");
+        type_text(&mut app, "Range");
+        app.on_key(ctrl('s'));
+        assert_eq!(app.sh.comments.drafts.len(), 2);
+        assert!(app.diff.visual.is_none());
+
+        // C: the whole file.
+        app.on_key(key('C'));
+        type_text(&mut app, "File note");
+        app.on_key(ctrl('s'));
+        let f = app
+            .diff
+            .rows
+            .iter()
+            .position(|r| *r == Row::File(0))
+            .unwrap();
+        assert!(matches!(
+            app.diff.rows[f + 1],
+            Row::Comment { hunk: None, .. }
+        ));
+
+        // `c` on a draft edits it; emptying it deletes it.
+        let first = comment_rows(&app)[0];
+        cursor_to(&mut app, first);
+        app.on_key(key('c'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no editor");
+        };
+        assert!(e.title.starts_with("edit draft"));
+        assert_eq!(e.text, "File note");
+        for _ in 0..9 {
+            app.on_key(code(KeyCode::Backspace));
+        }
+        app.on_key(ctrl('s'));
+        assert_eq!(app.sh.comments.drafts.len(), 2);
+
+        // A range across hunks is refused.
+        cursor_to(&mut app, Row::Line { hunk: 0, line: 0 });
+        app.on_key(key('V'));
+        cursor_to(&mut app, Row::Line { hunk: 1, line: 0 });
+        app.on_key(key('c'));
+        assert!(app.popup.is_none());
+        assert!(app.sh.message().unwrap().contains("one hunk"));
+
+        // A local range cannot be published.
+        app.on_key(key('P'));
+        assert!(matches!(app.popup, Some(Popup::Review)));
+        app.on_key(key('p'));
+        assert!(app.sh.message().unwrap().contains("local range"));
+        // Enter on the first draft jumps to it.
+        app.on_key(key('j'));
+        app.on_key(code(KeyCode::Enter));
+        assert!(app.popup.is_none());
+        assert_eq!(app.view, View::Diff);
+    }
+
+    fn remote(disc_line: Option<u32>, version: &str) -> RemoteReview {
+        use survol_core::forge::{Author, Capabilities, Note, Position};
+        let note = Note {
+            id: 1,
+            body: "Is this needed?".into(),
+            author: Author {
+                username: "alice".into(),
+                name: "Alice".into(),
+            },
+            created_at: String::new(),
+            system: false,
+            resolvable: true,
+            resolved: false,
+            position: Some(Position {
+                position_type: "text".into(),
+                base_sha: "b".into(),
+                start_sha: "s".into(),
+                head_sha: "h".into(),
+                old_path: "src/b.rs".into(),
+                new_path: "src/b.rs".into(),
+                old_line: None,
+                new_line: disc_line,
+                line_range: None,
+            }),
+        };
+        RemoteReview {
+            capabilities: Capabilities::from_version(version),
+            discussions: vec![Discussion {
+                id: "d1".into(),
+                individual_note: false,
+                notes: vec![note],
+            }],
+            pending_drafts: 2,
+        }
+    }
+
+    #[test]
+    fn discussions_inline_replies_and_publish_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut review, _) = fixture(dir.path());
+        review.mr = Some(survol_core::model::MergeRequest {
+            project: "grp/app".into(),
+            iid: 7,
+            title: "Orders".into(),
+            description: String::new(),
+            source_branch: "feat".into(),
+            target_branch: "main".into(),
+            base_sha: "b".into(),
+            start_sha: "s".into(),
+            head_sha: "h".into(),
+            web_url: String::new(),
+        });
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.set_remote(Some(remote(Some(1), "17.3.0")));
+        // The discussion shows under line 1 of src/b.rs (hunk 2, `+f`).
+        let rows = comment_rows(&app);
+        assert_eq!(rows.len(), 2, "head and body");
+        assert!(matches!(
+            rows[0],
+            Row::Comment {
+                hunk: Some(2),
+                line: Some(1),
+                ..
+            }
+        ));
+        // `c` on it: a reply.
+        cursor_to(&mut app, rows[0]);
+        app.on_key(key('c'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no editor");
+        };
+        assert_eq!(e.title, "reply to @alice");
+        type_text(&mut app, "Yes, for the API.");
+        app.on_key(ctrl('s'));
+        assert!(matches!(
+            &app.sh.comments.drafts[0].anchor,
+            Anchor::Reply { discussion, .. } if discussion == "d1"
+        ));
+        assert_eq!(comment_rows(&app).len(), 4, "the reply draft follows");
+
+        // Summary from the panel, then the publish confirmation.
+        app.on_key(key('P'));
+        app.on_key(key('S'));
+        type_text(&mut app, "LGTM");
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.popup, Some(Popup::Review)));
+        assert_eq!(app.sh.comments.summary, "LGTM");
+        app.on_key(key('p'));
+        let Some(Confirm::Publish { plan, .. }) = &app.panel.confirm else {
+            panic!("no confirmation: {:?}", app.sh.message());
+        };
+        assert_eq!(plan.mode, comments::Mode::Drafts);
+        let reqs = plan.requests("grp%2Fapp", "7");
+        assert_eq!(reqs.len(), 3);
+        assert_eq!(
+            reqs[0].body.as_ref().unwrap()["in_reply_to_discussion_id"],
+            "d1"
+        );
+        // `n` cancels: nothing sent, still in the panel.
+        app.on_key(key('n'));
+        assert!(app.panel.confirm.is_none());
+        assert!(app.publishing.is_none());
+        assert!(matches!(app.popup, Some(Popup::Review)));
+
+        // An old instance: direct mode.
+        app.set_remote(Some(remote(Some(1), "15.2.0")));
+        app.on_key(key('p'));
+        let Some(Confirm::Publish { plan, .. }) = &app.panel.confirm else {
+            panic!("no confirmation");
+        };
+        assert_eq!(plan.mode, comments::Mode::Direct);
     }
 
     #[test]

@@ -276,6 +276,7 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
     app.stack.set_view_height(rest.height as usize);
     let v = &app.stack;
     let (scroll, cursor, hscroll) = (v.pos.scroll, v.pos.cursor, v.hscroll);
+    let sel = v.visual.map(|x| (x.min(cursor), x.max(cursor)));
     let end = (scroll + rest.height as usize).min(v.rows.len());
     let mut lines = Vec::with_capacity(end.saturating_sub(scroll));
     for i in scroll..end {
@@ -290,6 +291,7 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
                     cursor: is_cursor,
                     hscroll,
                     folded: false,
+                    selected: sel.is_some_and(|(a, b)| i >= a && i <= b),
                 },
             ),
             StackRow::Layer { group, layer } => {

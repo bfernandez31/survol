@@ -1,6 +1,7 @@
 //! Rendering: header, footer and help shared by the views, then each view.
 
 mod ask;
+mod comments;
 mod diff;
 mod graph;
 mod rows;
@@ -12,7 +13,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::app::{App, GraphStatus, GroupStatus, Popup, View};
+use crate::app::{App, GraphStatus, GroupStatus, Popup, RemoteStatus, View};
 use crate::views::graph::Mode;
 
 const ADDED_BG: Color = Color::Rgb(22, 52, 34);
@@ -46,6 +47,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Some(Popup::Pending(p)) => ask::render_pending(f, body, p),
         Some(Popup::Answer(v)) => ask::render_answer(f, body, v),
         Some(Popup::History(h)) => ask::render_history(f, body, h, &app.history),
+        Some(Popup::Comment(e)) => comments::render_editor(f, body, e),
+        Some(Popup::Review) => comments::render_panel(f, body, app),
         None => {}
     }
     if app.help {
@@ -116,6 +119,32 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         };
         spans.push(Span::styled(format!(" {graph} "), style));
     }
+    let drafts = sh.comments.drafts.len();
+    if drafts > 0 || !sh.comments.summary.trim().is_empty() {
+        spans.push(Span::styled(
+            format!(" ✎ {drafts} draft(s) "),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    match &app.remote_status {
+        RemoteStatus::Fetching(_) => spans.push(" ⟳ GitLab ".fg(ACCENT)),
+        RemoteStatus::Failed(_) => spans.push(" GitLab ✗ ".fg(Color::Red)),
+        RemoteStatus::Ready => {
+            let open = sh
+                .discussions()
+                .iter()
+                .filter(|d| !d.is_system() && d.is_resolvable() && !d.is_resolved())
+                .count();
+            spans.push(format!(" ◆ {open} open thread(s) ").fg(Color::Magenta));
+        }
+        RemoteStatus::Local => {}
+    }
+    if let Some(p) = &app.publishing {
+        spans.push(Span::styled(
+            format!(" ⟳ publishing {p} "),
+            Style::new().fg(ACCENT).bold(),
+        ));
+    }
     if let Some(p) = &app.ask_pending {
         let e = p.since.elapsed();
         spans.push(Span::styled(
@@ -155,10 +184,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(
             match app.view {
                 View::Diff => {
-                    " j/k move  n/N hunk  J/K file  space hunk ✓  r file ✓  u next unreviewed  e edit  gs graph  a ask  / filter  Tab view  ? help  q quit"
+                    " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  e edit  / filter  ? help"
                 }
                 View::Stack => {
-                    " j/k move  h/l fold  space ✓ + next  u next unreviewed  J/K group  Enter/gd to diff  gs graph  a ask  e edit  R regroup  ? help"
+                    " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  c comment  V range  P review  a ask  gs graph  R regroup  ? help"
                 }
                 View::Graph => match app.graph.mode {
                     Mode::Symbol => {
@@ -193,6 +222,7 @@ const HELP: &[(&str, &str)] = &[
     ("e", "open in editor (parent nvim if any)"),
     ("a", "ask the LLM about the node / group / hunk"),
     ("A", "last answer, then the review's questions"),
+    ("P", "Review panel: drafts, summary, discussions, publish"),
     ("q", "quit (state is saved on each change)"),
     ("# Diff", ""),
     ("n / N  ({ })", "next / previous hunk"),
@@ -204,6 +234,12 @@ const HELP: &[(&str, &str)] = &[
     ("zM / zR", "fold / unfold all"),
     ("/", "filter files, Esc to clear"),
     ("gs", "Graph view of the symbol under the cursor"),
+    (
+        "c",
+        "comment the line (on a draft: edit; on a thread: reply)",
+    ),
+    ("V then c", "select lines, comment the range"),
+    ("C", "comment the whole file"),
     ("# Stack", ""),
     ("space", "toggle group / layer / hunk reviewed, go on"),
     ("u", "next unreviewed group"),
@@ -215,6 +251,7 @@ const HELP: &[(&str, &str)] = &[
     ("w", "grouping warnings"),
     ("R", "regroup without cache (asks: LLM call)"),
     ("gs", "Graph view of the hunk's symbol"),
+    ("c / V then c / C (content)", "comment line / range / file"),
     ("# Graph", ""),
     ("m", "mode: changed symbols / search / module map / symbol"),
     ("Enter", "symbol: focus it (new root); section/module: fold"),
@@ -277,7 +314,7 @@ fn render_help(f: &mut Frame, area: Rect, view: View) {
 }
 
 /// Word-wraps `text` to `width` columns (at least one line).
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut lines = Vec::new();
     for para in text.lines() {
