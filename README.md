@@ -104,7 +104,19 @@ Three views, `Tab` / `Shift-Tab` (or `1` / `2` / `3`) to switch:
     node (changed lines highlighted);
   - *module map*: packages / directories with their dependencies in and out;
     `Enter` lists a module's changed symbols, `x` writes the map as Mermaid to
-    `.git/survol/exports/`.
+    `.git/survol/exports/`;
+  - *flows* (`f`, or `m`): the entry points (HTTP endpoints, front-end routes,
+    listeners, scheduled jobs, runners) whose end-to-end flow reaches a changed
+    symbol, grouped by kind. `Enter` / `l` opens the flow on the right: an
+    indented tree from the entry down to repositories (`[db]`, with their
+    entities) and external calls (`[external]`), through calls, interface
+    implementations, front → back HTTP calls and events; each step with its
+    layer, whether it is modified and the path confidence. `n` / `N` jump
+    between changed steps, `Enter` opens the symbol view, `e` / `gd` the editor
+    / the diff. The base revision's graph is built in the background; when a
+    flow differs, `b` switches after → before → both merged (added / removed
+    steps, reroutes, new external calls, persistence accesses gone). `x` writes
+    the flow (or its before / after) as Mermaid to `.git/survol/exports/`.
 
   `/` finds any symbol by name, `e` opens the node's line in the editor (also in
   unchanged files), `gd` shows the symbol's hunks in the Diff view. Test code calling
@@ -188,6 +200,8 @@ survol-cli graph main..HEAD | jq '.symbols[] | {name, callers: [.callers[] | .na
 survol-cli graph main..HEAD --symbol OwnerService.find   # one symbol, changed or not
 survol-cli graph main..HEAD --modules                    # package / directory dependencies
 survol-cli graph main..HEAD --mermaid                    # the same, as a Mermaid flowchart
+survol-cli flows main..HEAD | jq '.flows[] | {label: .entry.label, diff: .diff.status}'
+survol-cli flows main..HEAD --entry "GET /api/owners" --mermaid   # one flow, before / after if it changed
 survol-cli ask main..HEAD --symbol Owner.addPet "What does this component do?"
 survol-cli ask main..HEAD --group 2 --prompt "How do the pieces fit together?"  # prompt only
 survol-cli comments 123            # drafts (and where they land) + the MR's discussions

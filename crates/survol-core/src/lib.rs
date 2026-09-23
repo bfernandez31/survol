@@ -7,6 +7,7 @@ pub mod comments;
 pub mod config;
 pub mod diff;
 pub mod doctor;
+pub mod flows;
 pub mod forge;
 pub mod git;
 pub mod graph;

@@ -11,6 +11,7 @@ use survol_core::ask::Subject;
 use survol_core::comments::{self, CommentStore};
 use survol_core::config::Config;
 use survol_core::doctor::{self, Status};
+use survol_core::flows;
 use survol_core::forge::gitlab::{Gitlab, encode};
 use survol_core::forge::{Capabilities, Forge};
 use survol_core::git::Git;
@@ -82,6 +83,26 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["symbol", "modules"])]
         mermaid: bool,
         /// Rebuild the graph instead of loading it from the cache.
+        #[arg(long)]
+        no_cache: bool,
+    },
+    /// End-to-end flows touched by the review: from each impacted entry point
+    /// (HTTP endpoint, front-end route, listener, job, runner) down to
+    /// persistence and external calls, with their before / after, as JSON.
+    Flows {
+        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        target: Option<String>,
+        /// Only the flows whose entry label, name or id contains NAME
+        /// (`GET /api/owners`, `OwnerController.show`...).
+        #[arg(long, value_name = "NAME")]
+        entry: Option<String>,
+        /// Print Mermaid flowcharts instead (before / after when the flow changed).
+        #[arg(long)]
+        mermaid: bool,
+        /// Do not build the base revision's graph: no before / after.
+        #[arg(long)]
+        no_base: bool,
+        /// Rebuild the graphs instead of loading them from the cache.
         #[arg(long)]
         no_cache: bool,
     },
@@ -280,6 +301,61 @@ fn run() -> Result<ExitCode> {
                     "symbols": syms.iter().map(|&s| symbol_json(&g, s)).collect::<Vec<_>>(),
                 })
             };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        Cmd::Flows {
+            target,
+            entry,
+            mermaid,
+            no_base,
+            no_cache,
+        } => {
+            let repo = repo.context("not inside a git repository")?;
+            let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
+            let g = review::build_graph(&r, &cfg, progress, !no_cache)?;
+            let limits = flows::Limits::default();
+            let mut all = flows::impacted(&g, &limits);
+            if !no_base {
+                let base = flows::base_graph(&r, &cfg, &g, &all, progress, !no_cache)?;
+                flows::compare(&mut all, &g, &base, &limits);
+            }
+            let selected: Vec<&flows::ImpactedFlow> = match &entry {
+                Some(name) => flows::find(&all, name),
+                None => all.iter().collect(),
+            };
+            progress(&format!(
+                "{} impacted flow(s), {} changed before / after",
+                selected.len(),
+                selected
+                    .iter()
+                    .filter(|f| f.diff.as_ref().is_some_and(|d| d.is_relevant()))
+                    .count()
+            ));
+            if let Some(name) = &entry
+                && selected.is_empty()
+            {
+                anyhow::bail!("no impacted flow matches `{name}`");
+            }
+            if mermaid {
+                if let [one] = selected.as_slice() {
+                    print!("{}", one.to_mermaid());
+                } else {
+                    for f in &selected {
+                        println!(
+                            "## {}\n\n```mermaid\n{}```\n",
+                            f.entry.label,
+                            f.to_mermaid()
+                        );
+                    }
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let out = json!({
+                "base_sha": r.base_sha,
+                "head_sha": r.head_sha,
+                "compared": !no_base,
+                "flows": selected,
+            });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
         Cmd::Ask {

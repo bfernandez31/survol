@@ -22,12 +22,19 @@ pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
     if app.sh.graph.is_none() {
         return render_status(f, body, app);
     }
+    if app.graph.mode == Mode::Flows {
+        app.graph.flows.tick(&mut app.sh, &app.cfg);
+    }
     let content = if app.graph.list_hidden {
         body
     } else {
-        let w = (body.width / 2)
-            .clamp(30, 90)
-            .min(body.width.saturating_sub(20));
+        // Flows: the flow tree needs the room.
+        let w = if app.graph.mode == Mode::Flows {
+            (body.width * 2 / 5).clamp(30, 72)
+        } else {
+            (body.width / 2).clamp(30, 90)
+        }
+        .min(body.width.saturating_sub(20));
         let [list, main] =
             Split::horizontal([Constraint::Length(w), Constraint::Min(10)]).areas(body);
         render_list(f, list, app);
@@ -98,7 +105,7 @@ fn short_path(path: &str) -> &str {
 }
 
 /// `left`, then `right` against the right edge; `left` is cut to make room.
-fn two_sided(
+pub(super) fn two_sided(
     left: Vec<Span<'static>>,
     right: Vec<Span<'static>>,
     width: usize,
@@ -146,7 +153,7 @@ fn impact_spans(callers: usize, untouched: usize) -> Vec<Span<'static>> {
 }
 
 /// Cuts `spans` to `width` columns, from `width`-limited overflow.
-fn clip(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
+pub(super) fn clip(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
     let mut room = width;
     let mut out = Vec::new();
     for s in spans {
@@ -166,7 +173,7 @@ fn clip(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
     Line::from(out)
 }
 
-fn cursor_line(line: Line<'static>, cursor: bool, width: usize) -> Line<'static> {
+pub(super) fn cursor_line(line: Line<'static>, cursor: bool, width: usize) -> Line<'static> {
     if !cursor {
         return line;
     }
@@ -203,6 +210,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
             Mode::Changed => list_row(g, v, &v.list[i]),
             Mode::Found => list_row(g, v, &v.found[i]),
             Mode::Modules => mod_row(g, v, v.mod_rows[i], in_out.as_deref()),
+            Mode::Flows => super::flows::entry_row(&v.flows, v.flows.rows[i], width),
             Mode::Symbol => tree_row(g, &v.tree[i], width),
         };
         lines.push(cursor_line(
@@ -219,6 +227,8 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         lines.push(Line::from(
             match v.mode {
                 Mode::Changed => "  No changed symbol in an indexed language.",
+                Mode::Flows if !v.flows.computed => "  Computing flows…",
+                Mode::Flows => "  No entry point reaches a changed symbol.",
                 _ => "  Nothing here.",
             }
             .dim(),
@@ -241,6 +251,7 @@ fn list_title(g: &Graph, v: &GraphView) -> Line<'static> {
             ])
         }
         Mode::Found => Line::from(format!(" search `{}` ", v.query).bold()),
+        Mode::Flows => super::flows::list_title(&v.flows),
         Mode::Modules => {
             let n = v.modules.as_ref().map_or(0, |m| m.modules.len());
             let c = v
@@ -455,7 +466,16 @@ fn tree_row(g: &Graph, row: &TreeRow, width: usize) -> Vec<Span<'static>> {
 // ----- preview -----------------------------------------------------------
 
 fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.graph.focus == Focus::Content;
+    // Flows: the flow above, the code of its selected step below.
+    let area = if app.graph.mode == Mode::Flows {
+        let [top, bottom] =
+            Split::vertical([Constraint::Percentage(62), Constraint::Min(5)]).areas(area);
+        super::flows::render_flow(f, top, app);
+        bottom
+    } else {
+        area
+    };
+    let focused = app.graph.focus == Focus::Content && app.graph.mode != Mode::Flows;
     let g = app.sh.graph.as_ref().expect("graph shown");
     let target = app.graph.target(g);
     let Some(t) = target else {
@@ -650,7 +670,7 @@ fn render_module_details(f: &mut Frame, area: Rect, app: &App, focused: bool) {
                 _ => None,
             }
         }
-        Mode::Symbol => None,
+        Mode::Symbol | Mode::Flows => None,
     };
     let Some(i) = name.and_then(|n| map.modules.iter().position(|m| m.name == n)) else {
         f.render_widget(pane(focused), area);
