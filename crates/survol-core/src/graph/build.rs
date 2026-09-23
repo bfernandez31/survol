@@ -384,6 +384,13 @@ impl<'a> GraphBuilder<'a> {
         self.tables.subs.get(&ty).map_or(&[], Vec::as_slice)
     }
 
+    /// Head file (index in [`Index::files`]) that the relative module
+    /// specifier or path `spec` of file `file` points to (`./x`, `../x.js`,
+    /// `./x.component.html`); usual extensions and `index` files tried.
+    pub fn resolve_module(&self, file: usize, spec: &str) -> Option<usize> {
+        super::resolve::resolve_module(self, &self.index.files[file].path, spec)
+    }
+
     // ---- generic resolution
 
     fn resolve_all(&mut self) {

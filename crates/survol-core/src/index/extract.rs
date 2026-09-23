@@ -7,8 +7,8 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use super::{
-    Annotation, AnnotationArg, Binding, Def, FileIndex, Import, ImportedName, Lang, Ref, RefKind,
-    Span, SymbolKind,
+    Annotation, AnnotationArg, Binding, Def, FileIndex, Import, ImportedName, Lang, LazyLoad,
+    MAX_ARG, MAX_OBJECT_VALUE, MODIFIERS, Ref, RefKind, RouteDef, Span, SymbolKind, Value,
 };
 
 /// Receivers longer than this are cut (chained calls can be huge).
@@ -32,13 +32,37 @@ const PARAM_KINDS: &[&str] = &[
     "array_pattern",
 ];
 
-/// Parses `src` and extracts its definitions, references, imports and bindings.
+/// Parameter nodes whose annotations are kept on their [`Binding`].
+const ANNOTATED_PARAMS: &[&str] = &[
+    "formal_parameter",
+    "class_parameter",
+    "parameter",
+    "required_parameter",
+    "optional_parameter",
+];
+
+/// First call arguments kept in [`Ref::arg`], and initialisers kept as
+/// [`Value`]s: literals, names, member accesses, concatenations, `new`.
+const ARG_KINDS: &[&str] = &[
+    "string_literal",
+    "text_block",
+    "string",
+    "template_string",
+    "identifier",
+    "field_access",
+    "member_expression",
+    "navigation_expression",
+    "binary_expression",
+    "object_creation_expression",
+    "new_expression",
+    "class_literal",
+    "parenthesized_expression",
+];
+
+/// Parses `src` and extracts its definitions, references, imports and bindings
+/// (code), or its keys and elements (resources, see [`Lang::is_code`]).
 /// Never fails: syntax errors give a partial result with `has_errors` set.
 pub fn parse_file(path: &str, lang: Lang, src: &str) -> FileIndex {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&lang.grammar())
-        .expect("grammar compatible with the tree-sitter version");
     let mut out = FileIndex {
         path: path.to_string(),
         lang,
@@ -47,9 +71,21 @@ pub fn parse_file(path: &str, lang: Lang, src: &str) -> FileIndex {
         refs: Vec::new(),
         imports: Vec::new(),
         bindings: Vec::new(),
+        values: Vec::new(),
+        routes: Vec::new(),
+        config: Vec::new(),
+        elements: Vec::new(),
         lines: src.lines().count() as u32,
         has_errors: false,
     };
+    let Some(grammar) = lang.grammar() else {
+        (out.config, out.elements) = super::resource::extract(lang, src);
+        return out;
+    };
+    let mut parser = Parser::new();
+    parser
+        .set_language(&grammar)
+        .expect("grammar compatible with the tree-sitter version");
     let Some(tree) = parser.parse(src, None) else {
         out.has_errors = true;
         return out;
@@ -79,6 +115,8 @@ struct Hit<'t> {
     name: Option<Node<'t>>,
     receiver: Option<Node<'t>>,
     binding_type: Option<Node<'t>>,
+    /// Initialiser of a value.
+    expr: Option<Node<'t>>,
 }
 
 impl<'a> Extractor<'a> {
@@ -87,7 +125,7 @@ impl<'a> Extractor<'a> {
     }
 
     fn run(&mut self, root: Node) {
-        let query = self.lang.query();
+        let query = self.lang.query().expect("code language");
         let names = query.capture_names();
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(query, root, self.src.as_bytes());
@@ -96,21 +134,26 @@ impl<'a> Extractor<'a> {
         let mut defs: HashMap<usize, Hit> = HashMap::new();
         let mut refs: HashMap<usize, Hit> = HashMap::new();
         let mut bindings: HashMap<usize, Hit> = HashMap::new();
+        let mut values: HashMap<usize, Hit> = HashMap::new();
         let mut imports = Vec::new();
         while let Some(m) = matches.next() {
             let mut hit: Option<Hit> = None;
             let (mut name, mut receiver, mut btype, mut bname) = (None, None, None, None);
+            let (mut vname, mut vexpr) = (None, None);
             for c in m.captures() {
                 match names[c.index as usize] {
                     "name" => name = Some(c.node),
                     "receiver" => receiver = Some(c.node),
                     "binding.type" => btype = Some(c.node),
                     "binding.name" => bname = Some(c.node),
+                    "value.name" => vname = Some(c.node),
+                    "value.expr" => vexpr = Some(c.node),
                     "package" => self.out.package = Some(self.text(c.node).to_string()),
                     "import" => imports.push(c.node),
                     what if what.starts_with("definition.")
                         || what.starts_with("reference.")
-                        || what.starts_with("binding.") =>
+                        || what.starts_with("binding.")
+                        || what == "value" =>
                     {
                         hit = Some(Hit {
                             pattern: m.pattern_index,
@@ -119,6 +162,7 @@ impl<'a> Extractor<'a> {
                             name: None,
                             receiver: None,
                             binding_type: None,
+                            expr: None,
                         });
                     }
                     _ => {}
@@ -126,7 +170,14 @@ impl<'a> Extractor<'a> {
             }
             let Some(mut hit) = hit else { continue };
             hit.receiver = receiver;
-            let (map, key) = if hit.what.starts_with("definition.") {
+            let (map, key) = if hit.what == "value" {
+                let (Some(n), Some(e)) = (vname, vexpr) else {
+                    continue;
+                };
+                hit.name = Some(n);
+                hit.expr = Some(e);
+                (&mut values, n.id())
+            } else if hit.what.starts_with("definition.") {
                 hit.name = name;
                 (&mut defs, hit.node.id())
             } else if hit.what.starts_with("reference.") {
@@ -162,6 +213,16 @@ impl<'a> Extractor<'a> {
         bindings.sort_by_key(|h| h.node.start_byte());
         for h in bindings {
             self.binding(h, &ranges);
+        }
+        let mut values: Vec<Hit> = values.into_values().collect();
+        values.sort_by_key(|h| h.node.start_byte());
+        for h in values {
+            self.value(h, &ranges);
+        }
+        if matches!(self.lang, Lang::TypeScript | Lang::Tsx | Lang::JavaScript)
+            && self.src.contains("path")
+        {
+            self.routes(root, &ranges);
         }
         imports.sort_by_key(|n| n.start_byte());
         imports.dedup_by_key(|n| n.id());
@@ -214,6 +275,11 @@ impl<'a> Extractor<'a> {
                 } else {
                     (None, false)
                 };
+            let type_name = if kind.is_callable() || kind == SymbolKind::Field {
+                self.declared_type(h.node)
+            } else {
+                None
+            };
             self.out.defs.push(Def {
                 name,
                 kind,
@@ -223,6 +289,8 @@ impl<'a> Extractor<'a> {
                 annotations,
                 params,
                 variadic,
+                type_name,
+                modifiers: self.modifiers(h.node),
             });
             ranges.push((start, end));
             stack.push(ranges.len() - 1);
@@ -273,9 +341,9 @@ impl<'a> Extractor<'a> {
                 None => t,
             }
         });
-        let arity = match kind {
-            RefKind::Call | RefKind::New => arity(h.node),
-            _ => None,
+        let (arity, arg) = match kind {
+            RefKind::Call | RefKind::New => (arity(h.node), self.first_arg(h.node)),
+            _ => (None, None),
         };
         self.out.refs.push(Ref {
             kind,
@@ -284,14 +352,36 @@ impl<'a> Extractor<'a> {
             arity,
             line: line(name_node),
             scope: self.scope(h.node, ranges, false),
+            arg,
         });
     }
 
     fn binding(&mut self, h: Hit, ranges: &[(usize, usize)]) {
         let name = self.text(h.name.expect("bindings have a name")).to_string();
         let type_name = type_name(self.text(h.binding_type.expect("bindings have a type")));
-        // Inferred from a call: only constructor calls (capitalised) count.
-        if type_name.is_empty() || !type_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        let annotations = if ANNOTATED_PARAMS.contains(&h.node.kind()) {
+            let mut a = self.annotations(h.node);
+            // Kotlin function parameters: `parameter_modifiers` precede them.
+            if let Some(m) = h
+                .node
+                .prev_named_sibling()
+                .filter(|p| p.kind() == "parameter_modifiers")
+            {
+                a.extend(
+                    named_children(m)
+                        .filter(|n| ANNOTATION_KINDS.contains(&n.kind()))
+                        .filter_map(|n| self.annotation(n)),
+                );
+            }
+            a
+        } else {
+            Vec::new()
+        };
+        // Inferred from a call: only constructor calls (capitalised) count;
+        // annotated parameters are kept whatever their type (`@Inject(T) x: string`).
+        if type_name.is_empty()
+            || (!type_name.starts_with(|c: char| c.is_ascii_uppercase()) && annotations.is_empty())
+        {
             return;
         }
         let field = h.what == "binding.field";
@@ -311,7 +401,165 @@ impl<'a> Extractor<'a> {
             scope,
             field,
             line: line(h.node),
+            annotations,
         });
+    }
+
+    /// A string-like initialiser, see [`Value`].
+    fn value(&mut self, h: Hit, ranges: &[(usize, usize)]) {
+        let expr = h.expr.expect("values have an initialiser");
+        let scope = self.scope(h.node, ranges, true);
+        let raw = self.text(expr);
+        let keep = match expr.kind() {
+            "object" => {
+                scope.is_none() && raw.len() <= MAX_OBJECT_VALUE && raw.contains(['\'', '"', '`'])
+            }
+            "binary_expression" => raw.contains(['\'', '"', '`']),
+            "class_literal" | "new_expression" | "object_creation_expression" => false,
+            k => ARG_KINDS.contains(&k),
+        };
+        if !keep || (expr.kind() != "object" && raw.len() > MAX_ARG) {
+            return;
+        }
+        self.out.values.push(Value {
+            name: self.text(h.name.expect("values have a name")).to_string(),
+            text: collapse(raw, MAX_OBJECT_VALUE),
+            scope,
+            line: line(h.node),
+        });
+    }
+
+    /// Source of the first argument of a call node, when of an [`ARG_KINDS`] kind.
+    fn first_arg(&self, call: Node) -> Option<String> {
+        let list = call.child_by_field_name("arguments").or_else(|| {
+            named_children(call).find(|c| matches!(c.kind(), "value_arguments" | "argument_list"))
+        })?;
+        let mut first = named_children(list).find(|a| a.kind() != "comment")?;
+        if first.kind() == "value_argument" {
+            // Kotlin: `name = expr` or `expr`.
+            first = named_children(first).last()?;
+        }
+        let ok = ARG_KINDS.contains(&first.kind())
+            || (first.kind() == "call_expression"
+                && self.lang == Lang::Kotlin
+                && named_children(first).next().is_some_and(|c| {
+                    c.kind() == "identifier"
+                        && self.text(c).starts_with(|c: char| c.is_ascii_uppercase())
+                }));
+        ok.then(|| collapse(self.text(first), MAX_ARG))
+    }
+
+    /// Declared type of a field, return type of a callable.
+    fn declared_type(&self, node: Node) -> Option<String> {
+        let t = node
+            .child_by_field_name("type")
+            .or_else(|| node.child_by_field_name("return_type"))
+            .map(|t| {
+                // TS `type_annotation`: `: T`.
+                if t.kind() == "type_annotation" {
+                    named_children(t).next().unwrap_or(t)
+                } else {
+                    t
+                }
+            })
+            .or_else(|| {
+                // Kotlin: `fun f(): T`, `val x: T`.
+                let holder = if node.kind() == "property_declaration" {
+                    named_children(node).find(|c| c.kind() == "variable_declaration")?
+                } else {
+                    node
+                };
+                let mut after_params = holder.kind() == "variable_declaration";
+                named_children(holder).find(|c| {
+                    if c.kind() == "function_value_parameters" {
+                        after_params = true;
+                        return false;
+                    }
+                    after_params && matches!(c.kind(), "user_type" | "nullable_type")
+                })
+            })?;
+        let name = type_name(self.text(t));
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// [`MODIFIERS`] of a definition node: its keywords and `modifiers` child.
+    fn modifiers(&self, node: Node) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |t: &str| {
+            if MODIFIERS.contains(&t) && !out.iter().any(|m| m == t) {
+                out.push(t.to_string());
+            }
+        };
+        let mut c = node.walk();
+        for ch in node.children(&mut c) {
+            if ch.kind() == "modifiers" {
+                let mut c2 = ch.walk();
+                for m in ch.children(&mut c2) {
+                    push(self.text(m));
+                }
+            } else if !ch.is_named() {
+                push(ch.kind());
+            }
+        }
+        out
+    }
+
+    /// Route-shaped object literals, in source order (parents first).
+    fn routes(&mut self, root: Node, ranges: &[(usize, usize)]) {
+        let mut stack: Vec<(Node, Option<u32>)> = vec![(root, None)];
+        while let Some((n, parent)) = stack.pop() {
+            let mut inner = parent;
+            if n.kind() == "object"
+                && let Some(r) = self.route(n, parent, ranges)
+            {
+                self.out.routes.push(r);
+                inner = Some(self.out.routes.len() as u32 - 1);
+            }
+            let children: Vec<Node> = named_children(n).collect();
+            stack.extend(children.into_iter().rev().map(|c| (c, inner)));
+        }
+    }
+
+    fn route(&self, obj: Node, parent: Option<u32>, ranges: &[(usize, usize)]) -> Option<RouteDef> {
+        let mut path = None;
+        let mut route = RouteDef {
+            path: String::new(),
+            component: None,
+            load: None,
+            redirect: None,
+            parent,
+            line: line(obj),
+            scope: self.scope(obj, ranges, false),
+        };
+        let mut routed = false;
+        for p in named_children(obj).filter(|p| p.kind() == "pair") {
+            let (Some(k), Some(v)) = (p.child_by_field_name("key"), p.child_by_field_name("value"))
+            else {
+                continue;
+            };
+            let key = self.text(k);
+            let key = super::unquote(key).unwrap_or(key);
+            let text = self.text(v);
+            match key {
+                "path" => path = super::unquote(text).map(|p| p.replace("\\/", "/")),
+                "component" => {
+                    routed = true;
+                    route.component = Some(type_name(text));
+                }
+                "loadComponent" | "loadChildren" => {
+                    routed = true;
+                    route.load = lazy_load(text, key == "loadChildren");
+                }
+                "children" => routed = true,
+                "redirectTo" => {
+                    routed = true;
+                    route.redirect = super::unquote(text).map(str::to_string);
+                }
+                _ => {}
+            }
+        }
+        route.path = path?;
+        routed.then_some(route)
     }
 
     /// Annotations and decorators of a definition node: in the node, in its
@@ -679,6 +927,46 @@ fn type_name(text: &str) -> String {
         .unwrap_or("")
         .trim();
     t.rsplit(['.', ':']).next().unwrap_or("").trim().to_string()
+}
+
+/// `() => import('./x').then(m => m.X)` or `'./x#X'` → the lazy load.
+fn lazy_load(text: &str, children: bool) -> Option<LazyLoad> {
+    if let Some(s) = super::unquote(text) {
+        let (module, export) = s.split_once('#').unwrap_or((s, ""));
+        return Some(LazyLoad {
+            children,
+            module: module.to_string(),
+            export: (!export.is_empty()).then(|| export.to_string()),
+        });
+    }
+    let after = &text[text.find("import(")? + "import(".len()..];
+    let module = super::string_literals(after)
+        .into_iter()
+        .next()?
+        .to_string();
+    let export = after.find("then(").and_then(|i| {
+        let body = &after[i..];
+        let arrow = body.find("=>")?;
+        let expr = body[arrow + 2..].trim_start();
+        let end = expr
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.'))
+            .unwrap_or(expr.len());
+        expr[..end].rsplit_once('.').map(|(_, m)| m.to_string())
+    });
+    Some(LazyLoad {
+        children,
+        module,
+        export,
+    })
+}
+
+/// Whitespace collapsed, truncated to `max` characters.
+fn collapse(text: &str, max: usize) -> String {
+    let t: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match t.char_indices().nth(max) {
+        Some((i, _)) => t[..i].to_string(),
+        None => t,
+    }
 }
 
 fn named_children(node: Node) -> impl Iterator<Item = Node> {

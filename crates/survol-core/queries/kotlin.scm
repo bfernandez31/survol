@@ -32,3 +32,7 @@
 (parameter . (identifier) @binding.name [(user_type) (nullable_type)] @binding.type) @binding.local
 (property_declaration (variable_declaration . (identifier) @binding.name [(user_type) (nullable_type)] @binding.type)) @binding.local
 (property_declaration (variable_declaration . (identifier) @binding.name .) (call_expression . (identifier) @binding.type)) @binding.local
+
+; ---- values: initialisers of constants, fields and locals (string-like ones
+; are kept in code: URLs, config keys, environment objects)
+(property_declaration (variable_declaration . (identifier) @value.name) "=" . (_) @value.expr) @value

@@ -29,7 +29,7 @@ pub use rules::{FrameworkRule, default_rules};
 
 /// Version of the graph construction: part of the cache key. Bump it when
 /// resolution or the built-in rules change.
-pub const GRAPH_VERSION: u32 = 1;
+pub const GRAPH_VERSION: u32 = 2;
 
 /// Index of a symbol in [`Graph::symbols`].
 pub type SymIdx = u32;
@@ -51,6 +51,8 @@ pub enum Role {
     Entity,
     /// UI component (Angular `@Component`...).
     View,
+    /// Boundary to another system: `@FeignClient`, HTTP client wrappers.
+    External,
     /// Declared in a test file.
     Test,
 }
@@ -89,6 +91,7 @@ pub struct Symbol {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<Role>,
     /// Free-form facts set by rules, e.g. `http.route = "GET /owners/{id}"`.
+    /// Multiple values are joined by `, `. Conventions: see [`rules`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tags: BTreeMap<String, String>,
 }
@@ -126,6 +129,8 @@ pub enum EdgeKind {
     Configures,
     /// Route or template → component it displays (framework rules).
     Routes,
+    /// Event publisher → listener of the event type (framework rules).
+    Publishes,
 }
 
 impl EdgeKind {

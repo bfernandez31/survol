@@ -1,6 +1,7 @@
 ; survol index query for Java.
 ; Captures: @definition.<kind> + @name, @reference.<kind> + @name (+ @receiver),
-; @import, @package, @binding.<field|local> + @binding.name + @binding.type.
+; @import, @package, @binding.<field|local> + @binding.name + @binding.type,
+; @value + @value.name + @value.expr.
 ; Annotations, containers, arity and parameters are computed in code.
 
 (package_declaration [(identifier) (scoped_identifier)] @package)
@@ -51,3 +52,7 @@
     value: (object_creation_expression type: (_) @binding.type))) @binding.local
 (record_declaration parameters: (formal_parameters
   (formal_parameter type: (_) @binding.type name: (identifier) @binding.name) @binding.field))
+
+; ---- values: initialisers of constants, fields and locals (string-like ones
+; are kept in code: URLs, config keys, environment objects)
+(variable_declarator name: (identifier) @value.name value: (_) @value.expr) @value

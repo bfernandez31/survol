@@ -742,7 +742,7 @@ fn outer_type(b: &GraphBuilder, ty: SymIdx) -> Option<SymIdx> {
 
 /// Head file imported by `spec` from `from`: relative specifiers only, with
 /// the usual extensions and `index` files.
-fn resolve_module(b: &GraphBuilder, from: &str, spec: &str) -> Option<usize> {
+pub(super) fn resolve_module(b: &GraphBuilder, from: &str, spec: &str) -> Option<usize> {
     if !spec.starts_with('.') {
         return None;
     }

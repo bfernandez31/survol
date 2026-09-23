@@ -13,6 +13,25 @@
 //! register it in [`default_rules`], and bump [`super::GRAPH_VERSION`] when
 //! it changes (cached graphs are keyed by it and by the rule names).
 //!
+//! Rules: [`TestNaming`], [`Spring`], [`Angular`], [`HttpLink`] (in this order).
+//!
+//! Conventions shared by the rules (and shown by the views):
+//! - roles: see [`super::Role`] (`External` for `@FeignClient` and HTTP client users);
+//! - edges: `injects` (consumer → implementation or `@Bean` method),
+//!   `http_calls` (HTTP call → endpoint), `configures` (config file, OpenAPI
+//!   spec or `environment` → consumer; line of the key), `routes` (route
+//!   table or template → component), `publishes` (publisher → listener);
+//! - tags (several values joined by `, `): `entry` (`http`, `kafka`,
+//!   `rabbit`, `jms`, `sqs`, `scheduled`, `event`, `runner`, `main`,
+//!   `route`), `http.route` (`GET /api/owners/{id}`), `http.context_path`,
+//!   `http.spec`, `http.calls`, `http.client`, `http.base_url`, `external`,
+//!   `kafka.topics`, `rabbit.queues`, `jms.destination`, `schedule`,
+//!   `event.type`, `event.publishes`, `spring.stereotype`, `spring.bean`,
+//!   `bean.type`, `spring.profile`, `config.keys`, `config.prefix`,
+//!   `persistence`, `persistence.entity`, `persistence.table`,
+//!   `angular.selector`, `angular.template`, `angular.route`,
+//!   `angular.provided_in`, `angular.pipe`, `angular.environment`.
+//!
 //! Walking annotated definitions:
 //!
 //! ```ignore
@@ -26,11 +45,20 @@
 //! }
 //! ```
 
+mod angular;
+mod http_link;
+mod spring;
 mod test_naming;
+#[cfg(test)]
+mod tests;
+pub mod util;
 
 use super::GraphBuilder;
 use crate::index::Index;
 
+pub use angular::Angular;
+pub use http_link::HttpLink;
+pub use spring::Spring;
 pub use test_naming::TestNaming;
 
 pub trait FrameworkRule: Send + Sync {
@@ -44,5 +72,10 @@ pub trait FrameworkRule: Send + Sync {
 
 /// Rules applied by [`crate::review::build_graph`], in order.
 pub fn default_rules() -> Vec<Box<dyn FrameworkRule>> {
-    vec![Box::new(TestNaming)]
+    vec![
+        Box::new(TestNaming),
+        Box::new(Spring),
+        Box::new(Angular),
+        Box::new(HttpLink),
+    ]
 }

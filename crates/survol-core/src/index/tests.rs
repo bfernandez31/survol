@@ -452,3 +452,156 @@ fn builds_from_git_with_blob_cache() {
     assert_eq!(second.files, first.files);
     assert_eq!(second.base_files, first.base_files);
 }
+
+#[test]
+fn framework_facts_java_kotlin() {
+    let f = parse(
+        "src/A.java",
+        r#"package app;
+@Service
+public abstract class A {
+    private static final String BASE = "/api" + "/v1";
+    private final Repo repo;
+    A(@Qualifier("main") Repo repo, @Value("${a.b}") int n) { this.repo = repo; }
+    @Bean public Clock clock() { publisher.publishEvent(new Ev(1)); return null; }
+}
+"#,
+    );
+    let a = def(&f, "A");
+    assert_eq!(a.modifiers, ["abstract"]);
+    let repo = def(&f, "repo");
+    assert_eq!(repo.type_name.as_deref(), Some("Repo"));
+    assert_eq!(repo.modifiers, ["final"]);
+    assert_eq!(def(&f, "clock").type_name.as_deref(), Some("Clock"));
+    let base = f.values.iter().find(|v| v.name == "BASE").unwrap();
+    assert_eq!(base.text, "\"/api\" + \"/v1\"");
+    assert_eq!(base.scope, Some(0));
+    let p = f
+        .bindings
+        .iter()
+        .find(|b| b.name == "repo" && !b.field)
+        .unwrap();
+    assert_eq!(p.annotations[0].name, "Qualifier");
+    // Primitive parameter kept because annotated.
+    let n = binding(&f, "n");
+    assert_eq!(n.annotations[0].name, "Value");
+    let publish = f.refs.iter().find(|r| r.name == "publishEvent").unwrap();
+    assert_eq!(publish.arg.as_deref(), Some("new Ev(1)"));
+
+    let k = parse(
+        "src/B.kt",
+        r#"package app
+@Service
+class B(@Qualifier("q") private val repo: Repo) {
+    @Autowired lateinit var clock: Clock
+    private val url = "http://x/" + path
+    fun run(@Value("\${a}") a: String): Result { events.publishEvent(Ev(a)) }
+}
+"#,
+    );
+    let clock = def(&k, "clock");
+    assert_eq!(clock.type_name.as_deref(), Some("Clock"));
+    assert!(clock.has_modifier("lateinit"));
+    assert_eq!(def(&k, "run").type_name.as_deref(), Some("Result"));
+    assert_eq!(binding(&k, "repo").annotations[0].name, "Qualifier");
+    assert_eq!(binding(&k, "a").annotations[0].name, "Value");
+    assert!(k.values.iter().any(|v| v.name == "url"));
+    let publish = k.refs.iter().find(|r| r.name == "publishEvent").unwrap();
+    assert_eq!(publish.arg.as_deref(), Some("Ev(a)"));
+}
+
+#[test]
+fn framework_facts_typescript() {
+    let f = parse(
+        "src/app/app.routes.ts",
+        r#"export const API = new InjectionToken<string>('api');
+const base = environment.api + 'owners';
+export const routes: Routes = [
+  { path: 'owners', component: OwnerListComponent, children: [
+    { path: ':id', loadComponent: () => import('./owner.component').then(m => m.OwnerComponent) },
+  ]},
+  { path: 'vets', loadChildren: './vets/vets.module#VetsModule' },
+  { path: 'x', method: 'GET' },
+];
+export class S {
+  private readonly url = `${base}/x`;
+  constructor(@Inject(API) private api: string) {}
+  get(id: number): Observable<X> { return this.http.get<X>(`${this.url}/${id}`); }
+}
+"#,
+    );
+    // Top-level constants are definitions.
+    assert_eq!(def(&f, "routes").kind, SymbolKind::Field);
+    assert_eq!(def(&f, "API").kind, SymbolKind::Field);
+    assert!(def(&f, "url").has_modifier("readonly"));
+    assert_eq!(def(&f, "get").type_name.as_deref(), Some("Observable"));
+    let names: Vec<&str> = f.values.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["base", "url"]);
+    let routes: Vec<(&str, Option<&str>, Option<u32>)> = f
+        .routes
+        .iter()
+        .map(|r| (r.path.as_str(), r.component.as_deref(), r.parent))
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            ("owners", Some("OwnerListComponent"), None),
+            (":id", None, Some(0)),
+            ("vets", None, None)
+        ]
+    );
+    let lazy = f.routes[1].load.as_ref().unwrap();
+    assert_eq!(
+        (lazy.children, lazy.module.as_str()),
+        (false, "./owner.component")
+    );
+    assert_eq!(lazy.export.as_deref(), Some("OwnerComponent"));
+    let old = f.routes[2].load.as_ref().unwrap();
+    assert_eq!(
+        (old.children, old.module.as_str()),
+        (true, "./vets/vets.module")
+    );
+    assert_eq!(old.export.as_deref(), Some("VetsModule"));
+    assert_eq!(f.routes[0].scope, Some(2), "routes belong to the constant");
+    assert_eq!(binding(&f, "api").annotations[0].name, "Inject");
+    let get = f.refs.iter().find(|r| r.name == "get").unwrap();
+    assert_eq!(get.arg.as_deref(), Some("`${this.url}/${id}`"));
+}
+
+#[test]
+fn resources_are_indexed_by_name() {
+    assert_eq!(
+        Lang::from_path("src/main/resources/application-dev.yml"),
+        Some(Lang::Yaml)
+    );
+    assert_eq!(
+        Lang::from_path("src/main/resources/bootstrap.properties"),
+        Some(Lang::Properties)
+    );
+    assert_eq!(Lang::from_path("api/openapi.yaml"), Some(Lang::Yaml));
+    assert_eq!(Lang::from_path(".github/workflows/ci.yml"), None);
+    assert_eq!(Lang::from_path("i18n/messages.properties"), None);
+    let f = parse("src/app/x.component.html", "<app-x></app-x>\n");
+    assert_eq!(f.elements[0].name, "app-x");
+    assert!(f.defs.is_empty());
+    let c = parse("src/main/resources/application.properties", "a.b=1\n");
+    assert_eq!(c.config[0].key, "a.b");
+}
+
+#[test]
+fn merge_prefixes_the_other_index() {
+    let mk = |paths: &[&str]| Index {
+        files: paths.iter().map(|p| parse(p, "class A {}\n")).collect(),
+        base_files: Vec::new(),
+        stats: IndexStats {
+            files: paths.len(),
+            ..Default::default()
+        },
+    };
+    let mut front = mk(&["src/a.ts", "src/z.ts"]);
+    front.merge(mk(&["src/Main.java"]), "back/");
+    let paths: Vec<&str> = front.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["back/src/Main.java", "src/a.ts", "src/z.ts"]);
+    assert!(front.file("back/src/Main.java").is_some());
+    assert_eq!(front.stats.files, 3);
+}

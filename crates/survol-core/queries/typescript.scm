@@ -19,6 +19,9 @@
 (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)]) @definition.function
 (public_field_definition name: [(property_identifier) (private_property_identifier)] @name value: [(arrow_function) (function_expression)]) @definition.method
 (public_field_definition name: [(property_identifier) (private_property_identifier)] @name) @definition.field
+; Top-level constants (`const routes: Routes = [...]`, `environment`, tokens).
+(program (lexical_declaration (variable_declarator name: (identifier) @name) @definition.field))
+(program (export_statement (lexical_declaration (variable_declarator name: (identifier) @name) @definition.field)))
 
 ; ---- references
 (call_expression function: [(identifier) @name
@@ -42,3 +45,8 @@
 (variable_declarator name: (identifier) @binding.name value: (new_expression constructor: (identifier) @binding.type)) @binding.local
 (variable_declarator name: (identifier) @binding.name
   value: (call_expression function: (identifier) @_f arguments: (arguments . (identifier) @binding.type)) (#eq? @_f "inject")) @binding.local
+
+; ---- values: initialisers of constants, fields and locals (string-like ones
+; are kept in code: URLs, config keys, environment objects)
+(variable_declarator name: (identifier) @value.name value: (_) @value.expr) @value
+(public_field_definition name: (property_identifier) @value.name value: (_) @value.expr) @value

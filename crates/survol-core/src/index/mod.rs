@@ -1,5 +1,7 @@
 //! Tree-sitter index of a revision: definitions, references, imports and typed
-//! bindings of every Java, Kotlin, TypeScript and JavaScript file.
+//! bindings of every Java, Kotlin, TypeScript and JavaScript file, plus the
+//! keys of Spring / OpenAPI configuration files and the custom elements of
+//! HTML templates (read without tree-sitter, see `resource.rs`).
 //!
 //! Files come from the git tree of the revision (no checkout needed) and are
 //! parsed in parallel. Each file's result is cached by blob id under
@@ -14,6 +16,7 @@
 mod cache;
 mod extract;
 mod lang;
+mod resource;
 #[cfg(test)]
 mod tests;
 
@@ -26,13 +29,14 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub use extract::parse_file;
-pub use lang::Lang;
+pub use lang::{Lang, is_api_spec_name, is_config_name};
+pub use resource::html_elements;
 
 use crate::git::{Git, TreeEntry};
 
 /// Version of the queries and of the extraction code: part of the cache path.
 /// Bump it whenever `queries/*.scm` or `extract.rs` change what is produced.
-pub const INDEX_VERSION: u32 = 1;
+pub const INDEX_VERSION: u32 = 2;
 
 /// Files bigger than this are not parsed (minified bundles, data dumps...).
 pub const MAX_FILE_BYTES: u64 = 512 * 1024;
@@ -166,7 +170,7 @@ pub fn unquote(s: &str) -> Option<&str> {
     (s.len() >= 2 && matches!(q, '"' | '\'' | '`') && s.ends_with(q)).then(|| &s[1..s.len() - 1])
 }
 
-fn string_literals(s: &str) -> Vec<&str> {
+pub(crate) fn string_literals(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut rest = s;
     while let Some(start) = rest.find(['"', '\'', '`']) {
@@ -200,6 +204,28 @@ pub struct Def {
     /// Last parameter is variadic (`...args`, `vararg`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub variadic: bool,
+    /// Declared type of a field, return type of a callable: simple name,
+    /// generics stripped (`Owner`, `Observable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    /// Modifiers useful to framework rules, among [`MODIFIERS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+}
+
+/// Modifiers kept in [`Def::modifiers`].
+pub const MODIFIERS: &[&str] = &[
+    "static", "final", "abstract", "readonly", "val", "var", "lateinit", "const", "open",
+];
+
+impl Def {
+    pub fn has_modifier(&self, m: &str) -> bool {
+        self.modifiers.iter().any(|x| x == m)
+    }
+
+    pub fn annotation(&self, name: &str) -> Option<&Annotation> {
+        self.annotations.iter().find(|a| a.name == name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -231,7 +257,19 @@ pub struct Ref {
     pub line: u32,
     /// Innermost enclosing definition, index into [`FileIndex::defs`].
     pub scope: Option<u32>,
+    /// Source text of the first argument of a call or instantiation, when
+    /// it is a literal, a name, a member access, a concatenation, a template,
+    /// a `new` or a class literal (URLs, events, injection tokens...).
+    /// Whitespace collapsed, truncated to [`MAX_ARG`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arg: Option<String>,
 }
+
+/// Longest [`Ref::arg`] and [`Value::text`] kept (object literals: [`MAX_OBJECT_VALUE`]).
+pub const MAX_ARG: usize = 200;
+
+/// Longest object literal kept as a [`Value`] (`environment.ts`...).
+pub const MAX_OBJECT_VALUE: usize = 2000;
 
 /// An import (Java, Kotlin), ES import / re-export or `require`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +322,76 @@ pub struct Binding {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub field: bool,
     pub line: u32,
+    /// Annotations or decorators of a parameter (`@Qualifier("x")`,
+    /// `@Value("${a.b}")`, `@Inject(TOKEN)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<Annotation>,
+}
+
+/// A name initialised with a string-like expression: constant, field or
+/// local (`entityUrl = environment.API + 'owners'`), or a small object
+/// literal (`environment = {...}`). Lets rules rebuild URLs and keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Value {
+    pub name: String,
+    /// Source text of the initialiser, whitespace collapsed.
+    pub text: String,
+    /// Innermost enclosing definition (the class for a field, the
+    /// callable for a local), `None` at top level.
+    pub scope: Option<u32>,
+    pub line: u32,
+}
+
+/// An object literal shaped like a route (`{path: 'x', component: X}`,
+/// with `component`, `loadComponent`, `loadChildren`, `children` or
+/// `redirectTo`): Angular `Routes`, `provideRouter`, `RouterModule.forRoot`...
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteDef {
+    /// `path` as written, without quotes (may be empty).
+    pub path: String,
+    /// `component: X` → `X`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// `loadComponent` / `loadChildren: () => import('./x').then(m => m.X)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<LazyLoad>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<String>,
+    /// Enclosing route (through `children`), index into [`FileIndex::routes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
+    pub line: u32,
+    /// Innermost enclosing definition.
+    pub scope: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LazyLoad {
+    /// `loadChildren` (a module or routes) rather than `loadComponent`.
+    pub children: bool,
+    /// Module specifier of the dynamic import: `./owners/owners.module`.
+    pub module: String,
+    /// Member picked in `then(m => m.X)`; `None` for a default export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<String>,
+}
+
+/// A key of a configuration file (`application*.yml|properties`, OpenAPI
+/// spec), flattened: `spring.datasource.url`, `paths./owners.get.operationId`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigEntry {
+    pub key: String,
+    /// Scalar value, unquoted, truncated to [`MAX_ARG`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub line: u32,
+}
+
+/// A custom element used in an HTML template (`<app-owner-list>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Element {
+    pub name: String,
+    pub line: u32,
 }
 
 /// Everything extracted from one file.
@@ -298,6 +406,18 @@ pub struct FileIndex {
     pub refs: Vec<Ref>,
     pub imports: Vec<Import>,
     pub bindings: Vec<Binding>,
+    /// String-like initialisers of constants, fields and locals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<Value>,
+    /// Route-shaped object literals (TypeScript / JavaScript).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteDef>,
+    /// Keys of a configuration file ([`Lang::Yaml`], [`Lang::Properties`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<ConfigEntry>,
+    /// Custom elements of an HTML template ([`Lang::Html`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elements: Vec<Element>,
     /// Lines in the file.
     pub lines: u32,
     /// The parser hit syntax errors: the result may be partial.
@@ -377,6 +497,29 @@ pub struct IndexStats {
 }
 
 impl Index {
+    /// Adds the files of `other` (another repository: the back end of a
+    /// front end...) under `prefix/`, so that one graph links both (HTTP
+    /// calls, shared types). Paths of `self` are left as they are.
+    pub fn merge(&mut self, other: Index, prefix: &str) {
+        let prefix = prefix.trim_end_matches('/');
+        let rebase = |mut f: FileIndex| {
+            f.path = format!("{prefix}/{}", f.path);
+            f
+        };
+        self.files.extend(other.files.into_iter().map(rebase));
+        self.base_files
+            .extend(other.base_files.into_iter().map(rebase));
+        self.files.sort_by(|a, b| a.path.cmp(&b.path));
+        self.base_files.sort_by(|a, b| a.path.cmp(&b.path));
+        let (s, o) = (&mut self.stats, other.stats);
+        s.files += o.files;
+        s.parsed += o.parsed;
+        s.cached += o.cached;
+        s.skipped += o.skipped;
+        s.with_errors += o.with_errors;
+        s.millis += o.millis;
+    }
+
     pub fn file(&self, path: &str) -> Option<&FileIndex> {
         find_sorted(&self.files, path)
     }
