@@ -117,21 +117,27 @@ fn instructions_section(instructions: Option<&str>) -> String {
     }
 }
 
-pub(super) fn group_prompt(blocks: &[Block], instructions: Option<&str>) -> String {
+pub(super) fn group_prompt(blocks: &[Block], instructions: Option<&str>, language: &str) -> String {
     let count: usize = blocks.iter().map(|b| b.hunk_ids.len()).sum();
     let hunks: String = blocks.iter().map(|b| b.text.as_str()).collect();
     GROUP_TEMPLATE
         .replace("{{count}}", &count.to_string())
+        .replace("{{language}}", language)
         .replace("{{instructions}}", &instructions_section(instructions))
         .replace("{{hunks}}", hunks.trim_end())
 }
 
 /// Size of the group prompt around the hunks.
-pub(super) fn group_overhead(instructions: Option<&str>) -> usize {
-    group_prompt(&[], instructions).len() + 16
+pub(super) fn group_overhead(instructions: Option<&str>, language: &str) -> usize {
+    group_prompt(&[], instructions, language).len() + 16
 }
 
-pub(super) fn merge_prompt(drafts: &[Draft], diff: &Diff, instructions: Option<&str>) -> String {
+pub(super) fn merge_prompt(
+    drafts: &[Draft],
+    diff: &Diff,
+    instructions: Option<&str>,
+    language: &str,
+) -> String {
     let mut groups = String::new();
     for (i, d) in drafts.iter().enumerate() {
         let mut dirs: Vec<&str> = Vec::new();
@@ -165,6 +171,7 @@ pub(super) fn merge_prompt(drafts: &[Draft], diff: &Diff, instructions: Option<&
         );
     }
     MERGE_TEMPLATE
+        .replace("{{language}}", language)
         .replace("{{instructions}}", &instructions_section(instructions))
         .replace("{{groups}}", groups.trim_end())
 }
@@ -222,11 +229,35 @@ mod tests {
             lines[1]
         );
         assert!(lines[1].ends_with("…"));
-        let p = group_prompt(&b, Some("Hexagonal architecture."));
+        let p = group_prompt(&b, Some("Hexagonal architecture."), "English");
         assert!(p.contains("There are 1 hunks"));
+        assert!(p.contains("Write every title and summary in English."));
         assert!(p.contains("# Project conventions"));
         assert!(p.contains("Hexagonal architecture."));
         assert!(!p.contains("{{"));
+    }
+
+    #[test]
+    fn prompts_ask_for_the_language_but_keep_layer_names() {
+        let d = diff();
+        let p = group_prompt(&blocks(&d, &[0], 10_000), None, "French");
+        assert!(
+            p.contains("Write every title and summary in French."),
+            "{p}"
+        );
+        assert!(p.contains("layer names above (in English)"));
+        assert!(p.contains("model, persistence, config, build"));
+        let drafts = [Draft {
+            title: "Création de commande".into(),
+            summary: "s".into(),
+            layers: vec![],
+        }];
+        let m = merge_prompt(&drafts, &d, None, "French");
+        assert!(
+            m.contains("Write every title and summary in French."),
+            "{m}"
+        );
+        assert!(!m.contains("{{") && !p.contains("{{"));
     }
 
     #[test]

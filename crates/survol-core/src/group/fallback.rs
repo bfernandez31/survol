@@ -6,6 +6,25 @@ use std::collections::BTreeMap;
 use super::{Draft, Layer};
 use crate::model::Diff;
 
+/// Language of the texts written without LLM: French, or English for any
+/// other language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Locale {
+    En,
+    Fr,
+}
+
+impl Locale {
+    /// `language` is a full name, see [`crate::config::language_name`].
+    pub(super) fn of(language: &str) -> Self {
+        if language == "French" {
+            Self::Fr
+        } else {
+            Self::En
+        }
+    }
+}
+
 /// Groups bigger than this (in hunks) are split by subdirectory.
 const MAX_GROUP_HUNKS: usize = 40;
 
@@ -60,7 +79,8 @@ fn split<T>(items: Vec<Item<T>>, depth: usize, max: usize) -> Vec<Part<T>> {
 }
 
 /// One group per directory (split when big), layers guessed from paths.
-pub(super) fn by_directory(diff: &Diff, hunk_ids: &[usize]) -> Vec<Draft> {
+pub(super) fn by_directory(diff: &Diff, hunk_ids: &[usize], language: &str) -> Vec<Draft> {
+    let fr = Locale::of(language) == Locale::Fr;
     let mut files: Vec<(String, usize, Vec<usize>)> = Vec::new();
     for &id in hunk_ids {
         let path = &diff.files[diff.hunks[id].file].path;
@@ -86,15 +106,20 @@ pub(super) fn by_directory(diff: &Diff, hunk_ids: &[usize]) -> Vec<Draft> {
                     }),
                 }
             }
+            let title = match (dir.is_empty(), fr) {
+                (true, false) => "Changes at the repository root".into(),
+                (true, true) => "Modifications à la racine du dépôt".into(),
+                (false, false) => format!("Changes in {dir}/"),
+                (false, true) => format!("Modifications dans {dir}/"),
+            };
+            let summary = if fr {
+                "Regroupé par répertoire : aucun regroupement fonctionnel n'est disponible pour ces hunks."
+            } else {
+                "Grouped by directory: no functional grouping is available for these hunks."
+            };
             Draft {
-                title: if dir.is_empty() {
-                    "Changes at the repository root".into()
-                } else {
-                    format!("Changes in {dir}/")
-                },
-                summary:
-                    "Grouped by directory: no functional grouping is available for these hunks."
-                        .into(),
+                title,
+                summary: summary.into(),
                 layers,
             }
         })

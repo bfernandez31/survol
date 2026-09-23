@@ -78,6 +78,7 @@ fn params(max: usize) -> Params {
         effort: None,
         max_prompt_chars: max,
         instructions: None,
+        language: "English".into(),
         cwd: ".".into(),
     }
 }
@@ -284,7 +285,7 @@ fn group_prompt_size_for(d: &Diff, hunks: usize) -> usize {
     let all: Vec<usize> = (0..d.hunks.len()).collect();
     let blocks = prompt::blocks(d, &all, usize::MAX);
     let per_hunk = blocks.iter().map(|b| b.text.len()).sum::<usize>() / d.hunks.len();
-    prompt::group_overhead(None) + per_hunk * hunks
+    prompt::group_overhead(None, "English") + per_hunk * hunks
 }
 
 #[test]
@@ -431,6 +432,14 @@ fn cache_is_reused_on_reopen() {
     review::group(&r, &other, &llm, |_| {}, true).unwrap();
     assert_eq!(llm.calls(), 1);
 
+    // Switching language regenerates instead of returning English text.
+    let mut french = cfg.clone();
+    french.llm.override_language(Some("fr"));
+    let llm = Fake::scripted(&[answer]);
+    review::group(&r, &french, &llm, |_| {}, true).unwrap();
+    assert_eq!(llm.calls(), 1);
+    assert!(llm.prompt(0).contains("in French."));
+
     // Project instructions reach the prompt and are part of the key.
     std::fs::create_dir_all(tmp.path().join(".survol")).unwrap();
     std::fs::write(
@@ -497,4 +506,46 @@ fn disabled_llm_groups_by_directory_without_calling_it() {
     assert_invariants(&grouping, &r.diff);
     assert!(grouping.groups.last().unwrap().mechanical);
     assert!(!cache_path(&g.survol_dir().unwrap(), &r.head_sha).exists());
+}
+
+#[test]
+fn cache_key_depends_on_language() {
+    let d = diff_of(&[("src/a.rs", "a")]);
+    let en = params(10_000);
+    let fr = Params {
+        language: "French".into(),
+        ..en.clone()
+    };
+    assert_ne!(cache_key(&d, &en), cache_key(&d, &fr));
+    assert_eq!(cache_key(&d, &en), cache_key(&d, &params(10_000)));
+}
+
+#[test]
+fn offline_texts_follow_the_language() {
+    let d = diff_of(&[("src/a.rs", "a"), ("b.rs", "b")]);
+    let fr = Params {
+        language: "French".into(),
+        ..params(10_000)
+    };
+    let titles: Vec<String> = build_offline(&d, &fr)
+        .groups
+        .into_iter()
+        .map(|g| g.title)
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Modifications à la racine du dépôt",
+            "Modifications dans src/"
+        ]
+    );
+    let titles: Vec<String> = build_offline(&d, &params(10_000))
+        .groups
+        .into_iter()
+        .map(|g| g.title)
+        .collect();
+    assert_eq!(
+        titles,
+        ["Changes at the repository root", "Changes in src/"]
+    );
 }

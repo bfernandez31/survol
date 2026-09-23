@@ -50,6 +50,7 @@ group_model = "sonnet"            # model used to group hunks (default: the CLI'
 # ask_model = "opus"              # model used to answer questions
 # config_dir = "~/.claude-work"   # CLAUDE_CONFIG_DIR for the CLI: use another Claude account
 # max_prompt_chars = 150000       # bigger reviews are grouped module by module, then merged
+# language = "fr"                 # language of titles and summaries (default English; --lang overrides)
 ```
 
 Project-specific architecture conventions can be written in `.survol/instructions.md`;
@@ -70,6 +71,7 @@ survol 123          # MR !123 of this repo's project
 survol https://gitlab.corp.example/group/app/-/merge_requests/123
 survol main..feat   # local range, diffed from the merge base
 survol --no-llm 123 # never call the LLM: the Stack view groups by directory
+survol --lang fr 123 # group titles and summaries in French (a code or a name)
 ```
 
 The MR head is fetched from `refs/merge-requests/<iid>/head` and checked out in a
@@ -115,5 +117,6 @@ survol-cli group main..HEAD | jq '.groups[] | {title, hunks: (.hunk_ids | length
 ```
 
 Groupings are cached in `.git/survol/cache/<head>/groups.json`; `--no-cache` recomputes,
-`--no-llm` groups by directory without calling the LLM.
+`--no-llm` groups by directory without calling the LLM, `--lang <LANG>` sets the
+language of titles and summaries.
 `SURVOL_LLM_LOG=<dir>` keeps every prompt and raw LLM answer for debugging.

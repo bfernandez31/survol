@@ -5,6 +5,7 @@ Group the hunks of a code review by functional capability, so that a reviewer ca
 - Put hunks that implement the same functional capability in the same group: a feature, a use case, a business concept, or one cross-cutting technical concern (build, logging, a refactoring...). A group should be readable in one sitting: typically 3 to 40 hunks. Split bigger capabilities into sub-capabilities. Small unrelated leftovers may share one "Miscellaneous" group.
 - Inside each group, split the hunks into technical layers. Use these names: model, persistence, config, build, events, service, api, ui, cli, docs, tests; use core for code that fits none of them. Invent another short lowercase name only when the project clearly has such a layer. A layer is never empty. A group may have a single layer.
 - Give each group a title of at most 8 words naming the capability (not the files), and a summary of 2 to 3 short sentences explaining what the change does functionally: which behaviour is added, changed or removed, and what for. Do not describe the code line by line.
+- Write every title and summary in {{language}}. Everything else stays exactly as specified: the JSON keys, the layer names above (in English) and the numeric hunk ids.
 - List the groups in reading order: foundations first (models, contracts, configuration), then what uses them, then entry points, tests last.
 
 # Rules

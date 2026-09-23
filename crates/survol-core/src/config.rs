@@ -79,6 +79,9 @@ pub struct LlmConfig {
     /// Maximum prompt size in characters, a proxy for the token budget.
     /// Bigger reviews are grouped by module, then merged.
     pub max_prompt_chars: usize,
+    /// Language of the LLM-written text (group titles and summaries,
+    /// answers): a name or a code such as `fr`. See [`language_name`].
+    pub language: String,
 }
 
 impl Default for LlmConfig {
@@ -91,6 +94,7 @@ impl Default for LlmConfig {
             ask_model: None,
             config_dir: None,
             max_prompt_chars: 150_000,
+            language: "English".into(),
         }
     }
 }
@@ -100,6 +104,36 @@ impl LlmConfig {
     pub fn config_dir(&self) -> Option<PathBuf> {
         self.config_dir.as_deref().map(expand_home)
     }
+
+    /// [`Self::language`] as the full English name used in prompts.
+    pub fn language(&self) -> String {
+        language_name(&self.language)
+    }
+
+    /// Applies a `--lang` flag: it overrides the configured language.
+    pub fn override_language(&mut self, flag: Option<&str>) {
+        if let Some(lang) = flag.map(str::trim).filter(|l| !l.is_empty()) {
+            self.language = lang.to_string();
+        }
+    }
+}
+
+/// Full English name of a language given by name or code, for prompts:
+/// common codes and native names (`fr`, `français`, `DE`...) are mapped,
+/// anything else is passed through as given. Empty means English.
+pub fn language_name(input: &str) -> String {
+    let lang = input.trim();
+    let name = match lang.to_lowercase().as_str() {
+        "" | "en" | "english" => "English",
+        "fr" | "french" | "français" | "francais" => "French",
+        "de" | "german" | "deutsch" => "German",
+        "es" | "spanish" | "español" | "espanol" => "Spanish",
+        "it" | "italian" | "italiano" => "Italian",
+        "pt" | "portuguese" | "português" | "portugues" => "Portuguese",
+        "nl" | "dutch" | "nederlands" => "Dutch",
+        _ => lang,
+    };
+    name.to_string()
 }
 
 /// Expands a leading `~` to the home directory.
@@ -227,6 +261,39 @@ mod tests {
         assert_eq!(cfg.llm.max_prompt_chars, 150_000);
         assert!(cfg.llm.enabled);
         assert_eq!(expand_home(Path::new("/abs/~x")), Path::new("/abs/~x"));
+    }
+
+    #[test]
+    fn maps_language_codes() {
+        assert_eq!(language_name("fr"), "French");
+        assert_eq!(language_name(" FR "), "French");
+        assert_eq!(language_name("français"), "French");
+        assert_eq!(language_name("en"), "English");
+        assert_eq!(language_name("English"), "English");
+        assert_eq!(language_name(""), "English");
+        assert_eq!(language_name("de"), "German");
+        assert_eq!(language_name("es"), "Spanish");
+        assert_eq!(language_name("it"), "Italian");
+        assert_eq!(language_name("pt"), "Portuguese");
+        assert_eq!(language_name("nl"), "Dutch");
+        assert_eq!(
+            language_name("Brazilian Portuguese"),
+            "Brazilian Portuguese"
+        );
+        assert_eq!(language_name("ja"), "ja");
+    }
+
+    #[test]
+    fn lang_flag_overrides_config_language() {
+        assert_eq!(Config::default().llm.language(), "English");
+        let mut cfg: Config = toml::from_str("[llm]\nlanguage = \"fr\"\n").unwrap();
+        assert_eq!(cfg.llm.language(), "French");
+        cfg.llm.override_language(None);
+        assert_eq!(cfg.llm.language(), "French");
+        cfg.llm.override_language(Some("  "));
+        assert_eq!(cfg.llm.language(), "French");
+        cfg.llm.override_language(Some("de"));
+        assert_eq!(cfg.llm.language(), "German");
     }
 
     #[test]

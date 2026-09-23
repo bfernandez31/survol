@@ -25,10 +25,11 @@ use crate::llm::{LlmProvider, LlmRequest};
 use crate::mechanical::{self, Kind};
 use crate::model::Diff;
 use crate::review_state::ReviewState;
+use fallback::Locale;
 
 /// Version of the prompts in `prompts/`. Bump it when they change: it is part
 /// of the cache key.
-pub const PROMPT_VERSION: u32 = 3;
+pub const PROMPT_VERSION: u32 = 4;
 
 /// Chunks grouped at the same time.
 const PARALLEL_CHUNKS: usize = 4;
@@ -146,6 +147,9 @@ pub struct Params {
     pub max_prompt_chars: usize,
     /// Project conventions (`.survol/instructions.md`).
     pub instructions: Option<String>,
+    /// Language of titles and summaries, full English name (`French`), see
+    /// [`crate::config::language_name`].
+    pub language: String,
     /// Where the LLM runs from.
     pub cwd: PathBuf,
 }
@@ -210,7 +214,10 @@ fn build_with(
     let (drafts, source) = if rest.is_empty() {
         (Vec::new(), Source::Mechanical)
     } else if run.llm.is_none() {
-        (fallback::by_directory(diff, &rest), Source::Fallback)
+        (
+            fallback::by_directory(diff, &rest, &params.language),
+            Source::Fallback,
+        )
     } else {
         run.group_all(&rest, progress)
     };
@@ -234,7 +241,12 @@ fn build_with(
         })
         .collect();
     if !mech.is_empty() || !files.is_empty() {
-        groups.push(mechanical_group(groups.len(), mech, files));
+        groups.push(mechanical_group(
+            groups.len(),
+            mech,
+            files,
+            Locale::of(&params.language),
+        ));
     }
     order_groups(&mut groups);
 
@@ -250,26 +262,40 @@ fn build_with(
     }
 }
 
-fn mechanical_group(id: usize, mech: BTreeMap<Kind, Vec<usize>>, files: Vec<usize>) -> Group {
+fn mechanical_group(
+    id: usize,
+    mech: BTreeMap<Kind, Vec<usize>>,
+    files: Vec<usize>,
+    locale: Locale,
+) -> Group {
+    let fr = locale == Locale::Fr;
     let mut parts = Vec::new();
     let count = |k| mech.get(&k).map_or(0, Vec::len);
-    if count(Kind::Generated) > 0 {
-        parts.push(format!(
-            "{} hunk(s) in lockfiles or generated files",
-            count(Kind::Generated)
-        ));
+    let generated = count(Kind::Generated);
+    if generated > 0 {
+        parts.push(if fr {
+            format!("{generated} hunk(s) dans des lockfiles ou des fichiers générés")
+        } else {
+            format!("{generated} hunk(s) in lockfiles or generated files")
+        });
     }
-    if count(Kind::Whitespace) > 0 {
-        parts.push(format!(
-            "{} whitespace-only hunk(s)",
-            count(Kind::Whitespace)
-        ));
+    let whitespace = count(Kind::Whitespace);
+    if whitespace > 0 {
+        parts.push(if fr {
+            format!("{whitespace} hunk(s) ne touchant que des blancs")
+        } else {
+            format!("{whitespace} whitespace-only hunk(s)")
+        });
     }
     if !files.is_empty() {
-        parts.push(format!(
-            "{} file(s) without content changes (renames, copies, binaries, mode changes)",
-            files.len()
-        ));
+        let n = files.len();
+        parts.push(if fr {
+            format!(
+                "{n} fichier(s) sans modification de contenu (renommages, copies, binaires, droits)"
+            )
+        } else {
+            format!("{n} file(s) without content changes (renames, copies, binaries, mode changes)")
+        });
     }
     let layers: Vec<Layer> = mech
         .into_iter()
@@ -282,10 +308,20 @@ fn mechanical_group(id: usize, mech: BTreeMap<Kind, Vec<usize>>, files: Vec<usiz
     hunk_ids.sort_unstable();
     Group {
         id,
-        title: "Mechanical changes".into(),
+        title: if fr {
+            "Modifications mécaniques"
+        } else {
+            "Mechanical changes"
+        }
+        .into(),
         summary: format!(
-            "{}. Detected without LLM: nothing to understand here, check and validate at once.",
-            capitalize(&parts.join(", "))
+            "{}. {}",
+            capitalize(&parts.join(", ")),
+            if fr {
+                "Détecté sans LLM : rien à comprendre ici, vérifier et valider d'un coup."
+            } else {
+                "Detected without LLM: nothing to understand here, check and validate at once."
+            }
         ),
         layers,
         order: 0,
@@ -333,7 +369,7 @@ impl Run<'_> {
         let budget = self
             .params
             .max_prompt_chars
-            .saturating_sub(prompt::group_overhead(instr))
+            .saturating_sub(prompt::group_overhead(instr, &self.params.language))
             .max(MIN_BUDGET);
         let blocks = prompt::blocks(self.diff, hunks, budget);
         let size: usize = blocks.iter().map(|b| b.text.len()).sum();
@@ -409,7 +445,11 @@ impl Run<'_> {
     fn group_chunk(&self, blocks: &[prompt::Block], chunk: Option<usize>) -> ChunkResult {
         let tag = chunk.map_or(String::new(), |i| format!("chunk {}: ", i + 1));
         let expected: BTreeSet<usize> = blocks.iter().flat_map(|b| b.hunk_ids.clone()).collect();
-        let base = prompt::group_prompt(blocks, self.params.instructions.as_deref());
+        let base = prompt::group_prompt(
+            blocks,
+            self.params.instructions.as_deref(),
+            &self.params.language,
+        );
         let mut prompt = base.clone();
         let mut best = None;
         for attempt in 1..=2 {
@@ -445,14 +485,21 @@ impl Run<'_> {
                         "{tag}{} hunk(s) left out by the LLM, grouped by directory",
                         left.len()
                     ));
-                    kept.extend(fallback::by_directory(self.diff, &left));
+                    kept.extend(fallback::by_directory(
+                        self.diff,
+                        &left,
+                        &self.params.language,
+                    ));
                 }
                 return (kept, Source::Partial);
             }
         }
         self.warn(format!("{tag}falling back to grouping by directory"));
         let all: Vec<usize> = expected.into_iter().collect();
-        (fallback::by_directory(self.diff, &all), Source::Fallback)
+        (
+            fallback::by_directory(self.diff, &all, &self.params.language),
+            Source::Fallback,
+        )
     }
 
     /// Lets the LLM merge groups of different chunks that share a capability.
@@ -461,7 +508,12 @@ impl Run<'_> {
         if drafts.len() < 2 {
             return drafts;
         }
-        let base = prompt::merge_prompt(&drafts, self.diff, self.params.instructions.as_deref());
+        let base = prompt::merge_prompt(
+            &drafts,
+            self.diff,
+            self.params.instructions.as_deref(),
+            &self.params.language,
+        );
         let mut prompt = base.clone();
         for attempt in 1..=2 {
             let answer = match self.complete(prompt) {
@@ -528,14 +580,14 @@ fn apply_merges(drafts: Vec<Draft>, merges: Vec<parse::Merge>) -> Vec<Draft> {
 }
 
 /// Identity of a grouping: hunk contents, mechanical classification, prompt
-/// version, model, effort, budget and project instructions.
+/// version, model, effort, budget, language and project instructions.
 pub fn cache_key(diff: &Diff, params: &Params) -> String {
     let mut h = blake3::Hasher::new();
     h.update(format!("survol-groups\0{PROMPT_VERSION}\0").as_bytes());
     h.update(
         format!(
-            "{:?}\0{:?}\0{}\0",
-            params.model, params.effort, params.max_prompt_chars
+            "{:?}\0{:?}\0{}\0{}\0",
+            params.model, params.effort, params.max_prompt_chars, params.language
         )
         .as_bytes(),
     );

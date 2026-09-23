@@ -39,6 +39,10 @@ struct Cli {
     /// (same as `[llm] enabled = false`).
     #[arg(long)]
     no_llm: bool,
+    /// Language of the LLM-written titles and summaries: a name or a code
+    /// (`fr`, `français`, `en`...). Overrides `[llm] language`.
+    #[arg(long, value_name = "LANG")]
+    lang: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -52,6 +56,7 @@ fn main() -> Result<()> {
     };
     let mut cfg = Config::load(Some(repo.dir()))?;
     cfg.llm.enabled &= !cli.no_llm;
+    cfg.llm.override_language(cli.lang.as_deref());
     let target = Target::parse(cli.target.as_deref())?;
 
     let review = review::open(&repo, &cfg, &target, |m| eprintln!("· {m}"))?;

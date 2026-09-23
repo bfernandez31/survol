@@ -56,6 +56,10 @@ enum Cmd {
         /// Do not call the LLM: group by directory (same as `[llm] enabled = false`).
         #[arg(long)]
         no_llm: bool,
+        /// Language of the titles and summaries: a name or a code (`fr`,
+        /// `français`, `en`...). Overrides `[llm] language`.
+        #[arg(long, value_name = "LANG")]
+        lang: Option<String>,
     },
 }
 
@@ -139,9 +143,11 @@ fn run() -> Result<ExitCode> {
             target,
             no_cache,
             no_llm,
+            lang,
         } => {
             let mut cfg = cfg;
             cfg.llm.enabled &= !no_llm;
+            cfg.llm.override_language(lang.as_deref());
             let repo = repo.context("not inside a git repository")?;
             let r = review::open(&repo, &cfg, &Target::parse(target.as_deref())?, progress)?;
             let llm = ClaudeCli::from_config(&cfg.llm);

@@ -158,6 +158,7 @@ pub fn group(
         effort: cfg.llm.group_effort.clone(),
         max_prompt_chars: cfg.llm.max_prompt_chars,
         instructions: read_instructions(review.repo.dir())?,
+        language: cfg.llm.language(),
         cwd,
     };
     if !cfg.llm.enabled {
