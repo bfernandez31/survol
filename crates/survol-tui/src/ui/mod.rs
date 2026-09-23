@@ -1,6 +1,7 @@
 //! Rendering: header, footer and help shared by the views, then each view.
 
 mod diff;
+mod graph;
 mod rows;
 mod stack;
 
@@ -10,7 +11,8 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::app::{App, GroupStatus, View};
+use crate::app::{App, GraphStatus, GroupStatus, View};
+use crate::views::graph::Mode;
 
 const ADDED_BG: Color = Color::Rgb(22, 52, 34);
 const REMOVED_BG: Color = Color::Rgb(62, 24, 28);
@@ -29,10 +31,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     match app.view {
         View::Diff => diff::render(f, body, app),
         View::Stack => stack::render(f, body, app),
+        View::Graph => graph::render(f, body, app),
     }
     render_footer(f, footer, app);
     if app.help {
-        render_help(f, f.area());
+        render_help(f, f.area(), app.view);
     }
 }
 
@@ -90,6 +93,15 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         };
         spans.push(Span::styled(format!(" {grouping} "), style));
     }
+    let graph = app.graph_label();
+    if !graph.is_empty() {
+        let style = match app.graph_status {
+            GraphStatus::Failed(_) => Style::new().fg(Color::Red),
+            GraphStatus::Running { .. } => Style::new().fg(ACCENT),
+            _ => Style::new().dim(),
+        };
+        spans.push(Span::styled(format!(" {graph} "), style));
+    }
     if !sh.worktree_ready {
         spans.push("  ⟳ worktree".dim());
     }
@@ -97,7 +109,14 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let line = if app.view == View::Diff && app.diff.filter_editing {
+    let line = if app.view == View::Graph && app.graph.query_editing {
+        Line::from(vec![
+            " find symbol: ".fg(ACCENT),
+            app.graph.query.clone().into(),
+            "▏".fg(ACCENT),
+            "   (Owner.addPet, addPet, or part of a name)".dim(),
+        ])
+    } else if app.view == View::Diff && app.diff.filter_editing {
         Line::from(vec![
             "/".fg(ACCENT),
             app.diff.filter.clone().into(),
@@ -115,11 +134,22 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(
             match app.view {
                 View::Diff => {
-                    " j/k move  n/N hunk  J/K file  space hunk ✓  r file ✓  u next unreviewed  o fold  s split  e edit  / filter  Tab view  ? help  q quit"
+                    " j/k move  n/N hunk  J/K file  space hunk ✓  r file ✓  u next unreviewed  o fold  e edit  gs graph  / filter  Tab view  ? help  q quit"
                 }
                 View::Stack => {
-                    " j/k move  h/l fold  space ✓ + next  u next unreviewed  J/K group  Enter/gd to diff  C-h/C-l pane  e edit  R regroup  Tab view  ? help"
+                    " j/k move  h/l fold  space ✓ + next  u next unreviewed  J/K group  Enter/gd to diff  gs graph  e edit  R regroup  Tab view  ? help"
                 }
+                View::Graph => match app.graph.mode {
+                    Mode::Symbol => {
+                        " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  / find  m mode  a ask LLM (step 5)  ? help"
+                    }
+                    Mode::Modules => {
+                        " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x Mermaid export  / find  m mode  ? help"
+                    }
+                    _ => {
+                        " j/k move  Enter symbol graph  J/K module  e edit  gd diff  / find symbol  m mode (changed/modules/symbol)  C-l preview  ? help"
+                    }
+                },
             }
             .dim(),
         )
@@ -130,8 +160,8 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 const HELP: &[(&str, &str)] = &[
     ("# All views", ""),
     (
-        "Tab / Shift-Tab, 1 / 2",
-        "next / previous view, Diff / Stack",
+        "Tab / Shift-Tab, 1 2 3",
+        "next / previous view, Diff / Stack / Graph",
     ),
     ("Ctrl-h / Ctrl-l", "focus list / content pane"),
     ("B", "show / hide the list pane"),
@@ -150,6 +180,7 @@ const HELP: &[(&str, &str)] = &[
     ("o / za, Enter on header", "fold / unfold file"),
     ("zM / zR", "fold / unfold all"),
     ("/", "filter files, Esc to clear"),
+    ("gs", "Graph view of the symbol under the cursor"),
     ("# Stack", ""),
     ("space", "toggle group / layer / hunk reviewed, go on"),
     ("u", "next unreviewed group"),
@@ -160,18 +191,47 @@ const HELP: &[(&str, &str)] = &[
     ("n / N (content)", "next / previous hunk"),
     ("w", "grouping warnings"),
     ("R", "regroup without cache (asks: LLM call)"),
+    ("gs", "Graph view of the hunk's symbol"),
+    ("# Graph", ""),
+    ("m", "mode: changed symbols / search / module map / symbol"),
+    ("Enter", "symbol: focus it (new root); section/module: fold"),
+    ("l / h", "expand / collapse (callers of callers…), parent"),
+    ("Backspace / Ctrl-o", "back to the previous symbol or list"),
+    ("n / N  (J / K)", "next / previous section or module"),
+    ("/", "find a symbol by name (changed or not)"),
+    ("e", "open the node's line in the editor"),
+    ("gd", "the symbol's hunks in the Diff view"),
+    ("Ctrl-l, j / k", "preview pane, scroll it"),
+    ("x", "write the module map as Mermaid (.git/survol/exports)"),
+    ("a", "ask the LLM about a node (step 5, not yet)"),
 ];
 
-fn render_help(f: &mut Frame, area: Rect) {
-    let w = 76.min(area.width);
-    let h = (HELP.len() as u16 + 2).min(area.height);
+/// Keys of all views, then of `view`.
+fn help_lines(view: View) -> Vec<(&'static str, &'static str)> {
+    let mut out = Vec::new();
+    let mut keep = false;
+    for &(k, d) in HELP {
+        if let Some(title) = k.strip_prefix("# ") {
+            keep = title == "All views" || title == view.name();
+        }
+        if keep {
+            out.push((k, d));
+        }
+    }
+    out
+}
+
+fn render_help(f: &mut Frame, area: Rect, view: View) {
+    let help = help_lines(view);
+    let w = 80.min(area.width);
+    let h = (help.len() as u16 + 2).min(area.height);
     let rect = Rect::new(
         area.x + (area.width - w) / 2,
         area.y + (area.height - h) / 2,
         w,
         h,
     );
-    let lines: Vec<Line> = HELP
+    let lines: Vec<Line> = help
         .iter()
         .map(|(k, d)| match k.strip_prefix("# ") {
             Some(title) => Line::from(format!(" {title}").bold()),
@@ -216,7 +276,16 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap;
+    use super::{help_lines, wrap};
+    use crate::app::View;
+
+    #[test]
+    fn help_shows_the_current_view() {
+        let graph = help_lines(View::Graph);
+        assert_eq!(graph[0].0, "# All views");
+        assert!(graph.iter().any(|(k, _)| *k == "# Graph"));
+        assert!(!graph.iter().any(|(k, _)| *k == "# Stack"));
+    }
 
     #[test]
     fn wraps_words() {

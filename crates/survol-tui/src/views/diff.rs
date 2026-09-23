@@ -3,7 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{Focus, Row, Scroll, push_hunk_rows};
-use crate::app::Shared;
+use crate::app::{Action, Shared};
+use crate::views::graph::symbol_at_position;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SideItem {
@@ -358,11 +359,30 @@ impl DiffView {
         sh.open_in_editor(self.current_file(), hunk, line);
     }
 
+    /// `gs`: the Graph view of the symbol under the cursor.
+    fn show_symbol(&self, sh: &mut Shared) -> Action {
+        let Some(a) = self.anchor() else {
+            return Action::None;
+        };
+        let Some(g) = &sh.graph else {
+            sh.notify("the code graph is still being built…");
+            return Action::None;
+        };
+        match symbol_at_position(g, &sh.review.diff, a.file, a.hunk, a.line) {
+            Some(s) => Action::ShowSymbol(s),
+            None => {
+                sh.notify("no symbol here (language not indexed?)");
+                Action::None
+            }
+        }
+    }
+
     // ----- keys ---------------------------------------------------------
 
-    pub fn on_key(&mut self, sh: &mut Shared, key: KeyEvent) {
+    pub fn on_key(&mut self, sh: &mut Shared, key: KeyEvent) -> Action {
         if self.filter_editing {
-            return self.on_filter_key(sh, key);
+            self.on_filter_key(sh, key);
+            return Action::None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pos.height / 2).max(1) as isize;
@@ -374,12 +394,13 @@ impl DiffView {
                     self.goto(0);
                     self.side_sel = 0;
                 }
+                ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
                 ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_collapse(sh),
                 ('z', KeyCode::Char('M')) => self.set_all_collapsed(sh, true),
                 ('z', KeyCode::Char('R')) => self.set_all_collapsed(sh, false),
                 _ => {}
             }
-            return;
+            return Action::None;
         }
 
         match key.code {
@@ -433,6 +454,7 @@ impl DiffView {
                 Focus::List => self.on_sidebar_key(sh, key),
             },
         }
+        Action::None
     }
 
     fn on_content_key(&mut self, sh: &mut Shared, key: KeyEvent) {

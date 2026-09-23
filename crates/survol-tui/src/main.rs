@@ -18,7 +18,7 @@ use survol_core::git::Git;
 use survol_core::review::{self, Target};
 use survol_core::review_state::ReviewState;
 
-use crate::app::App;
+use crate::app::{App, GraphStatus};
 
 #[derive(Parser)]
 #[command(
@@ -93,10 +93,15 @@ fn run(
 ) -> Result<()> {
     while !app.quit {
         app.poll_grouping();
+        app.poll_graph();
         if std::mem::take(&mut app.sh.needs_clear) {
             terminal.clear()?;
         }
         terminal.draw(|f| ui::render(f, app))?;
+        // The diff is on screen: build the code graph in the background.
+        if matches!(app.graph_status, GraphStatus::NotStarted) {
+            app.start_graph();
+        }
 
         if let Ok(res) = worktree.try_recv() {
             match res {

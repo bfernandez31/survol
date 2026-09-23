@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::config::Config;
+use survol_core::graph::{Graph, SymIdx, SymbolKind};
 use survol_core::group::{Grouping, Source};
 use survol_core::llm::ClaudeCli;
 use survol_core::model::FileStatus;
@@ -17,22 +18,25 @@ use crate::editor;
 use crate::highlight::Highlighter;
 use crate::views::Layout;
 use crate::views::diff::DiffView;
+use crate::views::graph::GraphView;
 use crate::views::stack::StackView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Diff,
     Stack,
+    Graph,
 }
 
 impl View {
     /// In `Tab` order.
-    pub const ALL: [View; 2] = [View::Diff, View::Stack];
+    pub const ALL: [View; 3] = [View::Diff, View::Stack, View::Graph];
 
     pub fn name(self) -> &'static str {
         match self {
             View::Diff => "Diff",
             View::Stack => "Stack",
+            View::Graph => "Graph",
         }
     }
 }
@@ -47,6 +51,8 @@ pub enum Action {
     ShowFile(usize),
     /// Recompute the grouping without cache.
     Regroup,
+    /// Show this symbol in the Graph view.
+    ShowSymbol(SymIdx),
 }
 
 /// State shared by all views.
@@ -57,6 +63,8 @@ pub struct Shared {
     pub highlighter: Highlighter,
     pub layout: Layout,
     pub worktree_ready: bool,
+    /// Code graph, once built in the background.
+    pub graph: Option<Graph>,
     /// Set when the terminal must be fully redrawn (after an external editor).
     pub needs_clear: bool,
     message: Option<(String, Instant)>,
@@ -72,6 +80,7 @@ impl Shared {
             highlighter: Highlighter::new(),
             layout: Layout::Unified,
             worktree_ready,
+            graph: None,
             needs_clear: false,
             message: None,
         }
@@ -125,18 +134,28 @@ impl Shared {
 
     /// Opens `file` at the hunk / line in the editor (parent Neovim if any).
     pub fn open_in_editor(&mut self, file: usize, hunk: Option<usize>, line: Option<usize>) {
+        match self.editor_target(file, hunk, line) {
+            Ok((path, line)) => self.open_editor_at(&path, line),
+            Err(e) => self.notify(e),
+        }
+    }
+
+    /// Opens `path` (relative to the repository, changed or not) at `line`.
+    pub fn open_path(&mut self, path: &str, line: u32) {
+        let path = self.review.worktree.join(path);
+        self.open_editor_at(&path, line.max(1));
+    }
+
+    fn open_editor_at(&mut self, path: &std::path::Path, line: u32) {
         if !self.worktree_ready {
             return self.notify("worktree is still being checked out…");
         }
-        match self.editor_target(file, hunk, line) {
-            Ok((path, line)) => match editor::open(&path, line) {
-                Ok(editor::Opened::Parent) => {
-                    self.notify(format!("opened in nvim: {}:{line}", path.display()))
-                }
-                Ok(editor::Opened::Foreground) => self.needs_clear = true,
-                Err(e) => self.notify(format!("cannot open editor: {e}")),
-            },
-            Err(e) => self.notify(e),
+        match editor::open(path, line) {
+            Ok(editor::Opened::Parent) => {
+                self.notify(format!("opened in nvim: {}:{line}", path.display()))
+            }
+            Ok(editor::Opened::Foreground) => self.needs_clear = true,
+            Err(e) => self.notify(format!("cannot open editor: {e}")),
         }
     }
 }
@@ -144,6 +163,19 @@ impl Shared {
 enum GroupEvent {
     Progress(String),
     Done(Result<Grouping, String>),
+}
+
+enum GraphEvent {
+    Progress(String),
+    Done(Box<Result<Graph, String>>),
+}
+
+/// State of the background graph build.
+pub enum GraphStatus {
+    NotStarted,
+    Running { since: Instant, progress: String },
+    Done,
+    Failed(String),
 }
 
 /// State of the background grouping.
@@ -163,9 +195,12 @@ pub struct App {
     pub view: View,
     pub diff: DiffView,
     pub stack: StackView,
+    pub graph: GraphView,
     pub cfg: Config,
     pub group_status: GroupStatus,
     group_rx: Option<mpsc::Receiver<GroupEvent>>,
+    pub graph_status: GraphStatus,
+    graph_rx: Option<mpsc::Receiver<GraphEvent>>,
     pub help: bool,
     pub quit: bool,
 }
@@ -179,9 +214,12 @@ impl App {
             view: View::Diff,
             diff,
             stack: StackView::default(),
+            graph: GraphView::default(),
             cfg,
             group_status: GroupStatus::Done,
             group_rx: None,
+            graph_status: GraphStatus::NotStarted,
+            graph_rx: None,
             help: false,
             quit: false,
         }
@@ -231,7 +269,10 @@ impl App {
         };
         self.group_rx = None;
         match res {
-            Ok(g) => {
+            Ok(mut g) => {
+                if let Some(graph) = &self.sh.graph {
+                    g.order_with_graph(graph);
+                }
                 let n = g.warnings.len();
                 self.group_status = GroupStatus::Done;
                 self.stack.set_grouping(&self.sh, g);
@@ -244,6 +285,89 @@ impl App {
                 self.sh.notify(format!("grouping failed: {e}"));
                 self.group_status = GroupStatus::Failed(e);
             }
+        }
+    }
+
+    // ----- graph --------------------------------------------------------
+
+    /// Builds the code graph on a background thread (from git objects: no
+    /// need to wait for the worktree).
+    pub fn start_graph(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let review = self.sh.review.clone();
+        let cfg = self.cfg.clone();
+        std::thread::spawn(move || {
+            let progress = |m: &str| {
+                let _ = tx.send(GraphEvent::Progress(m.to_string()));
+            };
+            let res = review::build_graph(&review, &cfg, progress, true);
+            let _ = tx.send(GraphEvent::Done(Box::new(res.map_err(|e| e.to_string()))));
+        });
+        self.graph_rx = Some(rx);
+        self.graph_status = GraphStatus::Running {
+            since: Instant::now(),
+            progress: String::new(),
+        };
+    }
+
+    /// Applies what the graph thread reported since the last call.
+    pub fn poll_graph(&mut self) {
+        let Some(rx) = &self.graph_rx else {
+            return;
+        };
+        let mut done = None;
+        for ev in rx.try_iter() {
+            match ev {
+                GraphEvent::Progress(p) => {
+                    if let GraphStatus::Running { progress, .. } = &mut self.graph_status {
+                        *progress = p;
+                    }
+                }
+                GraphEvent::Done(res) => done = Some(*res),
+            }
+        }
+        let Some(res) = done else {
+            return;
+        };
+        self.graph_rx = None;
+        match res {
+            Ok(g) => self.set_graph(g),
+            Err(e) => {
+                self.sh.notify(format!("graph failed: {e}"));
+                self.graph_status = GraphStatus::Failed(e);
+            }
+        }
+    }
+
+    /// Installs a built graph: the Graph view shows it and the Stack groups
+    /// follow its dependency order.
+    pub fn set_graph(&mut self, g: Graph) {
+        self.graph_status = GraphStatus::Done;
+        self.stack.reorder_with_graph(&self.sh, &g);
+        self.sh.graph = Some(g);
+        self.graph.on_graph_ready(&self.sh);
+    }
+
+    /// Short description of the graph for the header.
+    pub fn graph_label(&self) -> String {
+        match &self.graph_status {
+            GraphStatus::NotStarted => String::new(),
+            GraphStatus::Running { since, .. } => {
+                format!("⟳ graph… {}s", since.elapsed().as_secs())
+            }
+            GraphStatus::Failed(_) => "graph failed".into(),
+            GraphStatus::Done => match &self.sh.graph {
+                Some(g) => {
+                    let n = g
+                        .changed_symbols()
+                        .into_iter()
+                        .filter(|&s| g.symbol(s).kind != SymbolKind::File)
+                        .count();
+                    let cached = if g.from_cache { " · cached" } else { "" };
+                    format!("graph: {n} changed symbols{cached}")
+                }
+                None => String::new(),
+            },
         }
     }
 
@@ -311,6 +435,12 @@ impl App {
                 self.diff.reveal_file(&self.sh, f);
                 self.switch(View::Diff);
             }
+            Action::ShowSymbol(s) => {
+                if self.sh.graph.is_some() {
+                    self.graph.show_symbol(&self.sh, s);
+                    self.switch(View::Graph);
+                }
+            }
             Action::Regroup => {
                 if self.grouping_running() {
                     self.sh.notify("grouping is already running");
@@ -340,16 +470,15 @@ impl App {
         let captured = match self.view {
             View::Diff => self.diff.captures_keys(),
             View::Stack => self.stack.captures_keys(),
+            View::Graph => self.graph.captures_keys(),
         };
         if !captured && self.on_global_key(key) {
             return;
         }
         let action = match self.view {
-            View::Diff => {
-                self.diff.on_key(&mut self.sh, key);
-                Action::None
-            }
+            View::Diff => self.diff.on_key(&mut self.sh, key),
             View::Stack => self.stack.on_key(&mut self.sh, key, self.cfg.llm.enabled),
+            View::Graph => self.graph.on_key(&mut self.sh, key),
         };
         self.apply(action);
     }
@@ -365,6 +494,7 @@ impl App {
             KeyCode::BackTab => self.cycle(false),
             KeyCode::Char('1') => self.switch(View::Diff),
             KeyCode::Char('2') => self.switch(View::Stack),
+            KeyCode::Char('3') => self.switch(View::Graph),
             KeyCode::Char('s') if !ctrl => self.toggle_layout(),
             _ => return false,
         }
@@ -377,6 +507,44 @@ mod tests {
     use super::*;
     use crate::views::Row;
     use crate::views::stack::tests::{fixture, key};
+
+    #[test]
+    fn graph_reorders_the_stack_keeping_the_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, mut grouping) = fixture(dir.path());
+        // Put the tests group first: the graph order brings it back last.
+        grouping.groups.swap(0, 1);
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.stack.set_grouping(&app.sh, grouping);
+        app.on_key(key('2'));
+        app.on_key(key('J'));
+        let selected = |app: &App| {
+            let g = app.stack.grouping.as_ref().unwrap();
+            g.groups[app.stack.selected().unwrap().group()].id
+        };
+        assert_eq!(selected(&app), 0);
+        app.set_graph(Graph::default());
+        let ids: Vec<usize> = app
+            .stack
+            .grouping
+            .as_ref()
+            .unwrap()
+            .groups
+            .iter()
+            .map(|g| g.id)
+            .collect();
+        assert_eq!(ids, [0, 1, 2]);
+        assert_eq!(selected(&app), 0);
+        assert!(app.graph_label().starts_with("graph: 0 changed"));
+        // `3` jumps to the Graph view.
+        app.on_key(key('3'));
+        assert_eq!(app.view, View::Graph);
+    }
 
     #[test]
     fn views_share_the_review_state_and_jump_to_the_diff() {

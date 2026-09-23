@@ -49,25 +49,35 @@ impl Highlighter {
     }
 
     fn highlight(&self, path: &str, hunk: &Hunk) -> Vec<Spans> {
+        // One pass over the hunk in display order: the removed and added sides
+        // share the parser state, which is good enough for a diff.
+        self.lines(path, hunk.lines.iter().map(|l| l.text.as_str()))
+    }
+
+    /// Highlights consecutive `lines` of the file `path` (plain text when the
+    /// language is unknown).
+    pub fn lines<'a>(
+        &self,
+        path: &str,
+        lines: impl Iterator<Item = &'a str> + Clone,
+    ) -> Vec<Spans> {
         let plain = || {
-            hunk.lines
-                .iter()
-                .map(|l| vec![(Style::default(), expand_tabs(&l.text))])
+            lines
+                .clone()
+                .map(|l| vec![(Style::default(), expand_tabs(l))])
                 .collect()
         };
         // Pathological lines (minified code) are not worth highlighting.
         let Some(syntax) = self.syntax(path) else {
             return plain();
         };
-        if hunk.lines.iter().any(|l| l.text.len() > 2000) {
+        if lines.clone().any(|l| l.len() > 2000) {
             return plain();
         }
-        // One pass over the hunk in display order: the removed and added sides
-        // share the parser state, which is good enough for a diff.
         let mut h = HighlightLines::new(syntax, &self.theme);
-        let mut out = Vec::with_capacity(hunk.lines.len());
-        for line in &hunk.lines {
-            let text = format!("{}\n", expand_tabs(&line.text));
+        let mut out = Vec::new();
+        for line in lines.clone() {
+            let text = format!("{}\n", expand_tabs(line));
             match h.highlight_line(&text, &self.syntaxes) {
                 Ok(regions) => out.push(
                     regions

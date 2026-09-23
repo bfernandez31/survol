@@ -1,6 +1,7 @@
 //! State and key handling of each view. Rendering lives in `ui/`.
 
 pub mod diff;
+pub mod graph;
 pub mod stack;
 
 use survol_core::model::{DiffLine, LineKind};

@@ -95,3 +95,67 @@ pub(super) fn module_map(g: &Graph) -> ModuleMap {
     });
     ModuleMap { modules, edges }
 }
+
+impl ModuleMap {
+    /// Mermaid flowchart of the modules: changed modules highlighted, edges
+    /// labelled with their weight. Modules with neither edge nor change are
+    /// left out to keep the chart readable.
+    pub fn to_mermaid(&self) -> String {
+        let mut used = vec![false; self.modules.len()];
+        for e in &self.edges {
+            used[e.from] = true;
+            used[e.to] = true;
+        }
+        let mut out = String::from("flowchart LR\n");
+        for (i, m) in self.modules.iter().enumerate() {
+            if !used[i] && !m.changed() {
+                continue;
+            }
+            let name = m.name.replace('"', "'");
+            if m.changed() {
+                out.push_str(&format!(
+                    "  m{i}[\"{name}<br/>{} changed symbol(s)\"]:::changed\n",
+                    m.changed_symbols
+                ));
+            } else {
+                out.push_str(&format!("  m{i}[\"{name}\"]\n"));
+            }
+        }
+        for e in &self.edges {
+            out.push_str(&format!("  m{} -->|{}| m{}\n", e.from, e.count, e.to));
+        }
+        out.push_str("  classDef changed fill:#fde68a,stroke:#b45309,color:#000\n");
+        out
+    }
+}
+
+#[cfg(test)]
+mod mermaid_tests {
+    use super::*;
+
+    #[test]
+    fn mermaid_keeps_linked_and_changed_modules() {
+        let node = |name: &str, changed_files| ModuleNode {
+            name: name.into(),
+            files: 1,
+            changed_files,
+            changed_symbols: changed_files,
+            test: false,
+        };
+        let map = ModuleMap {
+            modules: vec![node("a", 1), node("b", 0), node("lonely", 0)],
+            edges: vec![ModuleEdge {
+                from: 0,
+                to: 1,
+                count: 3,
+                kinds: BTreeMap::new(),
+            }],
+        };
+        let m = map.to_mermaid();
+        assert!(m.starts_with("flowchart LR\n"));
+        assert!(m.contains("m0[\"a<br/>1 changed symbol(s)\"]:::changed"));
+        assert!(m.contains("m1[\"b\"]"));
+        assert!(m.contains("m0 -->|3| m1"));
+        assert!(!m.contains("lonely"));
+    }
+}

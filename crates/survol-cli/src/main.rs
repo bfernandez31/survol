@@ -74,6 +74,9 @@ enum Cmd {
         /// Print the module map (package / directory dependencies) instead.
         #[arg(long)]
         modules: bool,
+        /// Print the module map as a Mermaid flowchart instead.
+        #[arg(long, conflicts_with_all = ["symbol", "modules"])]
+        mermaid: bool,
         /// Rebuild the graph instead of loading it from the cache.
         #[arg(long)]
         no_cache: bool,
@@ -186,6 +189,7 @@ fn run() -> Result<ExitCode> {
             target,
             symbol,
             modules,
+            mermaid,
             no_cache,
         } => {
             let repo = repo.context("not inside a git repository")?;
@@ -196,6 +200,10 @@ fn run() -> Result<ExitCode> {
                 "graph ready in {:.2}s",
                 started.elapsed().as_secs_f64()
             ));
+            if mermaid {
+                print!("{}", g.module_map().to_mermaid());
+                return Ok(ExitCode::SUCCESS);
+            }
             let out = if modules {
                 let map = g.module_map();
                 json!({
