@@ -11,12 +11,12 @@
 use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
-use super::ACCENT;
 use crate::highlight::{Highlighter, expand_tabs};
+use crate::theme::theme;
 
 /// Styled lines of the markdown `text`, wrapped to `width` columns, on top of
 /// `base`. Code blocks are highlighted when `hl` is given.
@@ -52,19 +52,14 @@ pub fn render_marked(
                 }
             }
             Event::Code(t) => {
-                let code = Style::new().fg(ACCENT);
+                let code = Style::new().fg(theme().code);
                 w.text(&t, locate(text, range, &t), marks, Some(code));
             }
             Event::InlineMath(t) | Event::DisplayMath(t) => {
-                w.text(&t, None, marks, Some(Style::new().fg(ACCENT)));
+                w.text(&t, None, marks, Some(Style::new().fg(theme().code)));
             }
             Event::Html(t) | Event::InlineHtml(t) => {
-                w.text(
-                    &t,
-                    None,
-                    marks,
-                    Some(Style::new().add_modifier(Modifier::DIM)),
-                );
+                w.text(&t, None, marks, Some(Style::new().fg(theme().meta)));
             }
             Event::FootnoteReference(t) => w.text(&format!("[^{t}]"), None, marks, None),
             // Comments are written line by line: keep their lines, as GitLab
@@ -77,7 +72,7 @@ pub fn render_marked(
                 let rule = "─".repeat(w.width.min(40));
                 w.lines.push(Line::from(Span::styled(
                     rule,
-                    Style::new().add_modifier(Modifier::DIM),
+                    Style::new().fg(theme().meta),
                 )));
                 w.need_blank = true;
             }
@@ -319,7 +314,7 @@ impl<'h> Writer<'h> {
             Tag::Paragraph => self.block_start(),
             Tag::Heading { level, .. } => {
                 self.block_start();
-                let mut s = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+                let mut s = Style::new().fg(theme().accent).add_modifier(Modifier::BOLD);
                 if level == HeadingLevel::H1 {
                     s = s.add_modifier(Modifier::UNDERLINED);
                 }
@@ -327,7 +322,7 @@ impl<'h> Writer<'h> {
             }
             Tag::BlockQuote(_) => {
                 self.block_start();
-                let bar = vec![Span::styled("▌ ", Style::new().fg(Color::DarkGray))];
+                let bar = vec![Span::styled("▌ ", Style::new().fg(theme().gutter))];
                 self.prefixes.push(Prefix {
                     first: bar.clone(),
                     rest: bar,
@@ -367,7 +362,7 @@ impl<'h> Writer<'h> {
                 };
                 let w = bullet.chars().count();
                 self.prefixes.push(Prefix {
-                    first: vec![Span::styled(bullet, Style::new().fg(ACCENT))],
+                    first: vec![Span::styled(bullet, Style::new().fg(theme().bullet))],
                     rest: vec![Span::raw(" ".repeat(w))],
                     used: false,
                 });
@@ -383,12 +378,15 @@ impl<'h> Writer<'h> {
                 .push(Style::new().add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { dest_url, .. } => {
                 self.links.push(dest_url.to_string());
-                self.styles
-                    .push(Style::new().add_modifier(Modifier::UNDERLINED));
+                self.styles.push(
+                    Style::new()
+                        .fg(theme().link)
+                        .add_modifier(Modifier::UNDERLINED),
+                );
             }
             Tag::Image { dest_url, .. } => {
                 self.links.push(dest_url.to_string());
-                self.styles.push(Style::new().add_modifier(Modifier::DIM));
+                self.styles.push(Style::new().fg(theme().meta));
                 self.text("[image:", None, &[], None);
                 self.space();
             }
@@ -401,12 +399,7 @@ impl<'h> Writer<'h> {
             Tag::TableCell => {
                 if self.cells > 0 {
                     self.space();
-                    self.text(
-                        "│",
-                        None,
-                        &[],
-                        Some(Style::new().add_modifier(Modifier::DIM)),
-                    );
+                    self.text("│", None, &[], Some(Style::new().fg(theme().meta)));
                     self.space();
                 }
                 self.cells += 1;
@@ -472,7 +465,7 @@ impl<'h> Writer<'h> {
                         &format!("‹{url}›"),
                         None,
                         &[],
-                        Some(Style::new().add_modifier(Modifier::DIM)),
+                        Some(Style::new().fg(theme().meta)),
                     );
                 }
             }
@@ -507,7 +500,7 @@ impl<'h> Writer<'h> {
                 .map(|l| vec![(Style::default(), expand_tabs(l))])
                 .collect(),
         };
-        let gutter = Style::new().fg(Color::DarkGray);
+        let gutter = Style::new().fg(theme().gutter);
         for line in spans {
             self.start_line();
             self.cur.push(Span::styled("│ ", gutter));

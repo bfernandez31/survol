@@ -2,13 +2,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::graph::clip;
-use super::rows::{RowOpts, file_stats, render_row, status_letter, truncate_left};
-use super::{ACCENT, pane};
+use super::pane;
+use super::rows::{RowOpts, change_counts, file_stats, render_row, status_letter, truncate_left};
 use crate::app::App;
 use crate::theme::theme;
 use crate::views::explorer::{self, Role, SideItem};
@@ -77,17 +77,18 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
                 note,
                 files,
             } => {
+                let t = theme();
                 let folded = v.is_dir_folded(key);
                 let done = files.iter().filter(|&&f| reviewed[f]).count();
                 let mut left = vec![
                     Span::raw("  ".repeat(*depth as usize)),
-                    Span::styled(if folded { "▸ " } else { "▾ " }, Style::new().fg(ACCENT)),
-                    Span::styled(format!("{label} "), Style::new().fg(Color::Blue)),
+                    Span::styled(if folded { "▸ " } else { "▾ " }, Style::new().fg(t.accent)),
+                    Span::styled(format!("{label} "), Style::new().fg(t.dir)),
                 ];
                 if !note.is_empty() {
                     left.push(Span::styled(
                         abbreviate_package(note, 28),
-                        Style::new().add_modifier(Modifier::DIM),
+                        Style::new().fg(t.meta),
                     ));
                 }
                 let mut right = Vec::new();
@@ -96,12 +97,13 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
                         let (x, y) = file_stats(diff, f);
                         (a + x, r + y)
                     });
-                    right.push(format!(" {} files +{a} -{r}", files.len()).dim());
+                    right.push(format!(" {} files", files.len()).fg(t.meta));
+                    right.extend(change_counts(a, Some(r), Style::new()));
                 }
                 right.push(if done == files.len() {
-                    format!(" ✓ {done}/{}", files.len()).fg(Color::Green)
+                    format!(" ✓ {done}/{}", files.len()).fg(t.ok)
                 } else {
-                    format!(" {done}/{}", files.len()).dim()
+                    format!(" {done}/{}", files.len()).fg(theme().meta)
                 });
                 ListItem::new(sides(left, right, width))
             }
@@ -112,54 +114,52 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
                 role,
                 place,
             } => {
+                let t = theme();
                 let file = &diff.files[*i];
                 let (letter, color) = status_letter(file.status);
                 let name = file.path.rsplit('/').next().unwrap_or(&file.path);
                 let (a, r) = file_stats(diff, *i);
                 let mut name_style = Style::new();
                 if reviewed[*i] || file.is_generated {
-                    name_style = name_style.add_modifier(Modifier::DIM);
+                    name_style = name_style.fg(t.meta);
                 }
                 if *i == v.current_file() && !focused {
-                    name_style = name_style.add_modifier(Modifier::BOLD).fg(ACCENT);
+                    name_style = name_style.add_modifier(Modifier::BOLD).fg(t.accent);
                 }
                 let mut left = vec![
                     Span::raw("  ".repeat(*depth as usize)),
                     Span::styled(
                         if reviewed[*i] { "✓ " } else { "  " },
-                        Style::new().fg(Color::Green),
+                        Style::new().fg(t.ok),
                     ),
                 ];
                 if let Role::Test { .. } = role {
-                    left.push("└ ⚗ ".dim());
+                    left.push("└ ⚗ ".fg(theme().meta));
                 }
                 left.push(Span::styled(letter, Style::new().fg(color)));
                 left.push(" ".into());
                 if !prefix.is_empty() {
-                    left.push(prefix.clone().dim());
+                    left.push(prefix.clone().fg(theme().meta));
                 }
                 left.push(Span::styled(name.to_string(), name_style));
                 match role {
-                    Role::Test { by_graph: true } => left.push(" (graph)".dim()),
-                    Role::Class { tested: false } => left.push(" ⚠ no test".fg(Color::Yellow)),
+                    Role::Test { by_graph: true } => left.push(" (graph)".fg(theme().meta)),
+                    Role::Class { tested: false } => left.push(" ⚠ no test".fg(t.warn)),
                     _ => {}
                 }
-                let mut stats = format!(" +{a}");
-                if r > 0 {
-                    stats.push_str(&format!(" -{r}"));
-                }
+                let stats = change_counts(a, (r > 0).then_some(r), Style::new());
                 let right = if flat {
                     // The name first, where it lives after, cut on the left.
-                    left.push(stats.dim());
+                    left.extend(stats);
                     let used: usize = left.iter().map(Span::width).sum();
                     let room = width.saturating_sub(used + 2);
                     if room > 4 {
-                        vec![format!("  {}", truncate_left(place, room)).dim()]
+                        vec![format!("  {}", truncate_left(place, room)).fg(theme().meta)]
                     } else {
                         Vec::new()
                     }
                 } else {
-                    vec![stats.dim()]
+                    stats
                 };
                 ListItem::new(sides(left, right, width))
             }
@@ -177,7 +177,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
             pane(focused).title(title).title(
                 Line::from(format!(" m: {} ", v.explorer.name()))
                     .right_aligned()
-                    .dim(),
+                    .fg(theme().meta),
             ),
         )
         .highlight_style(if focused {
@@ -202,7 +202,7 @@ fn render_diff(f: &mut Frame, area: Rect, app: &mut App) {
                 Layout::Split => " split ",
             })
             .right_aligned()
-            .dim(),
+            .fg(theme().meta),
         );
     let inner = block.inner(area);
     f.render_widget(block, area);

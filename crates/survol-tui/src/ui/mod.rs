@@ -17,9 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::app::{App, GraphStatus, GroupStatus, Popup, RemoteStatus, View};
+use crate::theme::theme;
 use crate::views::graph::Mode;
-
-pub(crate) const ACCENT: Color = Color::Cyan;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let [header, body, footer] = Split::vertical([
@@ -68,16 +67,34 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Bordered pane, highlighted when focused.
+/// Bordered pane, its border and title highlighted when focused.
 fn pane(focused: bool) -> Block<'static> {
+    let t = theme();
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if focused {
-            Style::new().fg(ACCENT)
+        .border_style(Style::new().fg(if focused { t.border_focus } else { t.border }))
+        .title_style(if focused {
+            Style::new().fg(t.border_focus).bold()
         } else {
-            Style::new().dim()
+            Style::new().fg(t.meta)
         })
+}
+
+/// A popup: on the popup background, its title in a block.
+pub(crate) fn popup_block(title: String) -> Block<'static> {
+    let t = theme();
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(t.popup_border))
+        .style(Style::new().bg(t.popup_bg))
+        .title(Line::from(title.fg(t.block_fg).bg(t.popup_title_bg).bold()))
+}
+
+/// Secondary text: counters, hints, paths.
+pub(crate) fn meta<'a>(s: impl Into<std::borrow::Cow<'a, str>>) -> Span<'a> {
+    Span::styled(s, Style::new().fg(theme().meta))
 }
 
 /// Width of the left list of a two-pane view.
@@ -87,140 +104,230 @@ fn list_width(body: Rect) -> u16 {
         .min(body.width.saturating_sub(20))
 }
 
+/// Powerline glyphs (Nerd Font): a solid arrow, a thin one between two
+/// blocks of the same colour.
+const ARROW: &str = "\u{e0b0}";
+const THIN_ARROW: &str = "\u{e0b1}";
+
+/// The header: coloured blocks on a band, chained by powerline arrows, or
+/// separated by a space without them.
+struct Bar {
+    spans: Vec<Span<'static>>,
+    /// Background of the last block, `None` after plain text.
+    last: Option<Color>,
+    powerline: bool,
+    bg: Color,
+}
+
+impl Bar {
+    fn new(powerline: bool) -> Self {
+        Self {
+            spans: Vec::new(),
+            last: None,
+            powerline,
+            bg: theme().header_bg,
+        }
+    }
+
+    /// `text` in `fg` on a block of `bg`.
+    fn block(&mut self, text: String, fg: Color, bg: Color, bold: bool) {
+        if self.powerline {
+            match self.last {
+                Some(prev) if prev == bg => self.spans.push(THIN_ARROW.fg(theme().meta).bg(bg)),
+                Some(prev) => self.spans.push(ARROW.fg(prev).bg(bg)),
+                None if !self.spans.is_empty() => self.spans.push(ARROW.fg(self.bg).bg(bg)),
+                None => {}
+            }
+        } else if !self.spans.is_empty() {
+            self.spans.push(" ".bg(self.bg));
+        }
+        let style = Style::new().fg(fg).bg(bg);
+        self.spans
+            .push(Span::styled(text, if bold { style.bold() } else { style }));
+        self.last = Some(bg);
+    }
+
+    /// Dark text on a block of `bg`, bold.
+    fn info(&mut self, text: String, bg: Color) {
+        self.block(text, theme().block_fg, bg, true);
+    }
+
+    /// Text on the band itself.
+    fn plain(&mut self, text: String, fg: Color) {
+        self.close();
+        if !self.powerline && !self.spans.is_empty() {
+            self.spans.push(" ".bg(self.bg));
+        }
+        self.spans.push(text.fg(fg).bg(self.bg));
+    }
+
+    /// More text on the band, after [`Bar::plain`].
+    fn spans(&mut self, spans: Vec<Span<'static>>) {
+        let bg = self.bg;
+        self.spans.extend(spans.into_iter().map(|s| s.bg(bg)));
+    }
+
+    /// Ends the last block.
+    fn close(&mut self) {
+        if let Some(prev) = self.last.take()
+            && self.powerline
+        {
+            self.spans.push(ARROW.fg(prev).bg(self.bg));
+        }
+    }
+
+    fn line(mut self) -> Line<'static> {
+        self.close();
+        Line::from(self.spans).style(Style::new().bg(self.bg))
+    }
+}
+
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
+    let t = theme();
     let sh = &app.sh;
     let (done, total) = sh.state.progress(&sh.review.diff);
     let pct = (done * 100).checked_div(total).unwrap_or(100);
     let (add, del) = sh.review.diff.stats();
-    let mut spans = vec![" survol ".bold().fg(Color::Black).bg(ACCENT), " ".into()];
+    let mut bar = Bar::new(t.powerline);
+    bar.info(" survol ".into(), t.badge_bg);
     for (i, v) in View::ALL.iter().enumerate() {
         let tab = format!(" {} {} ", i + 1, v.name());
-        spans.push(if *v == app.view {
-            tab.bold().fg(Color::Black).bg(Color::Gray)
+        if *v == app.view {
+            bar.info(tab, t.tab_active_bg);
         } else {
-            tab.dim()
-        });
+            bar.block(tab, t.tab_fg, t.tab_bg, false);
+        }
     }
-    spans.extend([
-        format!("  {} ", sh.review.title()).bold(),
-        format!(" {} files  +{add} -{del} ", sh.review.diff.files.len()).dim(),
-        Span::styled(
-            format!(" {done}/{total} reviewed ({pct}%) "),
-            Style::new().fg(if done == total {
-                Color::Green
-            } else {
-                Color::Yellow
-            }),
-        ),
-    ]);
+    bar.block(format!(" {} ", sh.review.title()), t.text, t.title_bg, true);
+    bar.plain(format!(" {} files ", sh.review.diff.files.len()), t.meta);
+    bar.spans(rows::change_counts(add, Some(del), Style::new()));
+    bar.spans(vec![" ".into()]);
+    bar.info(
+        format!(" {done}/{total} reviewed ({pct}%) "),
+        if done == total {
+            t.progress_done_bg
+        } else {
+            t.progress_bg
+        },
+    );
     let grouping = app.grouping_label();
     if !grouping.is_empty() {
-        let style = match app.group_status {
-            GroupStatus::Failed(_) => Style::new().fg(Color::Red),
-            GroupStatus::Running { .. } => Style::new().fg(ACCENT),
-            GroupStatus::Done => Style::new().dim(),
+        let bg = match app.group_status {
+            GroupStatus::Failed(_) => t.error,
+            _ => t.grouping_bg,
         };
-        spans.push(Span::styled(format!(" {grouping} "), style));
+        bar.info(format!(" {grouping} "), bg);
     }
     let graph = app.graph_label();
     if !graph.is_empty() {
-        let style = match app.graph_status {
-            GraphStatus::Failed(_) => Style::new().fg(Color::Red),
-            GraphStatus::Running { .. } => Style::new().fg(ACCENT),
-            _ => Style::new().dim(),
+        let bg = match app.graph_status {
+            GraphStatus::Failed(_) => t.error,
+            _ => t.graph_bg,
         };
-        spans.push(Span::styled(format!(" {graph} "), style));
-    }
-    let drafts = sh.comments.drafts.len();
-    if drafts > 0 || !sh.comments.summary.trim().is_empty() {
-        spans.push(Span::styled(
-            format!(" ✎ {drafts} draft(s) "),
-            Style::new().fg(Color::Yellow),
-        ));
+        bar.info(format!(" {graph} "), bg);
     }
     let forge = sh.review.forge();
     match &app.remote_status {
-        RemoteStatus::Fetching(_) => spans.push(format!(" ⟳ {forge} ").fg(ACCENT)),
-        RemoteStatus::Failed(_) => spans.push(format!(" {forge} ✗ ").fg(Color::Red)),
+        RemoteStatus::Fetching(_) => bar.info(format!(" ⟳ {forge} "), t.threads_bg),
+        RemoteStatus::Failed(_) => bar.info(format!(" {forge} ✗ "), t.error),
         RemoteStatus::Ready => {
             let open = sh
                 .discussions()
                 .iter()
                 .filter(|d| !d.is_system() && d.is_resolvable() && !d.is_resolved())
                 .count();
-            spans.push(format!(" ◆ {open} open thread(s) ").fg(Color::Magenta));
+            bar.info(format!(" ◆ {open} open thread(s) "), t.threads_bg);
         }
         RemoteStatus::Local => {}
     }
+    let drafts = sh.comments.drafts.len();
+    if drafts > 0 || !sh.comments.summary.trim().is_empty() {
+        bar.info(format!(" ✎ {drafts} draft(s) "), t.drafts_bg);
+    }
     if let Some(p) = &app.publishing {
-        spans.push(Span::styled(
-            format!(" ⟳ publishing {p} "),
-            Style::new().fg(ACCENT).bold(),
-        ));
+        bar.info(format!(" ⟳ publishing {p} "), t.accent);
     }
     if let Some(p) = &app.ask_pending {
         let e = p.since.elapsed();
-        spans.push(Span::styled(
+        bar.info(
             format!(" {} asking… {}s ", ask::spinner(e.as_millis()), e.as_secs()),
-            Style::new().fg(ACCENT),
-        ));
+            t.accent,
+        );
     }
     if !sh.worktree_ready {
-        spans.push("  ⟳ worktree".dim());
+        bar.plain(" ⟳ worktree".into(), t.meta);
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(
+        Paragraph::new(bar.line()).style(Style::new().bg(t.header_bg)),
+        area,
+    );
+}
+
+/// Footer help: `key description` pairs separated by two spaces, the keys
+/// highlighted.
+fn key_help(text: &str) -> Line<'static> {
+    let t = theme();
+    let mut spans = vec![Span::raw(" ")];
+    for item in text.split("  ").filter(|s| !s.trim().is_empty()) {
+        let item = item.trim();
+        let (k, d) = item.split_once(' ').unwrap_or((item, ""));
+        spans.push(k.to_string().fg(t.key).bold());
+        spans.push(format!(" {d}  ").fg(t.meta));
+    }
+    Line::from(spans)
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    let t = theme();
     let line = if app.view == View::Graph && app.graph.query_editing {
         Line::from(vec![
-            " find symbol: ".fg(ACCENT),
+            " find symbol: ".fg(t.accent),
             app.graph.query.clone().into(),
-            "▏".fg(ACCENT),
-            "   (Owner.addPet, addPet, or part of a name)".dim(),
+            "▏".fg(t.accent),
+            "   (Owner.addPet, addPet, or part of a name)".fg(t.meta),
         ])
     } else if app.view == View::Diff && app.diff.filter_editing {
         Line::from(vec![
-            "/".fg(ACCENT),
+            "/".fg(t.accent),
             app.diff.filter.clone().into(),
-            "▏".fg(ACCENT),
+            "▏".fg(t.accent),
         ])
     } else if app.view == View::Stack && app.stack.confirm_regroup {
         Line::from(
             " Regroup without cache? This makes a new LLM call (may take a minute).  y / n"
-                .fg(Color::Yellow)
+                .fg(t.warn)
                 .bold(),
         )
     } else if let Some(m) = app.sh.message() {
-        Line::from(m.to_string().fg(Color::Yellow))
+        Line::from(m.to_string().fg(t.warn))
     } else {
-        Line::from(
-            match app.view {
-                View::Diff => {
-                    " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  gf file  e edit  / filter  m files  ? help"
-                }
-                View::Stack => {
-                    " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  c comment  V range  P review  a ask  gs graph  gf file  R regroup  ? help"
-                }
-                View::Graph => match app.graph.mode {
-                    Mode::Symbol => {
-                        " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  gf file  / find  m mode  a ask  A answers  ? help"
-                    }
-                    Mode::Flows => {
-                        " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x/X Mermaid  S to comment  e edit  gd diff  h back  m mode  ? help"
-                    }
-                    Mode::Modules => {
-                        " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x/X Mermaid  S to comment  / find  m mode  ? help"
-                    }
-                    _ => {
-                        " j/k move  Enter symbol graph  J/K module  e edit  gd diff  gf file  a ask  / find symbol  m mode  C-l preview  ? help"
-                    }
-                },
+        key_help(match app.view {
+            View::Diff => {
+                " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  gf file  e edit  / filter  m files  ? help"
             }
-            .dim(),
-        )
+            View::Stack => {
+                " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  c comment  V range  P review  a ask  gs graph  gf file  R regroup  ? help"
+            }
+            View::Graph => match app.graph.mode {
+                Mode::Symbol => {
+                    " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  gf file  / find  m mode  a ask  A answers  ? help"
+                }
+                Mode::Flows => {
+                    " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x/X Mermaid  S to comment  e edit  gd diff  h back  m mode  ? help"
+                }
+                Mode::Modules => {
+                    " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x/X Mermaid  S to comment  / find  m mode  ? help"
+                }
+                _ => {
+                    " j/k move  Enter symbol graph  J/K module  e edit  gd diff  gf file  a ask  / find symbol  m mode  C-l preview  ? help"
+                }
+            },
+        })
     };
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(
+        Paragraph::new(line).style(Style::new().bg(t.footer_bg)),
+        area,
+    );
 }
 
 const HELP: &[(&str, &str)] = &[
@@ -352,17 +459,12 @@ fn render_help(f: &mut Frame, area: Rect, view: View) {
         .iter()
         .map(|(k, d)| match k.strip_prefix("# ") {
             Some(title) => Line::from(format!(" {title}").bold()),
-            None => Line::from(vec![format!("   {k:<26}").fg(ACCENT), (*d).into()]),
+            None => Line::from(vec![format!("   {k:<26}").fg(theme().key), (*d).into()]),
         })
         .collect();
     f.render_widget(Clear, rect);
     f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(" keys "),
-        ),
+        Paragraph::new(lines).block(popup_block(" keys ".into())),
         rect,
     );
 }
@@ -404,8 +506,9 @@ pub(crate) mod tests {
     use survol_core::config::Config;
     use survol_core::review_state::ReviewState;
 
-    use super::{help_lines, wrap};
+    use super::{ARROW, Bar, help_lines, key_help, wrap};
     use crate::app::{App, View};
+    use crate::theme::theme;
     use crate::views::stack::tests::fixture;
 
     /// The screen of `app` drawn on a `w` × `h` terminal, one string per row.
@@ -465,5 +568,82 @@ pub(crate) mod tests {
             wrap("see https://example.org/a/b", 10),
             ["see", "https://ex", "ample.org/", "a/b"]
         );
+    }
+
+    fn text(line: &ratatui::text::Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn header_blocks_are_chained_by_arrows_or_spaces() {
+        let t = theme();
+        let build = |powerline| {
+            let mut bar = Bar::new(powerline);
+            bar.info(" survol ".into(), t.badge_bg);
+            bar.info(" 1 Diff ".into(), t.tab_active_bg);
+            bar.plain(" 3 files ".into(), t.meta);
+            bar.info(" 1/2 ".into(), t.progress_bg);
+            bar.line()
+        };
+        let a = build(true);
+        assert_eq!(
+            text(&a),
+            format!(" survol {ARROW} 1 Diff {ARROW} 3 files {ARROW} 1/2 {ARROW}")
+        );
+        // The arrow takes the colour of the block it leaves, on the next one.
+        let arrow = &a.spans[1];
+        assert_eq!(
+            (arrow.style.fg, arrow.style.bg),
+            (Some(t.badge_bg), Some(t.tab_active_bg))
+        );
+        assert_eq!(a.spans[0].style.fg, Some(t.block_fg));
+        let plain = build(false);
+        assert_eq!(text(&plain), " survol   1 Diff   3 files   1/2 ");
+        assert!(!text(&plain).contains(ARROW));
+    }
+
+    #[test]
+    fn footer_keys_stand_out_from_their_description() {
+        let t = theme();
+        let l = key_help(" j/k move  space ✓ + next  ? help");
+        assert_eq!(text(&l), " j/k move  space ✓ + next  ? help  ");
+        let key = l.spans.iter().find(|s| s.content == "space").unwrap();
+        assert_eq!(key.style.fg, Some(t.key));
+        let desc = l.spans.iter().find(|s| s.content == " ✓ + next  ").unwrap();
+        assert_eq!(desc.style.fg, Some(t.meta));
+    }
+
+    #[test]
+    fn the_screen_uses_the_chrome_colours() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        term.draw(|f| super::render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let t = theme();
+        let row =
+            |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        // Header: badge, then powerline arrows, on the header band.
+        assert!(row(0).starts_with(" survol "), "{}", row(0));
+        assert!(row(0).contains(ARROW));
+        assert_eq!(buf[(1, 0)].bg, t.badge_bg);
+        assert_eq!(buf[(99, 0)].bg, t.header_bg);
+        // Footer band, keys in the key colour.
+        assert_eq!(buf[(99, 19)].bg, t.footer_bg);
+        assert_eq!(buf[(1, 19)].fg, t.key);
+        // Focused pane (the diff) has the focus border; the list does not.
+        let diff_x = (0..100)
+            .find(|&x| buf[(x, 1)].symbol() == "╭" && x > 0)
+            .unwrap();
+        assert_eq!(buf[(diff_x, 1)].fg, t.border_focus);
+        assert_eq!(buf[(0, 1)].fg, t.border);
+        // The first file header is a band across the diff pane.
+        let y = (2..19)
+            .find(|&y| {
+                buf[(diff_x + 1, y)].bg == t.file_header_bg
+                    || buf[(diff_x + 1, y)].bg == t.cursor_bg
+            })
+            .expect("a file header");
+        assert_eq!(buf[(diff_x + 1 + 60, y)].bg, buf[(diff_x + 1, y)].bg);
     }
 }

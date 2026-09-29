@@ -43,7 +43,10 @@ fn paragraphs_wrap_with_inline_styles() {
             .add_modifier
             .contains(Modifier::ITALIC)
     );
-    assert_eq!(span_style(&lines, "findById").fg, Some(super::ACCENT));
+    assert_eq!(
+        span_style(&lines, "findById").fg,
+        Some(crate::theme::theme().code)
+    );
     // No line is wider than asked.
     assert!(plain(&lines).iter().all(|l| l.chars().count() <= 24));
 }

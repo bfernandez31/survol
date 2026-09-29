@@ -10,7 +10,7 @@ use survol_core::graph::{Graph, ModuleMap, SymIdx};
 use unicode_width::UnicodeWidthChar;
 
 use super::rows::truncate_right;
-use super::{ACCENT, pane, wrap};
+use super::{pane, wrap};
 use crate::app::{App, GraphStatus};
 use crate::highlight::Spans;
 use crate::theme::theme;
@@ -54,24 +54,24 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                     "  ⟳ Building the code graph (tree-sitter)… {}s",
                     since.elapsed().as_secs()
                 )
-                .fg(ACCENT)
+                .fg(theme().accent)
                 .bold(),
             ));
             if !progress.is_empty() {
-                lines.push(Line::from(format!("    {progress}").dim()));
+                lines.push(Line::from(format!("    {progress}").fg(theme().meta)));
             }
             lines.push(Line::default());
             lines.push(Line::from(
-                "  The Diff and Stack views stay usable meanwhile (1, 2).".dim(),
+                "  The Diff and Stack views stay usable meanwhile (1, 2).".fg(theme().meta),
             ));
         }
         GraphStatus::Failed(e) => {
-            lines.push(Line::from("  Graph failed".fg(Color::Red).bold()));
+            lines.push(Line::from("  Graph failed".fg(theme().error).bold()));
             for l in wrap(e, area.width.saturating_sub(6) as usize) {
                 lines.push(Line::from(format!("    {l}")));
             }
         }
-        _ => lines.push(Line::from("  No graph.".dim())),
+        _ => lines.push(Line::from("  No graph.".fg(theme().meta))),
     }
     f.render_widget(
         Paragraph::new(lines).block(pane(true).title(" graph ")),
@@ -82,14 +82,15 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 /// Change state of a symbol: label and colour.
 fn status(g: &Graph, s: SymIdx) -> (&'static str, Color) {
     let sym = g.symbol(s);
+    let t = theme();
     if sym.removed {
-        ("removed", Color::Red)
+        ("removed", t.status_deleted)
     } else if sym.changed {
-        ("modified", Color::Yellow)
+        ("modified", t.status_modified)
     } else if g.is_file_changed(&sym.file) {
-        ("in diff", Color::DarkGray)
+        ("in diff", t.in_diff)
     } else {
-        ("intact", Color::Magenta)
+        ("intact", t.intact)
     }
 }
 
@@ -126,13 +127,13 @@ fn badges(g: &Graph, s: SymIdx) -> Vec<Span<'static>> {
     for r in &sym.roles {
         out.push(Span::styled(
             format!(" [{}]", kind_name(r)),
-            Style::new().fg(Color::Blue),
+            Style::new().fg(theme().relation),
         ));
     }
     for (k, v) in &sym.tags {
         out.push(Span::styled(
             format!(" {k}={}", truncate_right(v, 30)),
-            Style::new().fg(Color::Blue).dim(),
+            Style::new().fg(theme().meta),
         ));
     }
     out
@@ -141,13 +142,13 @@ fn badges(g: &Graph, s: SymIdx) -> Vec<Span<'static>> {
 /// Callers count, highlighting those in untouched files.
 fn impact_spans(callers: usize, untouched: usize) -> Vec<Span<'static>> {
     if callers == 0 {
-        return vec![" · no caller".dim()];
+        return vec![" · no caller".fg(theme().meta)];
     }
-    let mut v = vec![format!(" · {callers} caller(s)").dim()];
+    let mut v = vec![format!(" · {callers} caller(s)").fg(theme().meta)];
     if untouched > 0 {
         v.push(Span::styled(
             format!(" {untouched} untouched"),
-            Style::new().fg(Color::Magenta).bold(),
+            Style::new().fg(theme().warn).bold(),
         ));
     }
     v
@@ -198,7 +199,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
     let block = pane(focused).title(title).title_bottom(
         Line::from(format!(" {} · m mode ", v.mode.name()))
             .right_aligned()
-            .dim(),
+            .fg(theme().meta),
     );
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -236,7 +237,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
                 Mode::Flows => "  No entry point reaches a changed symbol.",
                 _ => "  Nothing here.",
             }
-            .dim(),
+            .fg(theme().meta),
         ));
     }
     f.render_widget(Paragraph::new(lines), inner);
@@ -251,7 +252,7 @@ fn list_title(g: &Graph, v: &GraphView) -> Line<'static> {
                 format!(" changed symbols ({n}) ").bold(),
                 Span::styled(
                     format!("{hit} called from untouched files "),
-                    Style::new().fg(Color::Magenta),
+                    Style::new().fg(theme().warn),
                 ),
             ])
         }
@@ -283,7 +284,7 @@ fn list_title(g: &Graph, v: &GraphView) -> Line<'static> {
                 .take(3)
                 .collect();
             for c in crumbs {
-                spans.push(format!("‹ {} ", truncate_right(&c, 24)).dim());
+                spans.push(format!("‹ {} ", truncate_right(&c, 24)).fg(theme().meta));
             }
             Line::from(spans)
         }
@@ -294,7 +295,7 @@ fn list_row(g: &Graph, v: &GraphView, row: &ListRow) -> Vec<Span<'static>> {
     match row {
         ListRow::Module(m) => vec![Span::styled(
             format!("▣ {}", if m.is_empty() { "." } else { m }),
-            Style::new().fg(Color::Blue).bold(),
+            Style::new().fg(theme().layer).bold(),
         )],
         ListRow::File(p) => {
             let mut v = vec![
@@ -302,7 +303,7 @@ fn list_row(g: &Graph, v: &GraphView, row: &ListRow) -> Vec<Span<'static>> {
                 Span::styled(file_name(p).to_string(), Style::new().bold()),
             ];
             if !g.is_file_changed(p) {
-                v.push("  intact".fg(Color::Magenta));
+                v.push("  intact".fg(theme().intact));
             }
             v
         }
@@ -310,9 +311,9 @@ fn list_row(g: &Graph, v: &GraphView, row: &ListRow) -> Vec<Span<'static>> {
             let sym = g.symbol(*s);
             let (label, color) = status(g, *s);
             let mut spans = vec![
-                format!("    {:<6} ", kind_label(sym.kind)).dim(),
-                Span::styled(g.display_name(*s), Style::new().fg(ACCENT)),
-                format!(":{}", sym.line).dim(),
+                format!("    {:<6} ", kind_label(sym.kind)).fg(theme().meta),
+                Span::styled(g.display_name(*s), Style::new().fg(theme().accent)),
+                format!(":{}", sym.line).fg(theme().meta),
             ];
             if v.mode == Mode::Found || label == "removed" {
                 spans.push(Span::styled(format!(" {label}"), Style::new().fg(color)));
@@ -352,9 +353,9 @@ fn mod_row(
             let (inc, out) = degrees.map_or((0, 0), |d| d[i]);
             let mut name = Style::new();
             if m.changed() {
-                name = name.fg(Color::Yellow).bold();
+                name = name.fg(theme().status_modified).bold();
             } else {
-                name = name.dim();
+                name = name.fg(theme().meta);
             }
             if m.test {
                 name = name.italic();
@@ -367,7 +368,7 @@ fn mod_row(
                 "▸ "
             };
             vec![
-                arrow.fg(ACCENT),
+                arrow.fg(theme().accent),
                 Span::styled(
                     if m.name.is_empty() {
                         ".".into()
@@ -376,22 +377,22 @@ fn mod_row(
                     },
                     name,
                 ),
-                format!("  {}/{} files", m.changed_files, m.files).dim(),
+                format!("  {}/{} files", m.changed_files, m.files).fg(theme().meta),
                 if m.changed_symbols > 0 {
-                    format!("  Δ{}", m.changed_symbols).fg(Color::Yellow)
+                    format!("  Δ{}", m.changed_symbols).fg(theme().status_modified)
                 } else {
                     "".into()
                 },
-                format!("  ←{inc} →{out}").fg(Color::Blue),
+                format!("  ←{inc} →{out}").fg(theme().relation),
             ]
         }
         ModRow::Symbol { sym, .. } => {
             let s = g.symbol(sym);
             let (c, u) = v.impact.get(&sym).copied().unwrap_or((0, 0));
             let mut spans = vec![
-                format!("    {:<6} ", kind_label(s.kind)).dim(),
-                Span::styled(g.display_name(sym), Style::new().fg(ACCENT)),
-                format!("  {}:{}", file_name(&s.file), s.line).dim(),
+                format!("    {:<6} ", kind_label(s.kind)).fg(theme().meta),
+                Span::styled(g.display_name(sym), Style::new().fg(theme().accent)),
+                format!("  {}:{}", file_name(&s.file), s.line).fg(theme().meta),
             ];
             spans.extend(impact_spans(c, u));
             spans
@@ -405,22 +406,22 @@ fn tree_row(g: &Graph, row: &TreeRow, width: usize) -> Vec<Span<'static>> {
             let sym = g.symbol(*s);
             let (label, color) = status(g, *s);
             let mut v = vec![
-                "● ".fg(ACCENT),
+                "● ".fg(theme().accent),
                 Span::styled(g.display_name(*s), Style::new().bold()),
-                format!("  {}", kind_label(sym.kind)).dim(),
+                format!("  {}", kind_label(sym.kind)).fg(theme().meta),
                 Span::styled(format!("  {label}"), Style::new().fg(color)),
             ];
             v.extend(badges(g, *s));
             v
         }
         TreeRow::Section { rel, count, folded } => vec![
-            if *folded { " ▸ " } else { " ▾ " }.fg(ACCENT),
+            if *folded { " ▸ " } else { " ▾ " }.fg(theme().accent),
             Span::styled(
                 format!("{} ({count})", rel.label()),
                 Style::new().bold().fg(if *count == 0 {
-                    Color::DarkGray
+                    theme().meta
                 } else {
-                    Color::Blue
+                    theme().layer
                 }),
             ),
         ],
@@ -451,16 +452,20 @@ fn tree_row(g: &Graph, row: &TreeRow, width: usize) -> Vec<Span<'static>> {
             };
             let (label, color) = status(g, s);
             let mut left = vec![
-                format!("{}{marker}", "  ".repeat(depth + 1)).fg(ACCENT),
-                Span::styled(g.display_name(s), Style::new().fg(ACCENT)),
+                format!("{}{marker}", "  ".repeat(depth + 1)).fg(theme().accent),
+                Span::styled(g.display_name(s), Style::new().fg(theme().accent)),
             ];
             if let Some(via) = link.via {
-                left.push(format!(" via {}", g.display_name(via)).italic().dim());
+                left.push(
+                    format!(" via {}", g.display_name(via))
+                        .italic()
+                        .fg(theme().meta),
+                );
             }
-            left.push(format!("  {}:{line}", short_path(&sym.file)).dim());
+            left.push(format!("  {}:{line}", short_path(&sym.file)).fg(theme().meta));
             let mut right = Vec::new();
             if link.confidence < 0.995 {
-                right.push(format!("{:.2} ", link.confidence).fg(Color::Yellow).dim());
+                right.push(format!("{:.2} ", link.confidence).fg(theme().confidence));
             }
             right.push(Span::styled(format!("{label:<8}"), Style::new().fg(color)));
             two_sided(left, right, width)
@@ -496,7 +501,7 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
         Vec::new(),
         width + 1,
         '─',
-        Style::new().dim(),
+        Style::new().fg(theme().rule),
     ));
     let head_h = (head.len() as u16).min(inner.height.saturating_sub(3));
     let [top, rest] =
@@ -506,7 +511,7 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
     let (offset, hscroll) = (app.graph.preview_offset, app.graph.hscroll);
     let Some(src) = app.graph.source(&mut app.sh, &t) else {
         f.render_widget(
-            Paragraph::new(Line::from(" cannot read this file".dim())),
+            Paragraph::new(Line::from(" cannot read this file".fg(theme().meta))),
             rest,
         );
         return;
@@ -533,13 +538,13 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
         let marker = if is_target { "▶" } else { " " };
         let sign = if changed { "+" } else { " " };
         let mut spans = vec![
-            Span::styled(marker, Style::new().fg(ACCENT).bold()),
+            Span::styled(marker, Style::new().fg(theme().accent).bold()),
             Span::styled(
                 format!("{no:>num_w$} "),
                 if is_target {
-                    Style::new().fg(ACCENT).bold()
+                    Style::new().fg(theme().accent).bold()
                 } else {
-                    Style::new().dim()
+                    Style::new().fg(theme().line_nr)
                 },
             ),
             if changed {
@@ -613,7 +618,7 @@ fn info_lines(app: &App, t: &Target, width: usize) -> Vec<Line<'static>> {
     let sym = g.symbol(t.sym);
     let (label, color) = status(g, t.sym);
     let mut first = vec![
-        format!(" {} ", kind_label(sym.kind)).dim(),
+        format!(" {} ", kind_label(sym.kind)).fg(theme().meta),
         Span::styled(g.display_name(t.sym), Style::new().bold()),
         Span::styled(format!("  {label}"), Style::new().fg(color)),
     ];
@@ -624,16 +629,16 @@ fn info_lines(app: &App, t: &Target, width: usize) -> Vec<Line<'static>> {
     if v.mode == Mode::Symbol
         && let Some(TreeRow::Node { rel, link, .. }) = v.tree.get(v.pos().cursor)
     {
-        second.push(format!(" {} ", rel.label()).fg(Color::Blue));
-        second.push(format!("· {}", kind_name(link.kind)).dim());
+        second.push(format!(" {} ", rel.label()).fg(theme().relation));
+        second.push(format!("· {}", kind_name(link.kind)).fg(theme().meta));
         if link.confidence < 0.995 {
-            second.push(format!(" · confidence {:.2}", link.confidence).fg(Color::Yellow));
+            second.push(format!(" · confidence {:.2}", link.confidence).fg(theme().confidence));
         }
         if let Some(via) = link.via {
             second.push(format!(" · via {}", g.display_name(via)).italic());
         }
         if rel.at_reference() && link.line > 0 {
-            second.push(format!(" · reference at line {}", link.line).dim());
+            second.push(format!(" · reference at line {}", link.line).fg(theme().meta));
         }
     }
     if !sym.removed {
@@ -642,7 +647,7 @@ fn info_lines(app: &App, t: &Target, width: usize) -> Vec<Line<'static>> {
     }
     let hunks = g.hunks_of_symbol(t.sym).len();
     if hunks > 0 {
-        second.push(format!(" · {hunks} hunk(s), gd").dim());
+        second.push(format!(" · {hunks} hunk(s), gd").fg(theme().meta));
     }
     if !second.is_empty() {
         lines.push(clip(second, width));
@@ -654,7 +659,7 @@ fn info_lines(app: &App, t: &Target, width: usize) -> Vec<Line<'static>> {
         .collect();
     if !annotations.is_empty() {
         lines.push(clip(
-            vec![format!(" {}", annotations.join(" ")).fg(Color::Blue).dim()],
+            vec![format!(" {}", annotations.join(" ")).fg(theme().meta)],
             width,
         ));
     }
@@ -695,13 +700,19 @@ fn render_module_details(f: &mut Frame, area: Rect, app: &App, focused: bool) {
     f.render_widget(block, area);
     let mut lines = vec![Line::from(vec![
         format!(" {} file(s), {} changed", m.files, m.changed_files).into(),
-        format!(" · {} changed symbol(s)", m.changed_symbols).fg(Color::Yellow),
-        if m.test { " · tests".dim() } else { "".into() },
+        format!(" · {} changed symbol(s)", m.changed_symbols).fg(theme().status_modified),
+        if m.test {
+            " · tests".fg(theme().meta)
+        } else {
+            "".into()
+        },
     ])];
     let mut section = |title: &str, deps: Vec<(usize, &survol_core::graph::ModuleEdge)>| {
         lines.push(Line::default());
         lines.push(Line::from(
-            format!(" {title} ({})", deps.len()).fg(Color::Blue).bold(),
+            format!(" {title} ({})", deps.len())
+                .fg(theme().layer)
+                .bold(),
         ));
         for (other, e) in deps {
             let o = &map.modules[other];
@@ -711,16 +722,16 @@ fn render_module_details(f: &mut Frame, area: Rect, app: &App, focused: bool) {
                 .map(|(k, n)| format!("{} {n}", kind_name(k)))
                 .collect();
             lines.push(Line::from(vec![
-                format!("   {:>4}  ", e.count).fg(ACCENT),
+                format!("   {:>4}  ", e.count).fg(theme().accent),
                 Span::styled(
                     o.name.clone(),
                     if o.changed() {
-                        Style::new().fg(Color::Yellow)
+                        Style::new().fg(theme().status_modified)
                     } else {
                         Style::new()
                     },
                 ),
-                format!("  {}", kinds.join(", ")).dim(),
+                format!("  {}", kinds.join(", ")).fg(theme().meta),
             ]));
         }
     };
@@ -742,7 +753,7 @@ fn render_module_details(f: &mut Frame, area: Rect, app: &App, focused: bool) {
     );
     lines.push(Line::default());
     lines.push(Line::from(
-        " Enter / l: its changed symbols · x: export the map as Mermaid".dim(),
+        " Enter / l: its changed symbols · x: export the map as Mermaid".fg(theme().meta),
     ));
     f.render_widget(Paragraph::new(lines), inner);
 }

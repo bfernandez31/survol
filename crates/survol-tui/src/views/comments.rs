@@ -14,7 +14,7 @@ use survol_core::model::Diff;
 
 use super::Row;
 use crate::highlight::Highlighter;
-use crate::ui::ACCENT;
+use crate::theme::theme;
 use crate::ui::markdown;
 
 /// Width note bodies are wrapped at until the renderer gives the pane's.
@@ -37,26 +37,25 @@ impl Tone {
     /// Bar left of the note.
     pub fn bar(self) -> Color {
         match self {
-            Tone::Draft => Color::Yellow,
-            Tone::Remote => Color::Magenta,
-            Tone::Resolved => Color::DarkGray,
+            Tone::Draft => theme().draft,
+            Tone::Remote => theme().discussion,
+            Tone::Resolved => theme().resolved,
         }
     }
 
     fn head(self) -> Style {
         match self {
-            Tone::Draft => Style::new().fg(Color::Yellow).bold(),
-            Tone::Remote => Style::new().fg(Color::Magenta).bold(),
-            Tone::Resolved => Style::new().dim(),
+            Tone::Draft => Style::new().fg(theme().draft).bold(),
+            Tone::Remote => Style::new().fg(theme().discussion).bold(),
+            Tone::Resolved => Style::new().fg(theme().resolved),
         }
     }
 
     /// Base style of the body text.
     pub fn body(self) -> Style {
         match self {
-            Tone::Draft => Style::new().fg(Color::Yellow),
-            Tone::Remote => Style::new(),
-            Tone::Resolved => Style::new().dim(),
+            Tone::Draft | Tone::Remote => Style::new(),
+            Tone::Resolved => Style::new().fg(theme().resolved),
         }
     }
 }
@@ -121,7 +120,7 @@ impl InlineNote {
             }
             text.push(Line::from(Span::styled(
                 head,
-                Style::new().fg(Color::Magenta).dim(),
+                Style::new().fg(theme().discussion),
             )));
             for mut l in markdown::render(&r.body, width.saturating_sub(2), body_style, hl) {
                 l.spans.insert(0, Span::raw("  "));
@@ -134,7 +133,7 @@ impl InlineNote {
         ))];
         // Folding a single line away saves nothing.
         self.foldable = text.len() > FOLDED_LINES + 1;
-        let hint = Style::new().fg(ACCENT).dim();
+        let hint = Style::new().fg(theme().meta);
         if self.foldable && !expanded {
             let more = text.len() - FOLDED_LINES;
             lines.extend(text.into_iter().take(FOLDED_LINES));

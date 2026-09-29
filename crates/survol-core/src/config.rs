@@ -149,15 +149,18 @@ impl LlmConfig {
     }
 }
 
-/// `[theme]`: colours of the TUI's diff. `syntax` picks the code colours
+/// `[theme]`: colours of the TUI. `syntax` picks the code colours
 /// (`catppuccin-mocha`, the default, or `ansi` for the terminal palette);
-/// every other key overrides a colour role with `#rrggbb`, e.g.
+/// `powerline = false` drops the header's powerline arrows (they need a Nerd
+/// Font); every other key overrides a colour role with `#rrggbb`, e.g.
 /// `added_bg = "#302145"`. The TUI validates the role names.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub syntax: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub powerline: Option<bool>,
     #[serde(flatten)]
     pub colors: std::collections::BTreeMap<String, String>,
 }
@@ -342,6 +345,18 @@ fn merge(base: &mut toml::Table, over: toml::Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_takes_powerline_syntax_and_colour_roles() {
+        let cfg: Config = toml::from_str(
+            "[theme]\npowerline = false\nsyntax = \"ansi\"\nborder_focus = \"#112233\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.theme.powerline, Some(false));
+        assert_eq!(cfg.theme.syntax.as_deref(), Some("ansi"));
+        assert_eq!(cfg.theme.colors["border_focus"], "#112233");
+        assert_eq!(cfg.theme.colors.len(), 1);
+    }
 
     #[test]
     fn project_overrides_user_and_env_overrides_both() {

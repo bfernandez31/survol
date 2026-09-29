@@ -3,12 +3,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use survol_core::ask::Answer;
 
-use super::{ACCENT, markdown, wrap};
+pub(super) use super::popup_block;
+use super::{markdown, meta, wrap};
 use crate::highlight::Highlighter;
 use crate::theme::theme;
 use crate::views::ask::{AnswerView, AskInput, HistoryView, Pending};
@@ -25,14 +26,6 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-pub fn popup_block(title: String) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Line::from(title).bold())
-}
-
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 pub fn spinner(elapsed_ms: u128) -> &'static str {
@@ -44,18 +37,18 @@ pub fn render_input(f: &mut Frame, area: Rect, input: &AskInput, model: &str) {
     let rect = centered(area, 90, sugg.len() as u16 + 9);
     let width = rect.width.saturating_sub(4) as usize;
     let mut lines = vec![
-        Line::from(vec![" about ".dim(), input.label.clone().bold()]),
+        Line::from(vec![meta(" about "), input.label.clone().bold()]),
         Line::default(),
     ];
     let text = format!("{}▏", input.text);
     for (i, l) in wrap(&text, width.saturating_sub(3)).into_iter().enumerate() {
         let lead = if i == 0 { " > " } else { "   " };
-        lines.push(Line::from(vec![lead.fg(ACCENT).bold(), l.into()]));
+        lines.push(Line::from(vec![lead.fg(theme().accent).bold(), l.into()]));
     }
     lines.push(Line::default());
-    lines.push(Line::from(
-        " Suggestions (↑ ↓ to pick, or its number):".dim(),
-    ));
+    lines.push(Line::from(meta(
+        " Suggestions (↑ ↓ to pick, or its number):",
+    )));
     for (i, s) in sugg.iter().enumerate() {
         let style = if input.suggestion == Some(i) {
             Style::new().bg(theme().cursor_bg).bold()
@@ -63,17 +56,15 @@ pub fn render_input(f: &mut Frame, area: Rect, input: &AskInput, model: &str) {
             Style::new()
         };
         lines.push(Line::from(vec![
-            format!("  {}. ", i + 1).fg(ACCENT),
+            format!("  {}. ", i + 1).fg(theme().accent),
             Span::styled(s.to_string(), style),
         ]));
     }
     f.render_widget(Clear, rect);
     f.render_widget(
-        Paragraph::new(lines).block(
-            popup_block(" ask the LLM ".into()).title_bottom(
-                Line::from(format!(" Enter ask · Esc cancel · model: {model} ")).dim(),
-            ),
-        ),
+        Paragraph::new(lines).block(popup_block(" ask the LLM ".into()).title_bottom(Line::from(
+            meta(format!(" Enter ask · Esc cancel · model: {model} ")),
+        ))),
         rect,
     );
 }
@@ -85,7 +76,7 @@ pub fn render_pending(f: &mut Frame, area: Rect, p: &Pending) {
     let mut lines = vec![
         Line::from(vec![
             format!(" {} ", spinner(elapsed.as_millis()))
-                .fg(ACCENT)
+                .fg(theme().accent)
                 .bold(),
             format!("asking about {}… {}s", p.label, elapsed.as_secs()).bold(),
         ]),
@@ -95,9 +86,9 @@ pub fn render_pending(f: &mut Frame, area: Rect, p: &Pending) {
         lines.push(Line::from(format!("   {l}").italic()));
     }
     lines.push(Line::default());
-    lines.push(Line::from(
-        " Esc: keep reviewing, the answer comes back with A".dim(),
-    ));
+    lines.push(Line::from(meta(
+        " Esc: keep reviewing, the answer comes back with A",
+    )));
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(lines).block(popup_block(" ask the LLM ".into())),
@@ -120,12 +111,14 @@ pub fn answer_lines(
         .map(|(i, r)| {
             let style = if !r.valid {
                 Style::new()
-                    .fg(Color::Red)
+                    .fg(theme().error)
                     .add_modifier(Modifier::CROSSED_OUT)
             } else if selected == Some(i) {
-                Style::new().fg(Color::Black).bg(ACCENT).bold()
+                Style::new().fg(theme().block_fg).bg(theme().accent).bold()
             } else {
-                Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED)
+                Style::new()
+                    .fg(theme().accent)
+                    .add_modifier(Modifier::UNDERLINED)
             };
             (r.start..r.end, style)
         })
@@ -143,7 +136,7 @@ pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView, hl: &Highlig
     );
     let block = popup_block(format!(" {} ", v.answer.label)).title_bottom(
         Line::from(" Tab/n link · Enter go (graph) · d diff · e editor · j/k scroll · A history · Esc close ")
-            .dim(),
+            .fg(theme().meta),
     );
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
@@ -156,20 +149,22 @@ pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView, hl: &Highlig
         .collect();
     let a = &v.answer;
     let valid = a.refs.len() - a.unknown_refs();
-    let mut info = vec![Span::from(format!(" {} link(s)", valid)).fg(ACCENT)];
+    let mut info = vec![Span::from(format!(" {} link(s)", valid)).fg(theme().accent)];
     if a.unknown_refs() > 0 {
         info.push(
-            format!(" · {} unknown reference(s), struck out", a.unknown_refs()).fg(Color::Red),
+            format!(" · {} unknown reference(s), struck out", a.unknown_refs()).fg(theme().error),
         );
     }
     if let Some(m) = &a.model {
-        info.push(format!(" · {m}").dim());
+        info.push(meta(format!(" · {m}")));
     }
     if a.from_cache {
-        info.push(" · cached".dim());
+        info.push(meta(" · cached"));
     }
     head.push(Line::from(info));
-    head.push(Line::from("─".repeat(inner.width as usize).dim()));
+    head.push(Line::from(
+        "─".repeat(inner.width as usize).fg(theme().rule),
+    ));
     let head_h = (head.len() as u16).min(inner.height.saturating_sub(2));
     let top = Rect::new(inner.x, inner.y, inner.width, head_h);
     let body = Rect::new(
@@ -225,12 +220,12 @@ pub fn render_history(f: &mut Frame, area: Rect, h: &HistoryView, history: &[Ans
     let width = rect.width.saturating_sub(2) as usize;
     let mut lines = Vec::new();
     if history.is_empty() {
-        lines.push(Line::from(" no question yet".dim()));
+        lines.push(Line::from(meta(" no question yet")));
     }
     for (i, a) in history.iter().rev().enumerate() {
         let mut spans = vec![
-            format!(" {:>7}  ", ago(a.asked_at)).dim(),
-            format!("{}  ", a.label).fg(ACCENT),
+            meta(format!(" {:>7}  ", ago(a.asked_at))),
+            format!("{}  ", a.label).fg(theme().accent),
             a.question.clone().into(),
         ];
         let used: usize = spans.iter().map(Span::width).sum();
@@ -248,7 +243,7 @@ pub fn render_history(f: &mut Frame, area: Rect, h: &HistoryView, history: &[Ans
     f.render_widget(
         Paragraph::new(lines).scroll((scroll, 0)).block(
             popup_block(format!(" questions of this review ({}) ", history.len()))
-                .title_bottom(Line::from(" Enter open · j/k move · Esc close ").dim()),
+                .title_bottom(Line::from(" Enter open · j/k move · Esc close ").fg(theme().meta)),
         ),
         rect,
     );
@@ -311,7 +306,7 @@ mod tests {
             .iter()
             .find(|s| s.content == "src/Owner.java:12")
             .unwrap();
-        assert_eq!(span.style.bg, Some(ACCENT));
+        assert_eq!(span.style.bg, Some(theme().accent));
         let bad = lines[2]
             .spans
             .iter()

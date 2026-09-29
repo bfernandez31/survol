@@ -345,8 +345,9 @@ enabled = true
 [lsp.typescript]                   # TS and JS. default: typescript-language-server --stdio,
 enabled = true                     # else TypeScript >= 7's `tsc --lsp --stdio`
 
-[theme]                            # colours of the diff, tuned for Catppuccin Mocha
+[theme]                            # colours of the TUI, tuned for Catppuccin Mocha
 # syntax = "ansi"                  # code colours: catppuccin-mocha (default) or ansi (terminal palette)
+# powerline = false                # header without powerline arrows (they need a Nerd Font)
 # added_bg = "#302145"             # any role below, as #rrggbb
 ```
 
@@ -357,11 +358,32 @@ The default theme, "amethyst", shows added lines in dark violet and removed line
 amber, each with its `+` / `-` in a deeper block of the same hue, coloured line numbers,
 and the words that changed between a removed line and its added counterpart on a brighter
 background. Every syntax colour keeps at least 7:1 contrast on the line backgrounds
-(comments 5:1). `[theme]` roles: `added_bg`, `removed_bg`, `added_word_bg`,
-`removed_word_bg`, `added_sign_bg`, `removed_sign_bg`, `added_sign`, `removed_sign`,
-`added_line_nr`, `removed_line_nr`, `line_nr`, `reviewed` (code of a reviewed hunk),
-`comment` (comments with `syntax = "ansi"`), `cursor_bg`, `select_bg`,
-`inactive_cursor_bg`.
+(comments 5:1).
+
+The chrome around it ("mauve powerline") follows the same rule: what is added is mauve,
+what is removed is peach, everywhere (status letters, `+a -r` counts, new / gone flows,
+before / after). Green only means reviewed, red only an error, pink a forge discussion.
+The header is a powerline bar of pastel blocks with dark text (set `powerline = false`
+without a Nerd Font: the blocks are then separated by a space), the focused pane and the
+footer's keys are mauve, secondary text is overlay2 instead of the terminal's faint.
+
+`[theme]` roles, each a `#rrggbb` value:
+
+- diff: `added_bg`, `removed_bg`, `added_word_bg`, `removed_word_bg`, `added_sign_bg`,
+  `removed_sign_bg`, `added_sign`, `removed_sign`, `added_line_nr`, `removed_line_nr`
+  (also the `+a -r` counts and the whole-file scrollbar marks), `line_nr`, `reviewed`
+  (code of a reviewed hunk), `comment` (comments with `syntax = "ansi"`), `cursor_bg`,
+  `select_bg`, `inactive_cursor_bg`;
+- chrome: `text`, `meta` (secondary text), `block_fg` (dark text on blocks), `header_bg`,
+  `badge_bg`, `tab_fg`, `tab_bg`, `tab_active_bg`, `title_bg`, `progress_bg`,
+  `progress_done_bg`, `grouping_bg`, `graph_bg`, `threads_bg`, `drafts_bg`, `border`,
+  `border_focus`, `footer_bg`, `key`, `accent`, `dir`, `file_header_bg`, `rule`, `hunk`,
+  `hunk_reviewed`, `code`, `link`, `bullet`, `gutter`, `popup_bg`, `popup_border`,
+  `popup_title_bg`, `layer`, `relation`;
+- meaning: `status_added`, `status_modified`, `status_deleted`, `status_renamed`, `ok`,
+  `warn`, `error`, `draft`, `discussion`, `resolved`, `confidence`, `mechanical`, `intact`,
+  `in_diff`, `db`, `external`, `event`, `layer_view`, `layer_controller`, `layer_service`,
+  `layer_repository`, `layer_external`, `layer_config`, `layer_code`.
 
 ### Environment variables
 

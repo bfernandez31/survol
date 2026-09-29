@@ -3,12 +3,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 
 use super::rows::{RowOpts, fill, render_row, status_letter, truncate_right};
-use super::{ACCENT, pane, wrap};
+use super::{pane, popup_block, wrap};
 use crate::app::{App, GroupStatus};
 use crate::theme::theme;
 use crate::views::stack::{Node, StackRow, node_progress};
@@ -51,26 +51,26 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                     "  ⟳ Grouping {hunks} hunks by functional capability… {}s",
                     since.elapsed().as_secs()
                 )
-                .fg(ACCENT)
+                .fg(theme().accent)
                 .bold(),
             ));
             if !progress.is_empty() {
-                lines.push(Line::from(format!("    {progress}").dim()));
+                lines.push(Line::from(format!("    {progress}").fg(theme().meta)));
             }
             lines.push(Line::default());
             lines.push(Line::from(
-                "  The Diff view stays usable meanwhile (Tab or 1).".dim(),
+                "  The Diff view stays usable meanwhile (Tab or 1).".fg(theme().meta),
             ));
         }
         GroupStatus::Failed(e) => {
-            lines.push(Line::from("  Grouping failed".fg(Color::Red).bold()));
+            lines.push(Line::from("  Grouping failed".fg(theme().error).bold()));
             for l in wrap(e, area.width.saturating_sub(6) as usize) {
                 lines.push(Line::from(format!("    {l}")));
             }
             lines.push(Line::default());
-            lines.push(Line::from("  R to try again.".dim()));
+            lines.push(Line::from("  R to try again.".fg(theme().meta)));
         }
-        GroupStatus::Done => lines.push(Line::from("  No grouping.".dim())),
+        GroupStatus::Done => lines.push(Line::from("  No grouping.".fg(theme().meta))),
     }
     f.render_widget(
         Paragraph::new(lines).block(pane(true).title(" stack ")),
@@ -93,6 +93,7 @@ fn render_tree(f: &mut Frame, area: Rect, app: &App) {
         .tree
         .iter()
         .map(|&node| {
+            let t = theme();
             let (done, total) = node_progress(g, node, diff, state);
             let complete = done == total;
             let check = if complete { "✓" } else { " " };
@@ -105,26 +106,19 @@ fn render_tree(f: &mut Frame, area: Rect, app: &App) {
                     let room = width.saturating_sub(head.chars().count() + count.len() + 2);
                     let mut title = Style::new().bold();
                     if group.mechanical {
-                        title = Style::new().italic().fg(Color::Magenta);
+                        title = Style::new().italic().fg(t.mechanical);
                     }
                     if complete {
-                        title = title.add_modifier(Modifier::DIM);
+                        title = title.fg(t.meta);
                     }
                     let title_text = truncate_right(&group.title, room);
                     let pad = room.saturating_sub(title_text.chars().count());
                     ListItem::new(Line::from(vec![
-                        Span::styled(head, Style::new().fg(ACCENT)),
+                        Span::styled(head, Style::new().fg(t.accent)),
                         Span::styled(title_text, title),
                         " ".repeat(pad).into(),
-                        Span::styled(
-                            count,
-                            Style::new().fg(if complete {
-                                Color::Green
-                            } else {
-                                Color::Yellow
-                            }),
-                        ),
-                        Span::styled(format!(" {check}"), Style::new().fg(Color::Green)),
+                        Span::styled(count, Style::new().fg(if complete { t.ok } else { t.warn })),
+                        Span::styled(format!(" {check}"), Style::new().fg(t.ok)),
                     ]))
                 }
                 Node::Layer { group, layer } => {
@@ -134,15 +128,15 @@ fn render_tree(f: &mut Frame, area: Rect, app: &App) {
                     } else {
                         "▶"
                     };
-                    let mut name = Style::new().fg(Color::Blue);
+                    let mut name = Style::new().fg(t.layer);
                     if complete {
-                        name = name.add_modifier(Modifier::DIM);
+                        name = name.fg(t.meta);
                     }
                     ListItem::new(Line::from(vec![
-                        format!("   {arrow} ").fg(ACCENT),
+                        format!("   {arrow} ").fg(t.accent),
                         Span::styled(truncate_right(&l.name, width.saturating_sub(16)), name),
-                        format!(" ({})", l.hunk_ids.len()).dim(),
-                        Span::styled(format!(" {check}"), Style::new().fg(Color::Green)),
+                        format!(" ({})", l.hunk_ids.len()).fg(theme().meta),
+                        Span::styled(format!(" {check}"), Style::new().fg(t.ok)),
                     ]))
                 }
                 Node::Hunk { hunk, .. } => {
@@ -157,12 +151,12 @@ fn render_tree(f: &mut Frame, area: Rect, app: &App) {
                     let room = width.saturating_sub(8 + name.chars().count());
                     let mut style = Style::new();
                     if complete {
-                        style = style.add_modifier(Modifier::DIM);
+                        style = style.fg(t.meta);
                     }
                     ListItem::new(Line::from(vec![
-                        Span::styled(format!("     {check} "), Style::new().fg(Color::Green)),
+                        Span::styled(format!("     {check} "), Style::new().fg(t.ok)),
                         Span::styled(name.to_string(), style),
-                        Span::styled(truncate_right(&where_, room), style.dim()),
+                        Span::styled(truncate_right(&where_, room), Style::new().fg(t.meta)),
                     ]))
                 }
                 Node::File { file, .. } => {
@@ -170,10 +164,10 @@ fn render_tree(f: &mut Frame, area: Rect, app: &App) {
                     let (letter, color) = status_letter(fc.status);
                     let name = fc.path.rsplit('/').next().unwrap_or(&fc.path);
                     ListItem::new(Line::from(vec![
-                        Span::styled(format!("   {check} "), Style::new().fg(Color::Green)),
+                        Span::styled(format!("   {check} "), Style::new().fg(t.ok)),
                         Span::styled(letter, Style::new().fg(color)),
                         " ".into(),
-                        truncate_right(name, width.saturating_sub(7)).dim(),
+                        truncate_right(name, width.saturating_sub(7)).fg(theme().meta),
                     ]))
                 }
             }
@@ -193,7 +187,7 @@ fn render_tree(f: &mut Frame, area: Rect, app: &App) {
                 .title_bottom(
                     Line::from(format!(" {done}/{total} "))
                         .right_aligned()
-                        .dim(),
+                        .fg(theme().meta),
                 ),
         )
         .highlight_style(if focused {
@@ -217,7 +211,7 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
     let group = &g.groups[gi];
     let block = pane(focused)
         .title(Line::from(vec![
-            format!(" {}/{} ", gi + 1, g.groups.len()).fg(ACCENT),
+            format!(" {}/{} ", gi + 1, g.groups.len()).fg(theme().accent),
             format!("{} ", group.title).bold(),
         ]))
         .title_bottom(
@@ -226,7 +220,7 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
                 Layout::Split => " split ",
             })
             .right_aligned()
-            .dim(),
+            .fg(theme().meta),
         );
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -243,9 +237,9 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
     let mut info = vec![Span::styled(
         format!(" {done}/{total} reviewed"),
         Style::new().fg(if done == total {
-            Color::Green
+            theme().ok
         } else {
-            Color::Yellow
+            theme().warn
         }),
     )];
     let layers: Vec<String> = group
@@ -254,10 +248,10 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
         .map(|l| format!("{} {}", l.name, l.hunk_ids.len()))
         .collect();
     if !layers.is_empty() {
-        info.push(format!("  ·  {}", layers.join(" · ")).dim());
+        info.push(format!("  ·  {}", layers.join(" · ")).fg(theme().meta));
     }
     if !group.file_ids.is_empty() {
-        info.push(format!("  ·  {} file(s) without hunks", group.file_ids.len()).dim());
+        info.push(format!("  ·  {} file(s) without hunks", group.file_ids.len()).fg(theme().meta));
     }
     head.push(Line::from(info));
     if !g.warnings.is_empty() {
@@ -267,10 +261,15 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
                 g.warnings.len(),
                 g.source
             )
-            .fg(Color::Yellow),
+            .fg(theme().warn),
         ));
     }
-    head.push(fill(Vec::new(), width + 1, '─', Style::new().dim()));
+    head.push(fill(
+        Vec::new(),
+        width + 1,
+        '─',
+        Style::new().fg(theme().rule),
+    ));
     let head_h = (head.len() as u16).min(inner.height.saturating_sub(3));
     let [top, rest] =
         Split::vertical([Constraint::Length(head_h), Constraint::Min(1)]).areas(inner);
@@ -304,38 +303,37 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
             StackRow::Layer { group, layer } => {
                 let g = app.stack.grouping.as_ref().expect("grouping shown");
                 let l = &g.groups[group].layers[layer];
-                let mut style = Style::new().fg(Color::Blue).bold();
+                let mut style = Style::new().fg(theme().layer).bold();
                 if is_cursor {
                     style = style.bg(theme().cursor_bg);
                 }
                 fill(
                     vec![
                         Span::styled(format!("■ {}", l.name), style),
-                        format!("  {} hunk(s)", l.hunk_ids.len()).dim(),
+                        format!("  {} hunk(s)", l.hunk_ids.len()).fg(theme().meta),
                     ],
                     width,
                     '━',
-                    Style::new().fg(Color::Blue).dim(),
+                    Style::new().fg(theme().rule),
                 )
             }
             StackRow::File(fi) => {
+                let t = theme();
                 let file = &app.sh.review.diff.files[fi];
                 let (letter, color) = status_letter(file.status);
-                let cur = |s: Style| {
-                    if is_cursor {
-                        s.bg(theme().cursor_bg)
-                    } else {
-                        s
-                    }
-                };
+                let band = Style::new().bg(if is_cursor {
+                    t.cursor_bg
+                } else {
+                    t.file_header_bg
+                });
                 let mut spans = vec![
-                    Span::styled(format!("  {letter} "), cur(Style::new().fg(color).bold())),
-                    Span::styled(file.display_path(), cur(Style::new().bold())),
+                    Span::styled(format!("  {letter} "), band.fg(color).bold()),
+                    Span::styled(file.display_path(), band.fg(t.text).bold()),
                 ];
                 if file.is_generated {
-                    spans.push("  generated".dim());
+                    spans.push(Span::styled("  generated", band.fg(t.meta)));
                 }
-                fill(spans, width, '─', Style::new().dim())
+                fill(spans, width, ' ', band)
             }
         });
     }
@@ -354,7 +352,7 @@ fn render_warnings(f: &mut Frame, area: Rect, app: &App) {
             g.llm_calls,
             if g.from_cache { " · from cache" } else { "" }
         )
-        .dim(),
+        .fg(theme().meta),
     )];
     for warning in &g.warnings {
         for (i, l) in wrap(warning, w.saturating_sub(6) as usize)
@@ -374,13 +372,7 @@ fn render_warnings(f: &mut Frame, area: Rect, app: &App) {
     );
     f.render_widget(Clear, rect);
     f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(Color::Yellow))
-                .title(" grouping warnings "),
-        ),
+        Paragraph::new(lines).block(popup_block(" grouping warnings ".into())),
         rect,
     );
 }

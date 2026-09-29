@@ -8,7 +8,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use survol_core::model::LineKind;
 
-use super::ACCENT;
 use super::ask::popup_block;
 use super::rows::{RowOpts, Side, code_spans, line_nr, nr_color, render_row};
 use crate::app::App;
@@ -101,28 +100,35 @@ fn pair_line(
             None => spans.push(Span::raw(" ".repeat(w))),
         }
         if side == 0 {
-            spans.push("│".dim());
+            spans.push("│".fg(theme().rule));
         }
     }
     spans
 }
 
-/// Colour of the scrollbar mark of each row: threads, then changes.
-fn marks(app: &App, v: &FileView) -> Vec<Option<Color>> {
+/// Scrollbar mark of each row: threads, then changes, in the colours of the
+/// line numbers and of the note bars.
+fn marks(app: &App, v: &FileView) -> Vec<Option<(bool, Color)>> {
+    let t = theme();
     v.rows
         .iter()
         .map(|r| match r {
-            FileRow::Note { note, part: 0 } => Some(
+            FileRow::Note { note, part: 0 } => Some((
+                true,
                 app.sh
                     .notes
                     .items
                     .get(*note as usize)
-                    .map_or(Color::Magenta, |n| n.tone.bar()),
-            ),
-            FileRow::Code(c) if c.kind == LineKind::Added => Some(Color::Green),
-            FileRow::Code(c) if c.kind == LineKind::Removed => Some(Color::Red),
-            FileRow::Pair { right: Some(c), .. } if c.kind == LineKind::Added => Some(Color::Green),
-            FileRow::Pair { left: Some(c), .. } if c.kind == LineKind::Removed => Some(Color::Red),
+                    .map_or(t.discussion, |n| n.tone.bar()),
+            )),
+            FileRow::Code(c) if c.kind == LineKind::Added => Some((false, t.added_line_nr)),
+            FileRow::Code(c) if c.kind == LineKind::Removed => Some((false, t.removed_line_nr)),
+            FileRow::Pair { right: Some(c), .. } if c.kind == LineKind::Added => {
+                Some((false, t.added_line_nr))
+            }
+            FileRow::Pair { left: Some(c), .. } if c.kind == LineKind::Removed => {
+                Some((false, t.removed_line_nr))
+            }
             _ => None,
         })
         .collect()
@@ -142,8 +148,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App, v: &mut FileView) {
     );
     let hint = " n/N change · ]c/[c thread · d removed · s side by side · c comment · Enter thread · e editor · Esc ";
     let block = popup_block(title)
-        .title(Line::from(mode).right_aligned().dim())
-        .title_bottom(Line::from(hint).dim());
+        .title(Line::from(mode).right_aligned().fg(theme().meta))
+        .title_bottom(Line::from(hint).fg(theme().meta));
     let inner = block.inner(area);
     f.render_widget(Clear, area);
     f.render_widget(block, area);
@@ -220,12 +226,13 @@ fn render_scrollbar(f: &mut Frame, area: Rect, app: &App, v: &FileView) {
             let mark = marks[from.min(marks.len())..to.min(marks.len())]
                 .iter()
                 .flatten()
-                .max_by_key(|c| **c != Color::Green && **c != Color::Red)
+                .max_by_key(|(thread, _)| *thread)
                 .copied();
+            let t = theme();
             match mark {
-                Some(c) => Line::from(Span::styled("▐", Style::new().fg(c))),
-                None if in_view => Line::from(Span::styled("┃", Style::new().fg(ACCENT).dim())),
-                None => Line::from("│".dim()),
+                Some((_, c)) => Line::from(Span::styled("▐", Style::new().fg(c))),
+                None if in_view => Line::from(Span::styled("┃", Style::new().fg(t.meta))),
+                None => Line::from("│".fg(t.rule)),
             }
         })
         .collect();
