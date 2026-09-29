@@ -10,9 +10,10 @@ use survol_core::graph::{Graph, ModuleMap, SymIdx};
 use unicode_width::UnicodeWidthChar;
 
 use super::rows::truncate_right;
-use super::{ACCENT, ADDED_BG, CURSOR_BG, pane, wrap};
+use super::{ACCENT, pane, wrap};
 use crate::app::{App, GraphStatus};
 use crate::highlight::Spans;
+use crate::theme::theme;
 use crate::views::Focus;
 use crate::views::graph::{
     GraphView, ListRow, ModRow, Mode, Target, TreeRow, impact, kind_label, kind_name,
@@ -182,7 +183,11 @@ pub(super) fn cursor_line(line: Line<'static>, cursor: bool, width: usize) -> Li
     if used < width {
         spans.push(" ".repeat(width - used).into());
     }
-    Line::from(spans).style(Style::new().bg(CURSOR_BG).add_modifier(Modifier::BOLD))
+    Line::from(spans).style(
+        Style::new()
+            .bg(theme().cursor_bg)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
@@ -220,7 +225,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         ));
         if i == pos.cursor && !focused {
             let l = lines.pop().expect("just pushed");
-            lines.push(l.style(Style::new().bg(Color::Rgb(40, 40, 50))));
+            lines.push(l.style(Style::new().bg(theme().inactive_cursor_bg)));
         }
     }
     if v.len() == 0 {
@@ -520,10 +525,10 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
         let changed = src.changed.contains(&no);
         let mut bg = None;
         if changed {
-            bg = Some(ADDED_BG);
+            bg = Some(theme().added_bg);
         }
         if is_target || is_cursor {
-            bg = Some(CURSOR_BG);
+            bg = Some(theme().cursor_bg);
         }
         let marker = if is_target { "▶" } else { " " };
         let sign = if changed { "+" } else { " " };
@@ -537,7 +542,15 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
                     Style::new().dim()
                 },
             ),
-            Span::styled(sign, Style::new().fg(Color::Green)),
+            if changed {
+                let t = theme();
+                Span::styled(
+                    sign,
+                    Style::new().fg(t.added_sign).bg(t.added_sign_bg).bold(),
+                )
+            } else {
+                Span::raw(sign)
+            },
         ];
         spans.extend(code(
             &src.spans[i],

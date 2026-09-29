@@ -3,6 +3,8 @@
 mod app;
 mod editor;
 mod highlight;
+mod intraline;
+mod theme;
 mod ui;
 mod views;
 
@@ -63,6 +65,7 @@ fn main() -> Result<()> {
     cfg.llm.enabled &= !cli.no_llm;
     cfg.lsp.enabled &= !cli.no_lsp;
     cfg.llm.override_language(cli.lang.as_deref());
+    theme::init(theme::Theme::from_config(&cfg.theme).map_err(anyhow::Error::msg)?);
     let target = Target::parse(cli.target.as_deref())?;
 
     let review = review::open(&repo, &cfg, &target, |m| eprintln!("· {m}"))?;

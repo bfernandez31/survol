@@ -8,8 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use super::rows::{RowOpts, fill, render_row, status_letter, truncate_right};
-use super::{ACCENT, CURSOR_BG, pane, wrap};
+use super::{ACCENT, pane, wrap};
 use crate::app::{App, GroupStatus};
+use crate::theme::theme;
 use crate::views::stack::{Node, StackRow, node_progress};
 use crate::views::{Focus, Layout};
 
@@ -196,9 +197,11 @@ fn render_tree(f: &mut Frame, area: Rect, app: &App) {
                 ),
         )
         .highlight_style(if focused {
-            Style::new().bg(CURSOR_BG).add_modifier(Modifier::BOLD)
+            Style::new()
+                .bg(theme().cursor_bg)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::new().bg(Color::Rgb(40, 40, 50))
+            Style::new().bg(theme().inactive_cursor_bg)
         });
     let mut ls = ListState::default().with_selected(Some(v.sel));
     f.render_stateful_widget(list, area, &mut ls);
@@ -303,7 +306,7 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
                 let l = &g.groups[group].layers[layer];
                 let mut style = Style::new().fg(Color::Blue).bold();
                 if is_cursor {
-                    style = style.bg(CURSOR_BG);
+                    style = style.bg(theme().cursor_bg);
                 }
                 fill(
                     vec![
@@ -318,7 +321,13 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
             StackRow::File(fi) => {
                 let file = &app.sh.review.diff.files[fi];
                 let (letter, color) = status_letter(file.status);
-                let cur = |s: Style| if is_cursor { s.bg(CURSOR_BG) } else { s };
+                let cur = |s: Style| {
+                    if is_cursor {
+                        s.bg(theme().cursor_bg)
+                    } else {
+                        s
+                    }
+                };
                 let mut spans = vec![
                     Span::styled(format!("  {letter} "), cur(Style::new().fg(color).bold())),
                     Span::styled(file.display_path(), cur(Style::new().bold())),

@@ -344,10 +344,24 @@ enabled = true
 
 [lsp.typescript]                   # TS and JS. default: typescript-language-server --stdio,
 enabled = true                     # else TypeScript >= 7's `tsc --lsp --stdio`
+
+[theme]                            # colours of the diff, tuned for Catppuccin Mocha
+# syntax = "ansi"                  # code colours: catppuccin-mocha (default) or ansi (terminal palette)
+# added_bg = "#302145"             # any role below, as #rrggbb
 ```
 
 Every `[lsp.<language>]` section takes the same four keys: `enabled`, `command`, `args`,
 `env`. Without `command`, the built-in candidates are tried in order.
+
+The default theme, "amethyst", shows added lines in dark violet and removed lines in dark
+amber, each with its `+` / `-` in a deeper block of the same hue, coloured line numbers,
+and the words that changed between a removed line and its added counterpart on a brighter
+background. Every syntax colour keeps at least 7:1 contrast on the line backgrounds
+(comments 5:1). `[theme]` roles: `added_bg`, `removed_bg`, `added_word_bg`,
+`removed_word_bg`, `added_sign_bg`, `removed_sign_bg`, `added_sign`, `removed_sign`,
+`added_line_nr`, `removed_line_nr`, `line_nr`, `reviewed` (code of a reviewed hunk),
+`comment` (comments with `syntax = "ansi"`), `cursor_bg`, `select_bg`,
+`inactive_cursor_bg`.
 
 ### Environment variables
 

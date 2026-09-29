@@ -8,8 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use survol_core::ask::Answer;
 
-use super::{ACCENT, CURSOR_BG, markdown, wrap};
+use super::{ACCENT, markdown, wrap};
 use crate::highlight::Highlighter;
+use crate::theme::theme;
 use crate::views::ask::{AnswerView, AskInput, HistoryView, Pending};
 
 /// A centered rectangle of at most `w` × `h`.
@@ -57,7 +58,7 @@ pub fn render_input(f: &mut Frame, area: Rect, input: &AskInput, model: &str) {
     ));
     for (i, s) in sugg.iter().enumerate() {
         let style = if input.suggestion == Some(i) {
-            Style::new().bg(CURSOR_BG).bold()
+            Style::new().bg(theme().cursor_bg).bold()
         } else {
             Style::new()
         };
@@ -238,7 +239,7 @@ pub fn render_history(f: &mut Frame, area: Rect, h: &HistoryView, history: &[Ans
         }
         let mut line = Line::from(spans);
         if i == h.sel {
-            line = line.patch_style(Style::new().bg(CURSOR_BG));
+            line = line.patch_style(Style::new().bg(theme().cursor_bg));
         }
         lines.push(line);
     }

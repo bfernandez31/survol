@@ -12,8 +12,9 @@ use survol_core::model::LineKind;
 
 use super::ask::{centered, popup_block};
 use super::rows::truncate_right;
-use super::{ACCENT, ADDED_BG, CURSOR_BG, REMOVED_BG, markdown, wrap};
+use super::{ACCENT, markdown, wrap};
 use crate::app::{App, RemoteStatus};
+use crate::theme::theme;
 use crate::views::comments::{Confirm, Editor, NoteKind, PanelRow, ThreadView, Tone, panel_rows};
 
 pub fn render_editor(f: &mut Frame, area: Rect, e: &Editor) {
@@ -220,7 +221,7 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
         }
         let mut line = Line::from(spans);
         if i == app.panel.sel {
-            line = line.patch_style(Style::new().bg(CURSOR_BG));
+            line = line.patch_style(Style::new().bg(theme().cursor_bg));
         }
         lines.push(line);
     }
@@ -377,10 +378,23 @@ fn thread_code(app: &mut App, hunk: usize, line: usize, width: usize) -> Vec<Lin
     let hl = app.sh.highlighter.hunk(d, hunk);
     let mut out = Vec::new();
     for (i, kind, old, new) in rows {
+        let t = theme();
         let (sign, bg) = match kind {
-            LineKind::Added => ("+", Some(ADDED_BG)),
-            LineKind::Removed => ("-", Some(REMOVED_BG)),
-            LineKind::Context => (" ", None),
+            LineKind::Added => (
+                Span::styled(
+                    "+",
+                    Style::new().fg(t.added_sign).bg(t.added_sign_bg).bold(),
+                ),
+                Some(t.added_bg),
+            ),
+            LineKind::Removed => (
+                Span::styled(
+                    "-",
+                    Style::new().fg(t.removed_sign).bg(t.removed_sign_bg).bold(),
+                ),
+                Some(t.removed_bg),
+            ),
+            LineKind::Context => (Span::raw(" "), None),
         };
         let no = new.or(old).map(|n| n.to_string()).unwrap_or_default();
         let mut spans = vec![
@@ -388,8 +402,13 @@ fn thread_code(app: &mut App, hunk: usize, line: usize, width: usize) -> Vec<Lin
                 if i == line { "▶" } else { " " },
                 Style::new().fg(ACCENT).bold(),
             ),
-            format!("{no:>5} ").dim(),
-            Span::raw(sign),
+            format!("{no:>5} ").fg(match kind {
+                LineKind::Added => t.added_line_nr,
+                LineKind::Removed => t.removed_line_nr,
+                LineKind::Context => t.line_nr,
+            }),
+            sign,
+            " ".into(),
         ];
         spans.extend(hl[i].iter().map(|(st, t)| Span::styled(t.clone(), *st)));
         let mut l = super::graph::clip(spans, width);

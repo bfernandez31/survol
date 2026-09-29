@@ -8,8 +8,9 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::graph::clip;
 use super::rows::{RowOpts, file_stats, render_row, status_letter, truncate_left};
-use super::{ACCENT, CURSOR_BG, pane};
+use super::{ACCENT, pane};
 use crate::app::App;
+use crate::theme::theme;
 use crate::views::explorer::{self, Role, SideItem};
 use crate::views::{Focus, Layout, Row};
 
@@ -180,7 +181,9 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
             ),
         )
         .highlight_style(if focused {
-            Style::new().bg(CURSOR_BG).add_modifier(Modifier::BOLD)
+            Style::new()
+                .bg(theme().cursor_bg)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         });

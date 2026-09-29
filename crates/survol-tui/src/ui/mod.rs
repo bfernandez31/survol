@@ -19,9 +19,6 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use crate::app::{App, GraphStatus, GroupStatus, Popup, RemoteStatus, View};
 use crate::views::graph::Mode;
 
-pub(crate) const ADDED_BG: Color = Color::Rgb(22, 52, 34);
-pub(crate) const REMOVED_BG: Color = Color::Rgb(62, 24, 28);
-pub(crate) const CURSOR_BG: Color = Color::Rgb(60, 60, 80);
 pub(crate) const ACCENT: Color = Color::Cyan;
 
 pub fn render(f: &mut Frame, app: &mut App) {

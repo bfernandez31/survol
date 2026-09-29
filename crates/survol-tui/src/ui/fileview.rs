@@ -8,13 +8,23 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use survol_core::model::LineKind;
 
+use super::ACCENT;
 use super::ask::popup_block;
-use super::rows::{RowOpts, SELECT_BG, code_spans, render_row};
-use super::{ACCENT, CURSOR_BG};
+use super::rows::{RowOpts, Side, code_spans, line_nr, nr_color, render_row};
 use crate::app::App;
 use crate::highlight::Spans;
+use crate::intraline::Words;
+use crate::theme::theme;
 use crate::views::Row;
 use crate::views::fileview::{CodeLine, FileRow, FileView};
+
+/// Changed words of a code line the diff shows.
+fn line_words(app: &mut App, c: &CodeLine) -> Words {
+    match c.diff {
+        Some((h, i)) => app.sh.highlighter.hunk_words(&app.sh.review.diff, h).1[i].clone(),
+        None => Words::new(),
+    }
+}
 
 /// Highlighted text of a code line: from the head file, or from the hunk
 /// for a removed line.
@@ -37,17 +47,17 @@ fn code_line(
     width: usize,
     cursor: bool,
 ) -> Vec<Span<'static>> {
-    let n = |x: Option<u32>| x.map(|n| n.to_string()).unwrap_or_default();
-    let gutter = Style::new().dim();
-    let gutter = if cursor { gutter.bg(CURSOR_BG) } else { gutter };
-    let mut spans = vec![Span::styled(
-        format!("{:>5} {:>5} ", n(c.old), n(c.new)),
-        gutter,
-    )];
+    let bg = cursor.then(|| theme().cursor_bg);
+    let mut spans = vec![
+        line_nr(c.old, nr_color(c.kind, Side::Old), bg),
+        line_nr(c.new, nr_color(c.kind, Side::New), bg),
+    ];
     let hl = line_spans(app, v, c);
+    let words = line_words(app, c);
     spans.extend(code_spans(
         c.kind,
         &hl,
+        &words,
         width.saturating_sub(12),
         v.hscroll,
         false,
@@ -69,19 +79,19 @@ fn pair_line(
     for (side, c, w) in [(0, left, half.saturating_sub(1)), (1, right, width - half)] {
         match c {
             Some(c) => {
-                let no = if side == 0 { c.old } else { c.new };
-                let mut g = Style::new().dim();
-                if cursor {
-                    g = g.bg(CURSOR_BG);
-                }
-                spans.push(Span::styled(
-                    format!("{:>5} ", no.map(|n| n.to_string()).unwrap_or_default()),
-                    g,
-                ));
+                let (no, s) = if side == 0 {
+                    (c.old, Side::Old)
+                } else {
+                    (c.new, Side::New)
+                };
+                let bg = cursor.then(|| theme().cursor_bg);
+                spans.push(line_nr(no, nr_color(c.kind, s), bg));
                 let hl = line_spans(app, v, &c);
+                let words = line_words(app, &c);
                 spans.extend(code_spans(
                     c.kind,
                     &hl,
+                    &words,
                     w.saturating_sub(6),
                     v.hscroll,
                     false,
@@ -175,7 +185,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App, v: &mut FileView) {
             ),
         };
         if selected && !cursor && !matches!(v.rows[i], FileRow::Note { .. }) {
-            line = line.patch_style(Style::new().bg(SELECT_BG));
+            line = line.patch_style(Style::new().bg(theme().select_bg));
         }
         lines.push(line);
     }

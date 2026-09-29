@@ -1994,7 +1994,7 @@ mod tests {
             "{screen}"
         );
         assert!(screen.contains("line 5"), "unchanged lines too: {screen}");
-        assert!(screen.contains("-c"), "removed lines in place: {screen}");
+        assert!(screen.contains("- c"), "removed lines in place: {screen}");
         // c: a draft on that line, then back to the file view with it.
         app.on_key(key('c'));
         type_text(&mut app, "Why d?");

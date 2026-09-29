@@ -1,13 +1,16 @@
 //! Rendering of diff rows, shared by the Diff and Stack views.
 
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use std::ops::Range;
+
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use survol_core::model::{Diff, FileStatus, LineKind};
 use unicode_width::UnicodeWidthChar;
 
-use super::{ACCENT, ADDED_BG, CURSOR_BG, REMOVED_BG};
+use super::ACCENT;
 use crate::app::Shared;
 use crate::highlight::{Spans, expand_tabs};
+use crate::theme::theme;
 use crate::views::Row;
 use crate::views::comments::NOTE_INDENT;
 
@@ -38,8 +41,6 @@ pub struct RowOpts {
     pub selected: bool,
 }
 
-pub(super) const SELECT_BG: Color = Color::Rgb(110, 90, 20);
-
 /// Lays the notes out at the width of a diff pane of `width` columns.
 pub fn fit_notes(sh: &mut Shared, width: usize) {
     let w = width.saturating_sub(NOTE_INDENT).max(20);
@@ -58,9 +59,9 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
     let (width, hscroll) = (o.width, o.hscroll);
     let cursor_style = |s: Style| {
         if o.cursor {
-            s.bg(CURSOR_BG)
+            s.bg(theme().cursor_bg)
         } else if o.selected {
-            s.bg(SELECT_BG)
+            s.bg(theme().select_bg)
         } else {
             s
         }
@@ -82,8 +83,8 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
                     cursor_style(Style::new().fg(color).bold()),
                 ),
                 Span::styled(file.display_path(), cursor_style(Style::new().bold())),
-                format!("  +{a}").fg(Color::Green),
-                format!(" -{r}").fg(Color::Red),
+                format!("  +{a}").fg(theme().added_line_nr),
+                format!(" -{r}").fg(theme().removed_line_nr),
             ];
             if reviewed {
                 spans.push("  ✓ reviewed".fg(Color::Green));
@@ -128,10 +129,7 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
         Row::Hunk(h) => {
             let hunk = &diff.hunks[h];
             let reviewed = state.is_hunk_reviewed(diff, h);
-            let mut style = Style::new().fg(ACCENT);
-            if reviewed {
-                style = style.dim();
-            }
+            let style = Style::new().fg(if reviewed { theme().reviewed } else { ACCENT });
             let head = format!(
                 "@@ -{},{} +{},{} @@ {}",
                 hunk.old_range.start,
@@ -148,17 +146,17 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
         }
         Row::Line { hunk, line } => {
             let reviewed = state.is_hunk_reviewed(diff, hunk);
-            let hl = highlighter.hunk(diff, hunk);
+            let (hl, words) = highlighter.hunk_words(diff, hunk);
             let l = &diff.hunks[hunk].lines[line];
-            let gutter = format!(
-                "{:>5} {:>5} ",
-                l.old_line.map(|n| n.to_string()).unwrap_or_default(),
-                l.new_line.map(|n| n.to_string()).unwrap_or_default()
-            );
-            let mut spans = vec![Span::styled(gutter, cursor_style(Style::new().dim()))];
+            let bg = row_bg(o);
+            let mut spans = vec![
+                line_nr(l.old_line, nr_color(l.kind, Side::Old), bg),
+                line_nr(l.new_line, nr_color(l.kind, Side::New), bg),
+            ];
             spans.extend(code_spans(
                 l.kind,
                 &hl[line],
+                &words[line],
                 width.saturating_sub(12),
                 hscroll,
                 reviewed,
@@ -168,7 +166,7 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
         }
         Row::Pair { hunk, left, right } => {
             let reviewed = state.is_hunk_reviewed(diff, hunk);
-            let hl = highlighter.hunk(diff, hunk);
+            let (hl, words) = highlighter.hunk_words(diff, hunk);
             let lines = &diff.hunks[hunk].lines;
             let half = width / 2;
             let mut spans = Vec::new();
@@ -178,11 +176,15 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
                 match idx {
                     Some(i) => {
                         let l = &lines[i];
-                        let n = if side == 0 { l.old_line } else { l.new_line };
-                        let gutter =
-                            format!("{:>5} ", n.map(|n| n.to_string()).unwrap_or_default());
-                        spans.push(Span::styled(gutter, cursor_style(Style::new().dim())));
-                        spans.extend(code_spans(l.kind, &hl[i], text_w, hscroll, reviewed, true));
+                        let (n, s) = if side == 0 {
+                            (l.old_line, Side::Old)
+                        } else {
+                            (l.new_line, Side::New)
+                        };
+                        spans.push(line_nr(n, nr_color(l.kind, s), row_bg(o)));
+                        spans.extend(code_spans(
+                            l.kind, &hl[i], &words[i], text_w, hscroll, reviewed, true,
+                        ));
                     }
                     None => spans.push(Span::styled(
                         " ".repeat(w),
@@ -217,45 +219,95 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
     }
 }
 
-/// Sign column plus highlighted, horizontally scrolled and padded code.
+/// Background of a row under the cursor or in the selection.
+fn row_bg(o: RowOpts) -> Option<Color> {
+    if o.cursor {
+        Some(theme().cursor_bg)
+    } else if o.selected {
+        Some(theme().select_bg)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Side {
+    Old,
+    New,
+}
+
+/// Colour of a line number: the line's own colour on its side of the change.
+pub(super) fn nr_color(kind: LineKind, side: Side) -> Color {
+    let t = theme();
+    match (kind, side) {
+        (LineKind::Added, Side::New) => t.added_line_nr,
+        (LineKind::Removed, Side::Old) => t.removed_line_nr,
+        _ => t.line_nr,
+    }
+}
+
+/// A 5-wide line number and its separator. Under the cursor or in the
+/// selection it takes the terminal's text colour, readable on that background.
+pub(super) fn line_nr(n: Option<u32>, color: Color, bg: Option<Color>) -> Span<'static> {
+    let text = format!("{:>5} ", n.map(|n| n.to_string()).unwrap_or_default());
+    match bg {
+        Some(bg) => Span::styled(text, Style::new().bg(bg)),
+        None => Span::styled(text, Style::new().fg(color)),
+    }
+}
+
+/// Sign block, then the highlighted, horizontally scrolled and padded code;
+/// `words` (character ranges) get the changed-word background.
 pub(super) fn code_spans(
     kind: LineKind,
     hl: &Spans,
+    words: &[Range<usize>],
     width: usize,
     hscroll: usize,
     reviewed: bool,
     pad: bool,
 ) -> Vec<Span<'static>> {
-    let (sign, bg) = match kind {
-        LineKind::Added => ("+", Some(ADDED_BG)),
-        LineKind::Removed => ("-", Some(REMOVED_BG)),
-        LineKind::Context => (" ", None),
+    let t = theme();
+    let (sign, sign_style, bg, word_bg) = match kind {
+        LineKind::Added => (
+            "+",
+            Style::new().fg(t.added_sign).bg(t.added_sign_bg).bold(),
+            Some(t.added_bg),
+            t.added_word_bg,
+        ),
+        LineKind::Removed => (
+            "-",
+            Style::new().fg(t.removed_sign).bg(t.removed_sign_bg).bold(),
+            Some(t.removed_bg),
+            t.removed_word_bg,
+        ),
+        LineKind::Context => (" ", Style::new(), None, Color::Reset),
     };
-    let base = |s: Style| {
+    let base = |s: Style, word: bool| {
         let s = match bg {
+            Some(_) if word => s.bg(word_bg),
             Some(bg) => s.bg(bg),
             None => s,
         };
-        if reviewed {
-            s.add_modifier(Modifier::DIM)
-        } else {
-            s
-        }
+        if reviewed { s.fg(t.reviewed) } else { s }
     };
-    let sign_style = match kind {
-        LineKind::Added => Style::new().fg(Color::Green),
-        LineKind::Removed => Style::new().fg(Color::Red),
-        LineKind::Context => Style::new(),
-    };
-    let mut out = vec![Span::styled(sign, base(sign_style))];
+    let in_word = |col: usize| words.iter().any(|r| r.contains(&col));
+    let mut out = vec![
+        Span::styled(sign, sign_style),
+        Span::styled(" ", base(Style::new(), false)),
+    ];
     let mut skip = hscroll;
-    let mut room = width.saturating_sub(1);
+    let mut room = width.saturating_sub(2);
+    let mut col = 0;
     for (style, text) in hl {
         if room == 0 {
             break;
         }
         let mut chunk = String::new();
+        let mut word = false;
         for ch in text.chars() {
+            let c = col;
+            col += 1;
             let w = ch.width().unwrap_or(0);
             if skip > 0 {
                 skip = skip.saturating_sub(w);
@@ -265,15 +317,20 @@ pub(super) fn code_spans(
                 room = 0;
                 break;
             }
+            let wd = in_word(c);
+            if wd != word && !chunk.is_empty() {
+                out.push(Span::styled(std::mem::take(&mut chunk), base(*style, word)));
+            }
+            word = wd;
             room -= w;
             chunk.push(ch);
         }
         if !chunk.is_empty() {
-            out.push(Span::styled(chunk, base(*style)));
+            out.push(Span::styled(chunk, base(*style, word)));
         }
     }
     if (pad || bg.is_some()) && room > 0 {
-        out.push(Span::styled(" ".repeat(room), base(Style::new())));
+        out.push(Span::styled(" ".repeat(room), base(Style::new(), false)));
     }
     out
 }

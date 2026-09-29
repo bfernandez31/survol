@@ -29,6 +29,7 @@ pub struct Config {
     pub review: ReviewConfig,
     pub llm: LlmConfig,
     pub lsp: LspConfig,
+    pub theme: ThemeConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -146,6 +147,19 @@ impl LlmConfig {
             self.language = lang.to_string();
         }
     }
+}
+
+/// `[theme]`: colours of the TUI's diff. `syntax` picks the code colours
+/// (`catppuccin-mocha`, the default, or `ansi` for the terminal palette);
+/// every other key overrides a colour role with `#rrggbb`, e.g.
+/// `added_bg = "#302145"`. The TUI validates the role names.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syntax: Option<String>,
+    #[serde(flatten)]
+    pub colors: std::collections::BTreeMap<String, String>,
 }
 
 /// `[lsp]`: language servers that refine the code graph after the

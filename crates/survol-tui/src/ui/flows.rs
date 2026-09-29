@@ -12,6 +12,7 @@ use survol_core::flows::{Change, FlowStatus, Layer, Repeat, Terminal, Via};
 use super::graph::{cursor_line, two_sided};
 use super::{ACCENT, pane, wrap};
 use crate::app::App;
+use crate::theme::theme;
 use crate::views::Focus;
 use crate::views::flows::{BaseStatus, EntryRow, FlowsState, Side};
 
@@ -242,7 +243,7 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
         out.push(cursor_line(line, i == pos.cursor && focused, width));
         if i == pos.cursor && !focused {
             let l = out.pop().expect("just pushed");
-            out.push(l.style(Style::new().bg(Color::Rgb(40, 40, 50))));
+            out.push(l.style(Style::new().bg(theme().inactive_cursor_bg)));
         }
     }
     f.render_widget(Paragraph::new(out), inner);
