@@ -9,7 +9,7 @@ use super::{ACCENT, ADDED_BG, CURSOR_BG, REMOVED_BG};
 use crate::app::Shared;
 use crate::highlight::{Spans, expand_tabs};
 use crate::views::Row;
-use crate::views::comments::NoteStyle;
+use crate::views::comments::{NOTE_INDENT, NoteStyle};
 
 pub fn status_letter(s: FileStatus) -> (&'static str, Color) {
     match s {
@@ -39,6 +39,12 @@ pub struct RowOpts {
 }
 
 const SELECT_BG: Color = Color::Rgb(110, 90, 20);
+
+/// Lays the notes out at the width of a diff pane of `width` columns.
+pub fn fit_notes(sh: &mut Shared, width: usize) {
+    sh.notes
+        .set_width(width.saturating_sub(NOTE_INDENT).max(20));
+}
 
 pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
     let Shared {
@@ -191,8 +197,13 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
         }
         Row::Spacer => Line::default(),
         Row::Comment { note, part, .. } => {
-            let n = &notes.items[note as usize];
-            let (style, text) = &n.lines[part as usize];
+            let Some((style, text)) = notes
+                .items
+                .get(note as usize)
+                .and_then(|n| n.lines.get(part as usize))
+            else {
+                return Line::default();
+            };
             let (bar, text_style) = match style {
                 NoteStyle::DraftHead => (Color::Yellow, Style::new().fg(Color::Yellow).bold()),
                 NoteStyle::Draft => (Color::Yellow, Style::new().fg(Color::Yellow)),
@@ -205,7 +216,7 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
                 Span::styled(" ".repeat(12), cursor_style(Style::new())),
                 Span::styled("┃ ", Style::new().fg(bar)),
                 Span::styled(
-                    truncate_right(text, width.saturating_sub(15)),
+                    truncate_right(text, width.saturating_sub(NOTE_INDENT)),
                     cursor_style(text_style),
                 ),
             ])

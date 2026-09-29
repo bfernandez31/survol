@@ -40,6 +40,8 @@ pub struct DiffView {
     pending: Option<char>,
     /// Other end of a `V` selection (row index).
     pub visual: Option<usize>,
+    /// [`NoteIndex::generation`](crate::views::comments::NoteIndex) the rows were built with.
+    pub notes_gen: u64,
 }
 
 impl DiffView {
@@ -66,6 +68,7 @@ impl DiffView {
             filter_editing: false,
             pending: None,
             visual: None,
+            notes_gen: 0,
         };
         v.build_rows(sh);
         v.build_sidebar(sh);
@@ -107,6 +110,7 @@ impl DiffView {
         self.rows = rows;
         self.row_file = row_file;
         self.file_row = file_row;
+        self.notes_gen = sh.notes.generation;
     }
 
     fn anchor(&self) -> Option<Anchor> {

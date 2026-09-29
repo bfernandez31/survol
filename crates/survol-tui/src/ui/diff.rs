@@ -102,6 +102,10 @@ fn render_diff(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     app.diff.set_view_height(inner.height as usize);
+    super::rows::fit_notes(&mut app.sh, inner.width as usize);
+    if app.diff.notes_gen != app.sh.notes.generation {
+        app.diff.relayout(&app.sh);
+    }
 
     let v = &app.diff;
     let sel = v.visual.map(|x| (x.min(v.pos.cursor), x.max(v.pos.cursor)));

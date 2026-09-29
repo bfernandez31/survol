@@ -340,7 +340,8 @@ fn render_help(f: &mut Frame, area: Rect, view: View) {
     );
 }
 
-/// Word-wraps `text` to `width` columns (at least one line).
+/// Word-wraps `text` to `width` columns (at least one line). Words longer
+/// than a line are cut.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut lines = Vec::new();
@@ -348,13 +349,17 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
         let mut line = String::new();
         for word in para.split_whitespace() {
             let len = line.chars().count();
-            if len > 0 && len + 1 + word.chars().count() > width {
+            let mut word: Vec<char> = word.chars().collect();
+            if len > 0 && len + 1 + word.len() > width {
                 lines.push(std::mem::take(&mut line));
+            }
+            while word.len() > width {
+                lines.push(word.drain(..width).collect());
             }
             if !line.is_empty() {
                 line.push(' ');
             }
-            line.push_str(word);
+            line.extend(word);
         }
         lines.push(line);
     }
@@ -365,9 +370,57 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use survol_core::comments::{self, Anchor};
+    use survol_core::config::Config;
+    use survol_core::review_state::ReviewState;
+
     use super::{help_lines, wrap};
-    use crate::app::View;
+    use crate::app::{App, View};
+    use crate::views::stack::tests::fixture;
+
+    /// The screen of `app` drawn on a `w` × `h` terminal, one string per row.
+    pub(crate) fn screen(app: &mut App, w: u16, h: u16) -> Vec<String> {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| super::render(f, app)).unwrap();
+        let buf = t.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    /// An app on the test fixture, its state under `dir`.
+    pub(crate) fn app(dir: &std::path::Path) -> App {
+        let (review, _) = fixture(dir);
+        App::new(
+            review,
+            ReviewState::default(),
+            dir.join("state.json"),
+            Config::default(),
+        )
+    }
+
+    #[test]
+    fn long_notes_are_wrapped_to_the_pane_not_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let d = &app.sh.review.diff;
+        let line = comments::line_anchor(d, 0, 1);
+        let body = "The confrontation is made on the unlocked read, the lock is only taken \
+            afterwards by refresh which rehydrates the row without replaying the filter.";
+        app.sh
+            .comments
+            .add(Anchor::Line { start: None, line }, body);
+        app.sh.rebuild_notes();
+        app.diff.relayout(&app.sh);
+        let text = screen(&mut app, 90, 30).join("\n");
+        for word in body.split_whitespace() {
+            assert!(text.contains(word), "`{word}` is missing:\n{text}");
+        }
+        assert!(!text.contains('…'), "nothing is cut:\n{text}");
+    }
 
     #[test]
     fn help_shows_the_current_view() {
@@ -381,5 +434,9 @@ mod tests {
     fn wraps_words() {
         assert_eq!(wrap("one two three four", 9), ["one two", "three", "four"]);
         assert_eq!(wrap("", 10), [""]);
+        assert_eq!(
+            wrap("see https://example.org/a/b", 10),
+            ["see", "https://ex", "ample.org/", "a/b"]
+        );
     }
 }

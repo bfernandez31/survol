@@ -152,6 +152,8 @@ pub struct StackView {
     pending: Option<char>,
     /// Other end of a `V` selection (content row index).
     pub visual: Option<usize>,
+    /// [`NoteIndex::generation`](crate::views::comments::NoteIndex) the rows were built with.
+    pub notes_gen: u64,
 }
 
 impl StackView {
@@ -298,6 +300,7 @@ impl StackView {
 
     fn build_content(&mut self, sh: &Shared) {
         self.rows.clear();
+        self.notes_gen = sh.notes.generation;
         self.visual = None;
         self.pos = Scroll {
             height: self.pos.height,

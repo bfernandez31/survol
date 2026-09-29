@@ -11,8 +11,11 @@ use survol_core::model::Diff;
 
 use super::Row;
 
-/// Width at which note bodies are wrapped.
-const WRAP: usize = 96;
+/// Width note bodies are wrapped at until the renderer gives the pane's.
+const DEFAULT_WIDTH: usize = 96;
+/// Columns left of a note body in the diff pane: the line numbers, then `┃ `
+/// (and one spare column).
+pub const NOTE_INDENT: usize = 15;
 /// Body lines shown per note under its line.
 const MAX_BODY_LINES: usize = 12;
 
@@ -33,11 +36,54 @@ pub enum NoteKind {
     Remote(usize),
 }
 
-/// A note as displayed under its line: one entry per screen line.
+/// A note as displayed under its line: its raw text, and one entry per
+/// screen line once laid out at the pane's width.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineNote {
     pub kind: NoteKind,
+    head: (NoteStyle, String),
+    /// Style of the body lines, and the raw body.
+    body: (NoteStyle, String),
+    /// Author and raw body of each reply.
+    replies: Vec<(String, String)>,
     pub lines: Vec<(NoteStyle, String)>,
+}
+
+impl InlineNote {
+    fn new(kind: NoteKind, head: (NoteStyle, String), body: (NoteStyle, String)) -> Self {
+        Self {
+            kind,
+            head,
+            body,
+            replies: Vec::new(),
+            lines: Vec::new(),
+        }
+    }
+
+    /// Wraps the head, body and replies to `width` columns.
+    fn layout(&mut self, width: usize) {
+        let mut lines = vec![self.head.clone()];
+        wrap_into(
+            &mut lines,
+            self.body.0,
+            &self.body.1,
+            width,
+            "",
+            MAX_BODY_LINES,
+        );
+        for (author, body) in &self.replies {
+            lines.push((NoteStyle::Reply, format!("↳ @{author}")));
+            wrap_into(
+                &mut lines,
+                NoteStyle::Reply,
+                body,
+                width,
+                "  ",
+                MAX_BODY_LINES,
+            );
+        }
+        self.lines = lines;
+    }
 }
 
 /// The notes of the review and where they go in the diff.
@@ -48,17 +94,30 @@ pub struct NoteIndex {
     by_file: HashMap<usize, Vec<u32>>,
     /// Drafts whose line is gone.
     pub stale: usize,
+    /// Width the notes are laid out at (0: not yet).
+    width: usize,
+    /// Changes whenever the notes or their layout change: views built with
+    /// another generation must lay out their rows again.
+    pub generation: u64,
 }
 
-fn wrap_into(out: &mut Vec<(NoteStyle, String)>, style: NoteStyle, text: &str, max: usize) {
+/// Wraps `text` to `width` columns after `indent`, at most `max` lines.
+fn wrap_into(
+    out: &mut Vec<(NoteStyle, String)>,
+    style: NoteStyle,
+    text: &str,
+    width: usize,
+    indent: &str,
+    max: usize,
+) {
     let mut n = 0;
     for para in text.lines() {
-        for l in crate::ui::wrap(para, WRAP) {
+        for l in crate::ui::wrap(para, width.saturating_sub(indent.len())) {
             if n == max {
-                out.push((style, "…".into()));
+                out.push((style, format!("{indent}…")));
                 return;
             }
-            out.push((style, l));
+            out.push((style, format!("{indent}{l}")));
             n += 1;
         }
     }
@@ -66,13 +125,6 @@ fn wrap_into(out: &mut Vec<(NoteStyle, String)>, style: NoteStyle, text: &str, m
 
 /// Where a note goes: a line `(hunk, line)`, else under the header of the file.
 type Spot = (Option<(usize, usize)>, usize);
-
-fn first_line(s: &str) -> &str {
-    s.lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-}
 
 impl NoteIndex {
     pub fn build(diff: &Diff, store: &CommentStore, discussions: &[Discussion]) -> Self {
@@ -89,7 +141,6 @@ impl NoteIndex {
             let Some((file, at)) = comments::place_position(pos, diff) else {
                 continue;
             };
-            let mut lines = Vec::new();
             let resolved = d.is_resolved();
             let first = &d.notes[0];
             let mut head = format!("◆ @{}", first.author.username);
@@ -112,21 +163,24 @@ impl NoteIndex {
             } else {
                 NoteStyle::RemoteHead
             };
-            lines.push((style, head));
             let body = if resolved {
                 NoteStyle::Resolved
             } else {
                 NoteStyle::Remote
             };
-            wrap_into(&mut lines, body, &first.body, MAX_BODY_LINES);
-            for n in d.notes.iter().skip(1).filter(|n| !n.system) {
-                let mut l = format!("↳ @{}: {}", n.author.username, first_line(&n.body));
-                if l.chars().count() > WRAP {
-                    l = l.chars().take(WRAP - 1).collect::<String>() + "…";
-                }
-                lines.push((NoteStyle::Reply, l));
-            }
-            let idx = ix.push(NoteKind::Remote(di), lines);
+            let mut note = InlineNote::new(
+                NoteKind::Remote(di),
+                (style, head),
+                (body, first.body.clone()),
+            );
+            note.replies = d
+                .notes
+                .iter()
+                .skip(1)
+                .filter(|n| !n.system)
+                .map(|n| (n.author.username.clone(), n.body.clone()))
+                .collect();
+            let idx = ix.push(note);
             match at {
                 Some(hl) => ix.by_line.entry(hl).or_default().push(idx),
                 None => ix.by_file.entry(file).or_default().push(idx),
@@ -174,20 +228,39 @@ impl NoteIndex {
             let Some((at, file)) = target else {
                 continue;
             };
-            let mut lines = vec![(NoteStyle::DraftHead, head)];
-            wrap_into(&mut lines, NoteStyle::Draft, &d.body, MAX_BODY_LINES);
-            let idx = ix.push(NoteKind::Draft(d.id), lines);
+            let idx = ix.push(InlineNote::new(
+                NoteKind::Draft(d.id),
+                (NoteStyle::DraftHead, head),
+                (NoteStyle::Draft, d.body.clone()),
+            ));
             match at {
                 Some(hl) => ix.by_line.entry(hl).or_default().push(idx),
                 None => ix.by_file.entry(file).or_default().push(idx),
             }
         }
+        ix.set_width(DEFAULT_WIDTH);
         ix
     }
 
-    fn push(&mut self, kind: NoteKind, lines: Vec<(NoteStyle, String)>) -> u32 {
-        self.items.push(InlineNote { kind, lines });
+    fn push(&mut self, note: InlineNote) -> u32 {
+        self.items.push(note);
         (self.items.len() - 1) as u32
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Lays the notes out at `width` columns (a new generation if it changed).
+    pub fn set_width(&mut self, width: usize) {
+        if width == self.width {
+            return;
+        }
+        self.width = width;
+        for n in &mut self.items {
+            n.layout(width);
+        }
+        self.generation += 1;
     }
 
     pub fn at_line(&self, hunk: usize, line: usize) -> &[u32] {
@@ -573,7 +646,8 @@ mod tests {
                 (NoteStyle::RemoteHead, "◆ @alice · unresolved".to_string()),
                 (NoteStyle::Remote, "Why B?".to_string()),
                 (NoteStyle::Remote, "It was b.".to_string()),
-                (NoteStyle::Reply, "↳ @bob: Renamed.".to_string()),
+                (NoteStyle::Reply, "↳ @bob".to_string()),
+                (NoteStyle::Reply, "  Renamed.".to_string()),
             ]
         );
         assert_eq!(ix.items[at[1] as usize].kind, NoteKind::Draft(id));
@@ -598,6 +672,38 @@ mod tests {
         assert_eq!(rows[0], PanelRow::Summary);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[4], PanelRow::Discussion(0));
+    }
+
+    #[test]
+    fn notes_wrap_at_the_pane_width_and_show_replies_fully() {
+        let d = survol_core::diff::parse(RAW.as_bytes()).unwrap();
+        let mut disc = discussion(Some(2), false);
+        disc.notes[0].body = "The lock is taken after the read: move it before.".into();
+        disc.notes[1].body = "Fixed.\nThe read now happens under the lock.".into();
+        let mut ix = NoteIndex::build(&d, &CommentStore::default(), &[disc]);
+        let gen0 = ix.generation;
+        ix.set_width(20);
+        assert!(ix.generation > gen0, "a new layout is a new generation");
+        let text: Vec<&str> = ix.items[0].lines.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(
+            text,
+            [
+                "◆ @alice · unresolved",
+                "The lock is taken",
+                "after the read: move",
+                "it before.",
+                "↳ @bob",
+                "  Fixed.",
+                "  The read now",
+                "  happens under the",
+                "  lock.",
+            ]
+        );
+        // Nothing is lost: every word of the bodies is on some line.
+        assert!(text.iter().all(|l| l.chars().count() <= 21));
+        let gen1 = ix.generation;
+        ix.set_width(20);
+        assert_eq!(ix.generation, gen1, "same width: nothing to redo");
     }
 
     #[test]

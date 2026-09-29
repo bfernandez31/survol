@@ -274,6 +274,10 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Paragraph::new(head), top);
 
     app.stack.set_view_height(rest.height as usize);
+    super::rows::fit_notes(&mut app.sh, width);
+    if app.stack.notes_gen != app.sh.notes.generation {
+        app.stack.relayout(&app.sh);
+    }
     let v = &app.stack;
     let (scroll, cursor, hscroll) = (v.pos.scroll, v.pos.cursor, v.hscroll);
     let sel = v.visual.map(|x| (x.min(cursor), x.max(cursor)));

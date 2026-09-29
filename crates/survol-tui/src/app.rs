@@ -165,7 +165,10 @@ impl Shared {
     /// Places drafts and discussions again (views must relayout after).
     pub fn rebuild_notes(&mut self) {
         let discussions = self.remote.as_ref().map_or(&[][..], |r| &r.discussions);
-        self.notes = NoteIndex::build(&self.review.diff, &self.comments, discussions);
+        let mut notes = NoteIndex::build(&self.review.diff, &self.comments, discussions);
+        notes.set_width(self.notes.width());
+        notes.generation = self.notes.generation + 1;
+        self.notes = notes;
     }
 
     /// Writes the draft comments; called after every change.
