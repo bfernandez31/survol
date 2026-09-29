@@ -118,7 +118,11 @@ the new root, `Backspace` / `Ctrl-o` goes back. The right pane previews the code
 
 **Module map**: packages / directories with their dependencies in and out (`←` / `→`
 counts, `Δ` changed symbols). `Enter` lists a module's changed symbols, `x` writes the
-map as Mermaid to `.git/survol/exports/`.
+map as Mermaid to `.git/survol/exports/`, `X` also writes a self-contained HTML page next
+to it and opens it in the browser (`open` on macOS, `xdg-open` elsewhere; only the mermaid
+script is loaded from a CDN, the diagram stays in the file). After an export, `S` adds the
+diagram to the overall comment of the review (the editor opens on it): GitLab renders
+Mermaid blocks, so everyone sees it in the merge request.
 
 ![Module map: modules with incoming / outgoing dependencies, and the detail of one module](docs/screenshots/graph-module-map.png)
 
@@ -131,7 +135,8 @@ screenshot at the top). `n` / `N` jump between changed steps.
 
 The base revision's graph is built in the background. When a flow differs, `b` cycles
 **after → before → merged**: added (`+`) and removed (`-`) steps, reroutes, new external
-calls, persistence accesses gone. `x` writes the flow (or its before / after) as Mermaid.
+calls, persistence accesses gone. `x` writes the flow (or its before / after) as Mermaid,
+`X` opens it in the browser, `S` adds it to the overall comment.
 
 ![Flow before / after: an edit screen rerouted from the pet and owner endpoints to a new visit details endpoint](docs/screenshots/graph-flow-before-after.png)
 
@@ -436,12 +441,14 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `gd` | the symbol's hunks in the Diff view |
 | `Ctrl-l`, `j` / `k` | preview pane, scroll it |
 | `x` | write the module map as Mermaid (`.git/survol/exports`) |
+| `X` | same, plus an HTML page opened in the browser |
+| `S` | add the last exported diagram to the overall comment |
 | `f` | flows: impacted entry points and their end-to-end flow |
 | flows: `Enter` / `l`, `h` | into the flow, back to the entry points |
 | flows: `n` / `N` | next / previous changed (or added / removed) step |
 | flows: `Enter` | symbol view of the step |
 | flows: `b` | after → before → merged (when the flow differs) |
-| flows: `x` | write the flow as Mermaid (`.git/survol/exports`) |
+| flows: `x` / `X` | write the flow as Mermaid (`X`: and open it in the browser) |
 
 ### Popups
 
@@ -558,6 +565,9 @@ and runs `$VISUAL` / `$EDITOR`.
   project's `.survol/config.toml` to route work code to a work account without touching
   your default one; `survol-cli doctor` shows the account in use.
 - **No telemetry.** survol itself only talks to your GitLab host (API, `git fetch`); the LLM CLI does its own network calls when enabled.
+- **Mermaid pages** (`X`): the HTML file loads the mermaid script from `cdn.jsdelivr.net`
+  in your browser; the diagram itself stays in the local file. `x` writes the Markdown
+  only.
 - **GitLab writes need confirmation**: `y` in the TUI after the full list of requests,
   `--yes` on the command line. `publish --dry-run` prints the exact requests and sends
   nothing. Local ranges are never published.

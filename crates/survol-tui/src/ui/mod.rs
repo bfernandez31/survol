@@ -209,10 +209,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                         " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  gf file  / find  m mode  a ask  A answers  ? help"
                     }
                     Mode::Flows => {
-                        " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x Mermaid  e edit  gd diff  h back  m mode  ? help"
+                        " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x/X Mermaid  S to comment  e edit  gd diff  h back  m mode  ? help"
                     }
                     Mode::Modules => {
-                        " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x Mermaid export  / find  m mode  ? help"
+                        " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x/X Mermaid  S to comment  / find  m mode  ? help"
                     }
                     _ => {
                         " j/k move  Enter symbol graph  J/K module  e edit  gd diff  gf file  a ask  / find symbol  m mode  C-l preview  ? help"
@@ -305,8 +305,8 @@ const HELP: &[(&str, &str)] = &[
         "after → before → merged (when the flow differs)",
     ),
     (
-        "flows: x",
-        "write the flow as Mermaid (.git/survol/exports)",
+        "flows: x / X",
+        "write the flow as Mermaid (X: and open it in the browser)",
     ),
     ("Enter", "symbol: focus it (new root); section/module: fold"),
     ("l / h", "expand / collapse (callers of callers…), parent"),
@@ -317,6 +317,8 @@ const HELP: &[(&str, &str)] = &[
     ("gd", "the symbol's hunks in the Diff view"),
     ("Ctrl-l, j / k", "preview pane, scroll it"),
     ("x", "write the module map as Mermaid (.git/survol/exports)"),
+    ("X", "same, plus an HTML page opened in the browser"),
+    ("S", "add the last exported diagram to the overall comment"),
     (
         "a (answer: Tab, Enter, d, e)",
         "ask; answer links: next, graph, diff, editor",

@@ -563,6 +563,16 @@ impl Editor {
         }
     }
 
+    /// Adds `text` at the end, as a new paragraph (not saved yet).
+    pub fn append(&mut self, text: &str) {
+        let body = self.text.trim_end();
+        self.text = if body.is_empty() {
+            text.to_string()
+        } else {
+            format!("{body}\n\n{text}")
+        };
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> EditorOutcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);

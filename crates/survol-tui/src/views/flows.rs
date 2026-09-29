@@ -15,6 +15,7 @@ use survol_core::flows::{self, Change, EntryKind, ImpactedFlow, Limits, Step};
 use survol_core::graph::{Graph, SymIdx};
 
 use super::Scroll;
+use super::export::{self, Diagram};
 use crate::app::Shared;
 
 /// Which flow the right pane shows.
@@ -298,14 +299,11 @@ impl FlowsState {
     }
 
     /// `x`: the selected flow as a Mermaid flowchart (before / after when it
-    /// changed) in `.git/survol/exports/`.
-    pub fn export(&self, sh: &mut Shared) {
+    /// changed) in `.git/survol/exports/`; `X`: opened in the browser too.
+    pub fn export(&self, sh: &mut Shared, open: bool) -> Option<Diagram> {
         let Some(f) = self.selected() else {
-            return sh.notify("select an entry point to export its flow");
-        };
-        let dir = match sh.review.repo.survol_dir() {
-            Ok(d) => d.join("exports"),
-            Err(e) => return sh.notify(format!("cannot export: {e}")),
+            sh.notify("select an entry point to export its flow");
+            return None;
         };
         let slug: String = f
             .entry
@@ -318,21 +316,17 @@ impl FlowsState {
             .collect::<Vec<_>>()
             .join("-");
         let head = survol_core::review::short(&sh.review.head_sha);
-        let path = dir.join(format!("flow-{}-{head}.md", truncate(&slug, 60)));
-        let mut text = format!(
-            "# Flow {} ({})\n\n{}\n\n",
-            f.entry.label,
-            f.entry.name,
-            sh.review.title()
-        );
-        if let Some(d) = &f.diff {
-            text.push_str(&format!("{}\n\n", d.summary()));
+        let stem = format!("flow-{}-{head}", truncate(&slug, 60));
+        let d = Diagram {
+            title: format!("Flow {} ({})", f.entry.label, f.entry.name),
+            mermaid: f.to_mermaid(),
+        };
+        let mut text = format!("# {}\n\n{}\n\n", d.title, sh.review.title());
+        if let Some(diff) = &f.diff {
+            text.push_str(&format!("{}\n\n", diff.summary()));
         }
-        text.push_str(&format!("```mermaid\n{}```\n", f.to_mermaid()));
-        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {
-            Ok(()) => sh.notify(format!("flow written to {}", path.display())),
-            Err(e) => sh.notify(format!("cannot write {}: {e}", path.display())),
-        }
+        text.push_str(&format!("```mermaid\n{}```\n", d.mermaid));
+        export::export(sh, &stem, &text, &d, open).then_some(d)
     }
 
     /// Entry list moved: the flow pane starts at its entry.

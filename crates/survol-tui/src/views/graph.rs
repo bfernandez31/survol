@@ -19,6 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::graph::{EdgeKind, Graph, Link, ModuleMap, Role, SymIdx, SymbolKind};
 use survol_core::model::{Diff, LineKind};
 
+use super::export::{self, Diagram};
 use super::flows::{EntryRow, FlowsState};
 use super::{Focus, Scroll};
 use crate::app::{Action, Shared};
@@ -463,6 +464,8 @@ pub struct GraphView {
     pub hscroll: usize,
     sources: HashMap<(String, bool), Rc<Source>>,
     pending: Option<char>,
+    /// Last diagram exported (`x`), for `S`.
+    pub last_export: Option<Diagram>,
 }
 
 impl GraphView {
@@ -1034,24 +1037,30 @@ impl GraphView {
         }
     }
 
-    fn export_mermaid(&self, sh: &mut Shared) {
+    /// `x` / `X`: the module map as Mermaid; `open`: in the browser too.
+    fn export_mermaid(&mut self, sh: &mut Shared, open: bool) {
         let Some(map) = &self.modules else {
             return;
         };
-        let dir = match sh.review.repo.survol_dir() {
-            Ok(d) => d.join("exports"),
-            Err(e) => return sh.notify(format!("cannot export: {e}")),
+        let d = Diagram {
+            title: format!("Module map of {}", sh.review.title()),
+            mermaid: map.to_mermaid(),
         };
         let head = survol_core::review::short(&sh.review.head_sha);
-        let path = dir.join(format!("modules-{head}.md"));
-        let text = format!(
-            "# Module map of {}\n\n```mermaid\n{}```\n",
-            sh.review.title(),
-            map.to_mermaid()
-        );
-        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {
-            Ok(()) => sh.notify(format!("module map written to {}", path.display())),
-            Err(e) => sh.notify(format!("cannot write {}: {e}", path.display())),
+        let text = format!("# {}\n\n```mermaid\n{}```\n", d.title, d.mermaid);
+        if export::export(sh, &format!("modules-{head}"), &text, &d, open) {
+            self.last_export = Some(d);
+        }
+    }
+
+    /// `S` after an export: the diagram into the overall comment.
+    fn add_to_summary(&self, sh: &mut Shared) -> Action {
+        match &self.last_export {
+            Some(d) => Action::AddToSummary(d.markdown()),
+            None => {
+                sh.notify("export a diagram first: x (module map, flow)");
+                Action::None
+            }
         }
     }
 
@@ -1130,8 +1139,13 @@ impl GraphView {
                 self.query.clear();
             }
             KeyCode::Char('e') => self.open_in_editor(sh),
-            KeyCode::Char('x') if self.mode == Mode::Flows => self.flows.export(sh),
-            KeyCode::Char('x') => self.export_mermaid(sh),
+            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Flows => {
+                if let Some(d) = self.flows.export(sh, c == 'X') {
+                    self.last_export = Some(d);
+                }
+            }
+            KeyCode::Char(c @ ('x' | 'X')) => self.export_mermaid(sh, c == 'X'),
+            KeyCode::Char('S') => return self.add_to_summary(sh),
             KeyCode::Char('o') => self.toggle_fold(g),
             KeyCode::Char('0') => self.hscroll = 0,
             _ => match self.focus {
@@ -1587,6 +1601,29 @@ mod tests {
             )
         });
         assert!(cycle, "{:?}", v.tree);
+    }
+
+    #[test]
+    fn module_map_export_goes_to_the_overall_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let (mut sh, mut v) = setup(dir.path());
+        // S before any export: nothing to add.
+        assert_eq!(v.on_key(&mut sh, key('S')), Action::None);
+        v.export_mermaid(&mut sh, false);
+        let md = dir.path().join(".git/survol/exports/modules-head.md");
+        assert!(md.exists(), "{:?}", sh.message());
+        assert!(!md.with_extension("html").exists(), "x writes no page");
+        assert!(sh.message().unwrap().contains("S adds it"));
+        let Action::AddToSummary(text) = v.on_key(&mut sh, key('S')) else {
+            panic!("nothing to add");
+        };
+        assert!(text.starts_with("#### Module map of base..head"));
+        assert!(text.contains("```mermaid\nflowchart"));
     }
 
     #[test]
