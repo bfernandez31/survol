@@ -22,7 +22,9 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub forge: ForgeConfig,
     pub gitlab: GitlabConfig,
+    pub github: GithubConfig,
     pub git: GitConfig,
     pub review: ReviewConfig,
     pub llm: LlmConfig,
@@ -36,6 +38,33 @@ pub struct GitlabConfig {
     /// Required; overridden by `GITLAB_HOST`.
     pub host: Option<String>,
     /// Extra PEM bundle trusted on top of the system store (corporate CA).
+    pub ca_cert: Option<PathBuf>,
+}
+
+/// Which forge to talk to. By default it is detected from the git remote:
+/// github.com or a `[github] hosts` entry is GitHub, anything else GitLab.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ForgeConfig {
+    /// `github` or `gitlab`: skips the detection.
+    pub kind: Option<crate::forge::ForgeKind>,
+    /// Host of the forge when the remote does not say it (an SSH alias...).
+    /// For GitLab, `[gitlab] host` wins.
+    pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubConfig {
+    /// GitHub Enterprise Server hosts, e.g. `github.corp.example`: a remote
+    /// on one of them is reviewed as GitHub. github.com needs nothing.
+    pub hosts: Vec<String>,
+    /// Token, when neither `GITHUB_TOKEN` / `GH_TOKEN` provide one; before
+    /// `gh auth token`. Printed redacted.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "redacted")]
+    pub token: Option<String>,
+    /// Extra PEM bundle trusted on top of the system store (Enterprise
+    /// Server behind a corporate CA).
     pub ca_cert: Option<PathBuf>,
 }
 
@@ -249,6 +278,14 @@ impl Config {
         if let Some(c) = get("SURVOL_CA_CERT").filter(|c| !c.is_empty()) {
             self.gitlab.ca_cert = Some(c.into());
         }
+    }
+}
+
+/// Secrets are never printed (`survol-cli config`).
+fn redacted<S: serde::Serializer>(v: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(_) => s.serialize_str("<redacted>"),
+        None => s.serialize_none(),
     }
 }
 

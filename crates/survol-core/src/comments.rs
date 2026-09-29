@@ -8,7 +8,8 @@
 //! file) or is reported as stale. Positions are computed from the current
 //! diff when publishing. Publishing creates GitLab draft notes then publishes
 //! them at once (`bulk_publish`); instances without draft notes get regular
-//! discussions, one by one, after an explicit confirmation.
+//! discussions, one by one, after an explicit confirmation. On GitHub the
+//! drafts fill a pending review, submitted at once (see [`crate::forge::github`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,8 +17,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::forge::{
-    Capabilities, Forge, ForgeError, LinePoint, LineRange, NewComment, Position,
-    draft_note_payload, post_comment_request,
+    Capabilities, Forge, ForgeError, ForgeKind, LinePoint, LineRange, NewComment, Position,
+    draft_note_payload, github, post_comment_request,
 };
 use crate::model::{Diff, LineKind, Side};
 
@@ -470,6 +471,11 @@ pub struct Planned {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
+    #[serde(default)]
+    pub forge: ForgeKind,
+    /// Head commit the positions refer to (GitHub's `commit_id`).
+    #[serde(default)]
+    pub commit: String,
     pub mode: Mode,
     pub comments: Vec<Planned>,
     /// Stale drafts, not sent: `(id, reason)`.
@@ -523,11 +529,18 @@ pub fn plan(store: &CommentStore, diff: &Diff, shas: &Shas, caps: &Capabilities)
     for d in &store.drafts {
         let p = place(&d.anchor, diff);
         if let Anchor::Reply { discussion, author } = &d.anchor {
+            // GitHub cannot thread a reply to a general comment: it goes in
+            // the review body, mentioning the author.
+            let body = if caps.forge == ForgeKind::Github && github::is_general(discussion) {
+                format!("@{author} {}", d.body)
+            } else {
+                d.body.clone()
+            };
             comments.push(Planned {
                 draft: Some(d.id),
                 what: format!("reply to @{author}"),
                 comment: NewComment {
-                    body: d.body.clone(),
+                    body,
                     position: None,
                     in_reply_to: Some(discussion.clone()),
                 },
@@ -580,6 +593,8 @@ pub fn plan(store: &CommentStore, diff: &Diff, shas: &Shas, caps: &Capabilities)
         });
     }
     Plan {
+        forge: caps.forge,
+        commit: shas.head.clone(),
         mode,
         comments,
         skipped,
@@ -588,8 +603,12 @@ pub fn plan(store: &CommentStore, diff: &Diff, shas: &Shas, caps: &Capabilities)
 
 impl Plan {
     /// The HTTP requests, in order, for the project `project` (URL-encoded
-    /// path or id) and merge request `iid`.
+    /// path or id on GitLab, `owner/repo` on GitHub, see
+    /// [`ForgeKind::api_project`]) and merge request `iid`.
     pub fn requests(&self, project: &str, iid: &str) -> Vec<Request> {
+        if self.forge == ForgeKind::Github {
+            return self.github_requests(project, iid);
+        }
         let base = format!("/projects/{project}/merge_requests/{iid}");
         let mut out: Vec<Request> = self
             .comments
@@ -618,6 +637,48 @@ impl Plan {
                 body: None,
             });
         }
+        out
+    }
+}
+
+impl Plan {
+    /// GitHub: the pending review (created, or yours reused), one GraphQL
+    /// mutation per comment, then the submission; or, without drafts, each
+    /// comment posted right away.
+    fn github_requests(&self, project: &str, number: &str) -> Vec<Request> {
+        let post = |path: String, body: serde_json::Value| Request {
+            method: "POST".into(),
+            path,
+            body: Some(body),
+        };
+        let pending = self.comments.iter().filter(|c| c.remote_id.is_none());
+        if self.mode == Mode::Direct {
+            return pending
+                .map(|c| {
+                    let (path, body) = github::direct_request(project, number, &c.comment);
+                    post(path, body)
+                })
+                .collect();
+        }
+        if self.comments.is_empty() {
+            return Vec::new();
+        }
+        let base = format!("/repos/{project}/pulls/{number}/reviews");
+        let mut out = vec![post(
+            base.clone(),
+            github::create_review_payload(Some(&self.commit)),
+        )];
+        out.extend(pending.map(|c| {
+            let (mutation, input) = github::draft_mutation(&c.comment, ":review");
+            post(
+                "/graphql".into(),
+                serde_json::json!({ "mutation": mutation, "input": input }),
+            )
+        }));
+        out.push(post(
+            format!("{base}/:review/events"),
+            serde_json::json!({ "event": "COMMENT" }),
+        ));
         out
     }
 }

@@ -6,8 +6,9 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::config::{Config, LlmConfig};
-use crate::forge::Forge;
+use crate::forge::github::{self, Github};
 use crate::forge::gitlab::{self, Gitlab};
+use crate::forge::{self, Forge, ForgeKind};
 use crate::git::Git;
 use crate::llm::claude_command;
 
@@ -49,21 +50,46 @@ pub fn run(cwd: &Path, cfg: &Config) -> Vec<Check> {
         Ok(v) => check("git", Status::Ok, v),
         Err(e) => check("git", Status::Fail, e.to_string()),
     });
-    checks.push(match Git::discover(cwd) {
+    let repo = Git::discover(cwd);
+    checks.push(match &repo {
         Some(g) => check("repository", Status::Ok, g.dir().display().to_string()),
         None => check("repository", Status::Warn, "not inside a git repository"),
     });
 
-    checks.extend(gitlab_checks(cfg));
-
-    checks.push(match probe("glab", &["--version"]) {
-        Some(v) => check("glab", Status::Ok, v),
-        None => check(
-            "glab",
-            Status::Warn,
-            "not installed (GITLAB_TOKEN is used instead)",
-        ),
-    });
+    let remote = repo.and_then(|g| g.remote_url(&cfg.git.remote).ok());
+    let target = forge::detect(cfg, remote.as_deref(), None);
+    checks.push(check(
+        "forge",
+        Status::Ok,
+        format!("{} ({})", target.kind, target.reason),
+    ));
+    match target.kind {
+        ForgeKind::Gitlab => {
+            let mut cfg = cfg.clone();
+            cfg.gitlab.host = target.host;
+            checks.extend(gitlab_checks(&cfg));
+            checks.push(match probe("glab", &["--version"]) {
+                Some(v) => check("glab", Status::Ok, v),
+                None => check(
+                    "glab",
+                    Status::Warn,
+                    "not installed (GITLAB_TOKEN is used instead)",
+                ),
+            });
+        }
+        ForgeKind::Github => {
+            let host = target.host.unwrap_or_else(|| "github.com".into());
+            checks.extend(github_checks(cfg, &host));
+            checks.push(match probe("gh", &["--version"]) {
+                Some(v) => check("gh", Status::Ok, v),
+                None => check(
+                    "gh",
+                    Status::Warn,
+                    "not installed (GITHUB_TOKEN or [github] token is used instead)",
+                ),
+            });
+        }
+    }
 
     checks.push(match probe("nvim", &["--version"]) {
         Some(v) => {
@@ -158,6 +184,55 @@ fn gitlab_checks(cfg: &Config) -> Vec<Check> {
             Err(e) => check("gitlab api", Status::Fail, e.to_string()),
         },
     );
+    checks
+}
+
+fn github_checks(cfg: &Config, host: &str) -> Vec<Check> {
+    let (api, _) = github::api_urls(host);
+    let mut checks = vec![check(
+        "github host",
+        Status::Ok,
+        format!("{} (API {api})", gitlab::bare_host(host)),
+    )];
+    if let Some(ca) = &cfg.github.ca_cert {
+        checks.push(if ca.is_file() {
+            check("ca certificate", Status::Ok, ca.display().to_string())
+        } else {
+            check(
+                "ca certificate",
+                Status::Fail,
+                format!("{} not found", ca.display()),
+            )
+        });
+    }
+    // Only where the token comes from: never the token itself.
+    match github::find_token(host, cfg.github.token.as_deref()) {
+        Some((_, src)) => checks.push(check("github token", Status::Ok, format!("from {src}"))),
+        None => {
+            let bare = gitlab::bare_host(host);
+            let var = if api.contains("api.github.com") {
+                "GITHUB_TOKEN"
+            } else {
+                "GH_ENTERPRISE_TOKEN"
+            };
+            checks.push(check(
+                "github token",
+                Status::Fail,
+                format!("none: `gh auth login --hostname {bare}` or set {var}"),
+            ));
+            return checks;
+        }
+    }
+    let api_check =
+        Github::from_config(host, &cfg.github).and_then(|g| Ok((g.whoami()?, g.server_version()?)));
+    checks.push(match api_check {
+        Ok((login, version)) => check(
+            "github api",
+            Status::Ok,
+            format!("authenticated as {login} ({version})"),
+        ),
+        Err(e) => check("github api", Status::Fail, e.to_string()),
+    });
     checks
 }
 

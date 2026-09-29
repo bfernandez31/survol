@@ -1158,7 +1158,8 @@ impl App {
         match res {
             Ok(remote) => self.set_remote(remote),
             Err(e) => {
-                self.sh.notify(format!("GitLab discussions: {e}"));
+                let forge = self.sh.review.forge();
+                self.sh.notify(format!("{forge} discussions: {e}"));
                 self.remote_status = RemoteStatus::Failed(e);
             }
         }
@@ -1383,19 +1384,24 @@ impl App {
         if self.publishing.is_some() {
             return self.sh.notify("already publishing");
         }
+        let forge = self.sh.review.forge();
         let caps = match (&self.remote_status, &self.sh.remote) {
             (RemoteStatus::Ready, Some(r)) => r.capabilities.clone(),
             (RemoteStatus::Fetching(_), _) => {
-                return self
-                    .sh
-                    .notify("still asking GitLab for its version and discussions…");
+                return self.sh.notify(format!(
+                    "still asking {forge} for its version and discussions…"
+                ));
             }
             (RemoteStatus::Failed(e), _) => {
                 return self
                     .sh
-                    .notify(format!("cannot reach GitLab ({e}): r to retry"));
+                    .notify(format!("cannot reach {forge} ({e}): r to retry"));
             }
-            _ => return self.sh.notify("GitLab is not reachable: r to retry"),
+            _ => {
+                return self
+                    .sh
+                    .notify(format!("{forge} is not reachable: r to retry"));
+            }
         };
         let plan = comments::plan(
             &self.sh.comments,
@@ -1455,9 +1461,11 @@ impl App {
         self.publishing = None;
         self.sh.reload_comments();
         match res {
-            Ok(n) => self
-                .sh
-                .notify(format!("review published: {n} comment(s) on GitLab")),
+            Ok(n) => {
+                let forge = self.sh.review.forge();
+                self.sh
+                    .notify(format!("review published: {n} comment(s) on {forge}"))
+            }
             Err(e) => self.sh.notify(format!(
                 "publication failed: {e} (p retries, without duplicates)"
             )),
@@ -1818,6 +1826,8 @@ mod tests {
             start_sha: "s".into(),
             head_sha: "h".into(),
             web_url: String::new(),
+            forge: Default::default(),
+            host: String::new(),
         });
         let mut app = App::new(
             review,

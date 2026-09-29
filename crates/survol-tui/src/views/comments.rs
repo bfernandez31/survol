@@ -1072,6 +1072,8 @@ mod tests {
             PanelOutcome::AskPublish
         );
         let plan = comments::Plan {
+            forge: Default::default(),
+            commit: String::new(),
             mode: comments::Mode::Drafts,
             comments: vec![],
             skipped: vec![],

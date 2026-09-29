@@ -32,7 +32,7 @@ function M.check()
   end
 
   if vim.fn.executable("survol-cli") == 1 then
-    h.info("`survol-cli doctor` checks git, GitLab and the LLM CLI")
+    h.info("`survol-cli doctor` checks git, the forge (GitLab or GitHub) and the LLM CLI")
   end
   h.info("open_mode: " .. tostring(survol.config.open_mode))
 end

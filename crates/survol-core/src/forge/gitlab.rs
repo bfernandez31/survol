@@ -1,7 +1,6 @@
 //! GitLab REST API v4 client for a self-hosted instance.
 
 use std::process::Command;
-use std::time::Duration;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::blocking::{Client, Response};
@@ -9,14 +8,15 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use super::{
-    Discussion, DraftNote, Forge, ForgeError, NewComment, Result, draft_note_payload,
-    post_comment_request,
+    Discussion, DraftNote, Forge, ForgeError, ForgeKind, NewComment, Result, check_status,
+    draft_note_payload, http_client, post_comment_request,
 };
 use crate::config::GitlabConfig;
 use crate::model::MergeRequest;
 
 pub struct Gitlab {
     client: Client,
+    host: String,
     api: String,
     token: String,
 }
@@ -31,21 +31,9 @@ impl Gitlab {
     }
 
     pub fn new(host: &str, token: String, ca_cert: Option<&std::path::Path>) -> Result<Self> {
-        let mut builder = Client::builder()
-            .timeout(Duration::from_secs(60))
-            .user_agent(concat!("survol/", env!("CARGO_PKG_VERSION")));
-        if let Some(path) = ca_cert {
-            let ca_err = |message: String| ForgeError::CaCert {
-                path: path.display().to_string(),
-                message,
-            };
-            let pem = std::fs::read(path).map_err(|e| ca_err(e.to_string()))?;
-            let certs =
-                reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| ca_err(e.to_string()))?;
-            builder = builder.tls_certs_merge(certs);
-        }
         Ok(Self {
-            client: builder.build()?,
+            client: http_client(ca_cert)?,
+            host: host.to_string(),
             api: format!("{}/api/v4", base_url(host)),
             token,
         })
@@ -67,18 +55,7 @@ impl Gitlab {
     }
 
     fn send(&self, req: reqwest::blocking::RequestBuilder, url: String) -> Result<Response> {
-        let resp = req.bearer_auth(&self.token).send()?;
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(resp);
-        }
-        let mut body = resp.text().unwrap_or_default();
-        body.truncate(300);
-        Err(ForgeError::Status {
-            status: status.as_u16(),
-            url,
-            body,
-        })
+        check_status(req.bearer_auth(&self.token).send()?, url)
     }
 
     fn get_json<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
@@ -154,6 +131,10 @@ struct ApiMrVersion {
 }
 
 impl Forge for Gitlab {
+    fn kind(&self) -> ForgeKind {
+        ForgeKind::Gitlab
+    }
+
     fn server_version(&self) -> Result<String> {
         Ok(self.get_json::<ApiVersion>("/version", &[])?.version)
     }
@@ -191,6 +172,8 @@ impl Forge for Gitlab {
             start_sha: start.ok_or_else(missing)?,
             head_sha: head.ok_or_else(missing)?,
             web_url: mr.web_url,
+            forge: ForgeKind::Gitlab,
+            host: self.host.clone(),
         })
     }
 

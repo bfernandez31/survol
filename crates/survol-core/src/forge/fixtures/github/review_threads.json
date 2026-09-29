@@ -1,0 +1,168 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0wOFQxNToyMToxMlrOoE0K0A=="
+          },
+          "nodes": [
+            {
+              "id": "PRRT_kwDOAzJbyc6gTMKt",
+              "isResolved": true,
+              "isOutdated": true,
+              "path": "tests/misc.rs",
+              "line": null,
+              "startLine": null,
+              "diffSide": "RIGHT",
+              "startDiffSide": "RIGHT",
+              "subjectType": "LINE",
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 3959448455,
+                    "body": "What's the point of creating a file and then immediately removing it again?",
+                    "createdAt": "2026-09-08T15:18:05Z",
+                    "author": {
+                      "login": "ttencate"
+                    }
+                  },
+                  {
+                    "databaseId": 3959646796,
+                    "body": "Couldn't be sure, as it was used in `file_types_negate`.\r\n\r\nThere looks no point of having that though.\r\n\r\nMaybe it's worth to remote that from `file_types_negate` too.",
+                    "createdAt": "2026-09-08T15:39:07Z",
+                    "author": {
+                      "login": "yilmazhasan"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOAzJbyc6gTMbX",
+              "isResolved": true,
+              "isOutdated": true,
+              "path": "tests/misc.rs",
+              "line": null,
+              "startLine": null,
+              "diffSide": "RIGHT",
+              "startDiffSide": "RIGHT",
+              "subjectType": "LINE",
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 3959450104,
+                    "body": "Same here.",
+                    "createdAt": "2026-09-08T15:18:17Z",
+                    "author": {
+                      "login": "ttencate"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOAzJbyc6gTOdk",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "crates/core/flags/defs.rs",
+              "line": 2763,
+              "startLine": 2763,
+              "diffSide": "RIGHT",
+              "startDiffSide": null,
+              "subjectType": "LINE",
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 3959462471,
+                    "body": "Maybe refer to the new flag in the docs for `-g` as well, for discoverability?",
+                    "createdAt": "2026-09-08T15:19:41Z",
+                    "author": {
+                      "login": "ttencate"
+                    }
+                  },
+                  {
+                    "databaseId": 3959854601,
+                    "body": "That's added to `-g` docs with an example",
+                    "createdAt": "2026-09-08T16:01:57Z",
+                    "author": {
+                      "login": "yilmazhasan"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOAzJbyc6gTPgI",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "GUIDE.md",
+              "line": 320,
+              "startLine": 319,
+              "diffSide": "RIGHT",
+              "startDiffSide": "RIGHT",
+              "subjectType": "LINE",
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 3959468552,
+                    "body": "Seems superfluous to me.",
+                    "createdAt": "2026-09-08T15:20:22Z",
+                    "author": {
+                      "login": "ttencate"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_file",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "GUIDE.md",
+              "line": null,
+              "startLine": null,
+              "diffSide": "RIGHT",
+              "startDiffSide": null,
+              "subjectType": "FILE",
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 1,
+                    "body": "Whole-file remark (added by hand).",
+                    "createdAt": "2026-09-08T15:30:00Z",
+                    "author": null
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_left",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "crates/core/flags/defs.rs",
+              "line": 12,
+              "startLine": 10,
+              "diffSide": "LEFT",
+              "startDiffSide": "LEFT",
+              "subjectType": "LINE",
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 2,
+                    "body": "Removed lines 10-12 (added by hand).",
+                    "createdAt": "2026-09-08T15:31:00Z",
+                    "author": {
+                      "login": "ttencate"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

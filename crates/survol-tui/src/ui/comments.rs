@@ -6,7 +6,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use survol_core::comments::{self, Anchor, Mode, Placement};
-use survol_core::forge::gitlab::encode;
+use survol_core::forge::ForgeKind;
 
 use survol_core::model::LineKind;
 
@@ -67,18 +67,26 @@ fn first_line(s: &str) -> String {
 /// Where the review goes, for the panel's header.
 fn target_line(app: &App) -> Line<'static> {
     let sh = &app.sh;
+    let forge = sh.review.forge();
     match (&sh.review.mr, &app.remote_status) {
         (None, _) => Line::from(
             " local range: the drafts stay local (publishing needs a merge request)"
                 .fg(Color::Yellow),
         ),
         (Some(_), RemoteStatus::Fetching(since)) => {
-            Line::from(format!(" ⟳ asking GitLab… {}s", since.elapsed().as_secs()).fg(ACCENT))
+            Line::from(format!(" ⟳ asking {forge}… {}s", since.elapsed().as_secs()).fg(ACCENT))
         }
         (Some(_), RemoteStatus::Failed(e)) => {
-            Line::from(format!(" GitLab unreachable: {e} (r to retry)").fg(Color::Red))
+            Line::from(format!(" {forge} unreachable: {e} (r to retry)").fg(Color::Red))
         }
         (Some(_), _) => match &sh.remote {
+            Some(r) if r.capabilities.forge == ForgeKind::Github => Line::from(
+                format!(
+                    " GitHub ({}): drafts fill a pending review, submitted at once",
+                    r.capabilities.version
+                )
+                .dim(),
+            ),
             Some(r) if r.capabilities.draft_notes => Line::from(
                 format!(
                     " GitLab {}: drafts become draft notes, published at once",
@@ -93,7 +101,7 @@ fn target_line(app: &App) -> Line<'static> {
                 )
                 .fg(Color::Yellow),
             ),
-            None => Line::from(" GitLab: not fetched (r)".dim()),
+            None => Line::from(format!(" {forge}: not fetched (r)").dim()),
         },
     }
 }
@@ -130,7 +138,7 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
             let title = if name == "drafts" {
                 format!(" Drafts ({count})")
             } else {
-                format!(" Discussions on GitLab ({count})")
+                format!(" Discussions on {} ({count})", sh.review.forge())
             };
             lines.push(Line::from(title.bold()));
         }
@@ -254,7 +262,7 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
     let sh = &app.sh;
     let width = rect.width.saturating_sub(4) as usize;
     let (project, iid) = match &sh.review.mr {
-        Some(mr) => (encode(&mr.project), mr.iid.to_string()),
+        Some(mr) => (mr.forge.api_project(&mr.project), mr.iid.to_string()),
         None => (":project".into(), ":iid".into()),
     };
     let requests = plan.requests(&project, &iid);
@@ -262,15 +270,21 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
         .remote
         .as_ref()
         .map_or("?".to_string(), |r| r.capabilities.version.clone());
+    let github = plan.forge == ForgeKind::Github;
     let mut lines = vec![Line::from(
         format!(
-            " Publish {} comment(s) to {} (GitLab {version})?",
+            " Publish {} comment(s) to {} ({} {version})?",
             plan.comments.len(),
-            sh.review.title()
+            sh.review.title(),
+            plan.forge
         )
         .bold(),
     )];
     match plan.mode {
+        Mode::Drafts if github => lines.push(Line::from(
+            " One pending review, then one submission (COMMENT): the review appears at once."
+                .dim(),
+        )),
         Mode::Drafts => lines.push(Line::from(
             " Draft notes, then one bulk publish: the review appears at once.".dim(),
         )),
@@ -284,13 +298,18 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
         && plan.mode == Mode::Drafts
         && r.pending_drafts > 0
     {
-        lines.push(Line::from(
+        let text = if github {
+            format!(
+                " ⚠ your pending review on GitHub already holds {} comment(s): they are submitted too.",
+                r.pending_drafts
+            )
+        } else {
             format!(
                 " ⚠ bulk publish also publishes your {} pending draft note(s) already on GitLab.",
                 r.pending_drafts
             )
-            .fg(Color::Yellow),
-        ));
+        };
+        lines.push(Line::from(text.fg(Color::Yellow)));
     }
     if !plan.skipped.is_empty() {
         lines.push(Line::from(

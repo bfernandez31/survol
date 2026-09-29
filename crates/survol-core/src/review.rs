@@ -3,8 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::forge::gitlab::Gitlab;
-use crate::forge::{Capabilities, Discussion, Forge, ForgeError, MrRef, project_from_remote};
+use crate::forge::{
+    self, Capabilities, Discussion, Forge, ForgeError, ForgeKind, ForgeTarget, MrRef,
+    project_from_remote,
+};
 use crate::git::Git;
 use crate::graph::{self, Graph};
 use crate::group::{self, Grouping};
@@ -23,7 +25,7 @@ pub enum Target {
 }
 
 impl Target {
-    /// `123`, `!123`, a MR URL, `base..head`, or nothing.
+    /// `123`, `!123`, `#123`, a MR / PR URL, `base..head`, or nothing.
     pub fn parse(arg: Option<&str>) -> Result<Self> {
         let Some(arg) = arg.map(str::trim).filter(|a| !a.is_empty()) else {
             return Ok(Self::MergeRequest(None));
@@ -39,7 +41,7 @@ impl Target {
             });
         }
         Err(Error::Target(format!(
-            "`{arg}` is neither a merge request (number or URL) nor a range base..head"
+            "`{arg}` is neither a merge / pull request (number or URL) nor a range base..head"
         )))
     }
 }
@@ -61,9 +63,14 @@ pub struct Review {
 impl Review {
     pub fn title(&self) -> String {
         match &self.mr {
-            Some(mr) => format!("!{} {}", mr.iid, mr.title),
+            Some(mr) => format!("{} {}", mr.reference(), mr.title),
             None => format!("{}..{}", short(&self.base_sha), short(&self.head_sha)),
         }
+    }
+
+    /// The forge of the merge request (GitLab for a local range).
+    pub fn forge(&self) -> ForgeKind {
+        self.mr.as_ref().map(|m| m.forge).unwrap_or_default()
     }
 
     pub fn state_path(&self) -> Result<PathBuf> {
@@ -97,9 +104,15 @@ pub fn open(
     let (mr, base_sha, head_sha, state_key, worktree) = match target {
         Target::MergeRequest(mr_ref) => {
             progress("fetching merge request metadata");
-            let forge = Gitlab::from_config(&cfg.gitlab)?;
-            let mr = resolve_mr(repo, cfg, &forge, mr_ref.as_ref())?;
+            let remote_url = repo.remote_url(&cfg.git.remote).ok();
+            let target = forge::detect(cfg, remote_url.as_deref(), mr_ref.as_ref());
+            let forge = forge::connect(cfg, &target)?;
+            let mut mr = resolve_mr(repo, cfg, forge.as_ref(), mr_ref.as_ref())?;
             fetch_shas(repo, cfg, &mr, &mut progress)?;
+            if mr.forge == ForgeKind::Github {
+                // GitHub diffs from the merge base, which the API does not give.
+                mr.base_sha = repo.merge_base(&mr.start_sha, &mr.head_sha)?;
+            }
             let key = format!("mr-{}", mr.iid);
             let wt = repo.survol_dir()?.join("worktrees").join(&key);
             (Some(mr.clone()), mr.base_sha, mr.head_sha, key, wt)
@@ -412,14 +425,29 @@ pub struct RemoteReview {
     pub pending_drafts: usize,
 }
 
+/// A client for the forge of `mr`.
+pub fn connect(mr: &MergeRequest, cfg: &Config) -> Result<Box<dyn Forge + Send>> {
+    let host = Some(mr.host.clone()).filter(|h| !h.is_empty());
+    let target = ForgeTarget {
+        kind: mr.forge,
+        host: match mr.forge {
+            // GitLab: the configured host, as before (else the URL's).
+            ForgeKind::Gitlab => cfg.gitlab.host.clone().or(host),
+            ForgeKind::Github => host,
+        },
+        reason: String::new(),
+    };
+    Ok(forge::connect(cfg, &target)?)
+}
+
 /// Instance version, discussions and pending drafts of the review's merge
 /// request; `None` for a local range. Network calls: run in the background.
 pub fn fetch_remote(review: &Review, cfg: &Config) -> Result<Option<RemoteReview>> {
     let Some(mr) = &review.mr else {
         return Ok(None);
     };
-    let forge = Gitlab::from_config(&cfg.gitlab)?;
-    let capabilities = Capabilities::from_version(&forge.server_version()?);
+    let forge = connect(mr, cfg)?;
+    let capabilities = forge.capabilities()?;
     let discussions = forge.discussions(&mr.project, mr.iid)?;
     let pending_drafts = if capabilities.draft_notes {
         forge
@@ -450,9 +478,17 @@ pub fn publish(
             "publishing needs a merge request: the drafts of a local range stay local".into(),
         ));
     };
-    let forge = Gitlab::from_config(&cfg.gitlab)?;
-    comments::publish(&forge, &mr.project, mr.iid, plan, store, path, progress)
-        .map_err(|e| Error::Target(e.to_string()))
+    let forge = connect(mr, cfg)?;
+    comments::publish(
+        forge.as_ref(),
+        &mr.project,
+        mr.iid,
+        plan,
+        store,
+        path,
+        progress,
+    )
+    .map_err(|e| Error::Target(e.to_string()))
 }
 
 fn read_instructions(repo_root: &Path) -> Result<Option<String>> {
@@ -498,7 +534,7 @@ fn fetch_shas(
     let remote = cfg.git.remote.as_str();
     if !repo.has_commit(&mr.head_sha) {
         progress("fetching merge request head");
-        repo.fetch_merge_request(remote, mr.iid)?;
+        repo.fetch_merge_request(remote, mr.forge, mr.iid)?;
     }
     for sha in [&mr.base_sha, &mr.start_sha] {
         if !repo.has_commit(sha) {
@@ -511,9 +547,9 @@ fn fetch_shas(
     }
     if !repo.has_commit(&mr.head_sha) {
         return Err(Error::Target(format!(
-            "head {} of !{} is not reachable after fetch",
+            "head {} of {} is not reachable after fetch",
             short(&mr.head_sha),
-            mr.iid
+            mr.reference()
         )));
     }
     Ok(())

@@ -141,9 +141,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::Yellow),
         ));
     }
+    let forge = sh.review.forge();
     match &app.remote_status {
-        RemoteStatus::Fetching(_) => spans.push(" ⟳ GitLab ".fg(ACCENT)),
-        RemoteStatus::Failed(_) => spans.push(" GitLab ✗ ".fg(Color::Red)),
+        RemoteStatus::Fetching(_) => spans.push(format!(" ⟳ {forge} ").fg(ACCENT)),
+        RemoteStatus::Failed(_) => spans.push(format!(" {forge} ✗ ").fg(Color::Red)),
         RemoteStatus::Ready => {
             let open = sh
                 .discussions()

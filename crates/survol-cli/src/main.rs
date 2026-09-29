@@ -12,8 +12,7 @@ use survol_core::comments::{self, CommentStore};
 use survol_core::config::Config;
 use survol_core::doctor::{self, Status};
 use survol_core::flows;
-use survol_core::forge::gitlab::{Gitlab, encode};
-use survol_core::forge::{Capabilities, Forge};
+use survol_core::forge::Capabilities;
 use survol_core::git::Git;
 use survol_core::graph::{EdgeKind, Graph, Link, SymIdx, SymbolKind};
 use survol_core::llm::ClaudeCli;
@@ -34,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Check git, GitLab access, nvim and the LLM CLI.
+    /// Check git, the forge (GitLab or GitHub) access, nvim and the LLM CLI.
     Doctor {
         /// Output JSON instead of a table.
         #[arg(long)]
@@ -44,17 +43,17 @@ enum Cmd {
     Config,
     /// Fetch a merge request and check it out in its worktree.
     Fetch {
-        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
         target: Option<String>,
     },
     /// Print the parsed diff of a merge request or range as JSON.
     Diff {
-        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
         target: Option<String>,
     },
     /// Group the hunks by functional capability and layer (Stack view), as JSON.
     Group {
-        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Ignore the cached grouping and call the LLM again.
         #[arg(long)]
@@ -70,7 +69,7 @@ enum Cmd {
     /// Code graph (tree-sitter): changed symbols with their callers, callees
     /// and tests, as JSON.
     Graph {
-        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Only the symbols with this name (`find`, or `OwnerService.find`),
         /// changed or not.
@@ -94,7 +93,7 @@ enum Cmd {
     /// (HTTP endpoint, front-end route, listener, job, runner) down to
     /// persistence and external calls, with their before / after, as JSON.
     Flows {
-        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Only the flows whose entry label, name or id contains NAME
         /// (`GET /api/owners`, `OwnerController.show`...).
@@ -139,14 +138,14 @@ enum Cmd {
     /// The local draft comments (with where they land in the current diff)
     /// and, for a merge request, its discussions, as JSON.
     Comments {
-        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
         target: Option<String>,
     },
     /// Publish the draft comments to the merge request: GitLab draft notes,
     /// then one bulk publish (or discussions one by one on instances without
-    /// draft notes).
+    /// draft notes); on GitHub, one pending review, then one submission.
     Publish {
-        /// MR number, `!number`, MR URL, or `base..head`. Empty: MR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Print the exact API requests without sending anything.
         #[arg(long)]
@@ -461,16 +460,13 @@ fn run() -> Result<ExitCode> {
             let path = review::comments_path(&r)?;
             let mut store = CommentStore::load(&path)?;
             let caps = match &r.mr {
-                Some(_) => {
-                    let forge = Gitlab::from_config(&cfg.gitlab)?;
-                    Capabilities::from_version(&forge.server_version()?)
-                }
+                Some(mr) => review::connect(mr, &cfg)?.capabilities()?,
                 // A local range: nothing to ask, assume a recent instance.
                 None => Capabilities::from_version("unknown"),
             };
             let plan = comments::plan(&store, &r.diff, &review::shas(&r), &caps);
             let (project, iid) = match &r.mr {
-                Some(mr) => (encode(&mr.project), mr.iid.to_string()),
+                Some(mr) => (mr.forge.api_project(&mr.project), mr.iid.to_string()),
                 None => (":project".to_string(), ":iid".to_string()),
             };
             let out = json!({
