@@ -540,6 +540,7 @@ impl App {
         self.stack.reorder_with_graph(&self.sh, &g);
         self.sh.graph = Some(g);
         self.graph.on_graph_ready(&self.sh);
+        self.diff.on_graph_ready(&self.sh);
     }
 
     /// The heuristic graph is ready and the worktree checked out: refine the
@@ -1999,6 +2000,75 @@ mod tests {
         app.on_key(key('g'));
         app.on_key(key('f'));
         assert!(matches!(app.popup, Some(Popup::File(_))));
+    }
+
+    #[test]
+    fn file_explorer_folds_reviews_directories_and_switches_mode() {
+        use crate::views::explorer::{Mode, SideItem};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        let kinds = |app: &App| -> Vec<String> {
+            app.diff
+                .sidebar
+                .iter()
+                .map(|it| match it {
+                    SideItem::Dir { label, .. } => format!("{label}/"),
+                    SideItem::File { file, .. } => format!("#{file}"),
+                })
+                .collect()
+        };
+        assert_eq!(kinds(&app), ["src/", "#0", "#1", "#2", "#3"]);
+        app.on_key(ctrl('h'));
+        assert_eq!(app.diff.side_sel, 1, "on the current file");
+        // h: up to the directory, then fold it; l unfolds it.
+        app.on_key(key('h'));
+        assert_eq!(app.diff.side_sel, 0);
+        app.on_key(key('h'));
+        assert_eq!(kinds(&app), ["src/", "#2", "#3"]);
+        let screen = crate::ui::tests::screen(&mut app, 120, 20).join("\n");
+        assert!(screen.contains("▸ src"), "{screen}");
+        assert!(screen.contains("2 files +3 -3 0/2"), "{screen}");
+        app.on_key(key('l'));
+        assert_eq!(kinds(&app).len(), 5);
+        // space on the directory: both its files reviewed.
+        app.on_key(key(' '));
+        let d = &app.sh.review.diff;
+        assert!(app.sh.state.is_file_reviewed(d, 0) && app.sh.state.is_file_reviewed(d, 1));
+        assert!(!app.sh.state.is_file_reviewed(d, 2));
+        // zM / zR in the list: directories, not the files of the diff.
+        app.on_key(key('z'));
+        app.on_key(key('M'));
+        assert_eq!(kinds(&app).len(), 3);
+        app.on_key(key('z'));
+        app.on_key(key('R'));
+        assert_eq!(kinds(&app).len(), 5);
+        // m: pairs, then flat, remembered in the review state.
+        app.on_key(key('m'));
+        assert_eq!(app.diff.explorer, Mode::Pairs);
+        let saved = ReviewState::load(&dir.path().join("state.json")).unwrap();
+        assert_eq!(saved.explorer.as_deref(), Some("pairs"));
+        let screen = crate::ui::tests::screen(&mut app, 120, 20).join("\n");
+        assert!(screen.contains("m: pairs"), "{screen}");
+        app.on_key(key('m'));
+        assert_eq!(kinds(&app), ["#0", "#1", "#2", "#3"]);
+        let screen = crate::ui::tests::screen(&mut app, 120, 20).join("\n");
+        assert!(screen.contains("✓ M a.rs +2 -2"), "{screen}");
+        // A new session starts in the last mode.
+        let (review, _) = fixture(dir.path());
+        let app = App::new(
+            review,
+            saved,
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        assert_eq!(app.diff.explorer, Mode::Pairs);
     }
 
     #[test]

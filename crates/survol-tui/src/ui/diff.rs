@@ -6,10 +6,11 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use super::rows::{RowOpts, file_stats, render_row, status_letter, truncate_left, truncate_right};
+use super::graph::clip;
+use super::rows::{RowOpts, file_stats, render_row, status_letter, truncate_left};
 use super::{ACCENT, CURSOR_BG, pane};
 use crate::app::App;
-use crate::views::diff::SideItem;
+use crate::views::explorer::{self, Role, SideItem};
 use crate::views::{Focus, Layout, Row};
 
 pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
@@ -27,56 +28,157 @@ pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
     render_diff(f, diff_area, app);
 }
 
+/// Left part cut to leave room for the right part, padded between.
+fn sides(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let rw: usize = right.iter().map(Span::width).sum();
+    let room = width.saturating_sub(rw);
+    let mut line = clip(left, room);
+    let used = line.width();
+    if used < room {
+        line.spans.push(" ".repeat(room - used).into());
+    }
+    line.spans.extend(right);
+    line
+}
+
+/// `fr.gouv.finances.douane.app` → `fr.gouv…douane.app` when too long.
+fn abbreviate_package(p: &str, max: usize) -> String {
+    let parts: Vec<&str> = p.split('.').collect();
+    if p.chars().count() <= max || parts.len() < 5 {
+        return truncate_left(p, max);
+    }
+    let short = format!(
+        "{}.{}…{}.{}",
+        parts[0],
+        parts[1],
+        parts[parts.len() - 2],
+        parts[parts.len() - 1]
+    );
+    truncate_left(&short, max)
+}
+
 fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let (v, diff) = (&app.diff, &app.sh.review.diff);
+    let (v, diff, state) = (&app.diff, &app.sh.review.diff, &app.sh.state);
     let focused = v.focus == Focus::List;
     let width = area.width.saturating_sub(2) as usize;
+    let reviewed: Vec<bool> = (0..diff.files.len())
+        .map(|i| state.is_file_reviewed(diff, i))
+        .collect();
+    let flat = v.explorer == explorer::Mode::Flat;
     let items: Vec<ListItem> = v
         .sidebar
         .iter()
         .map(|item| match item {
-            SideItem::Dir(d) => {
-                let d = if d.is_empty() {
-                    "./".to_string()
+            SideItem::Dir {
+                key,
+                depth,
+                label,
+                note,
+                files,
+            } => {
+                let folded = v.is_dir_folded(key);
+                let done = files.iter().filter(|&&f| reviewed[f]).count();
+                let mut left = vec![
+                    Span::raw("  ".repeat(*depth as usize)),
+                    Span::styled(if folded { "▸ " } else { "▾ " }, Style::new().fg(ACCENT)),
+                    Span::styled(format!("{label} "), Style::new().fg(Color::Blue)),
+                ];
+                if !note.is_empty() {
+                    left.push(Span::styled(
+                        abbreviate_package(note, 28),
+                        Style::new().add_modifier(Modifier::DIM),
+                    ));
+                }
+                let mut right = Vec::new();
+                if folded {
+                    let (a, r) = files.iter().fold((0, 0), |(a, r), &f| {
+                        let (x, y) = file_stats(diff, f);
+                        (a + x, r + y)
+                    });
+                    right.push(format!(" {} files +{a} -{r}", files.len()).dim());
+                }
+                right.push(if done == files.len() {
+                    format!(" ✓ {done}/{}", files.len()).fg(Color::Green)
                 } else {
-                    format!("{d}/")
-                };
-                ListItem::new(Line::from(truncate_left(&d, width).fg(Color::Blue)))
+                    format!(" {done}/{}", files.len()).dim()
+                });
+                ListItem::new(sides(left, right, width))
             }
-            SideItem::File(i) => {
+            SideItem::File {
+                file: i,
+                depth,
+                prefix,
+                role,
+                place,
+            } => {
                 let file = &diff.files[*i];
-                let reviewed = app.sh.state.is_file_reviewed(diff, *i);
                 let (letter, color) = status_letter(file.status);
                 let name = file.path.rsplit('/').next().unwrap_or(&file.path);
                 let (a, r) = file_stats(diff, *i);
-                let stats = format!(" +{a} -{r}");
-                let mark = if reviewed { "✓ " } else { "  " };
-                let room = width.saturating_sub(4 + stats.len());
                 let mut name_style = Style::new();
-                if reviewed || file.is_generated {
+                if reviewed[*i] || file.is_generated {
                     name_style = name_style.add_modifier(Modifier::DIM);
                 }
                 if *i == v.current_file() && !focused {
                     name_style = name_style.add_modifier(Modifier::BOLD).fg(ACCENT);
                 }
-                ListItem::new(Line::from(vec![
-                    Span::styled(mark, Style::new().fg(Color::Green)),
-                    Span::styled(letter, Style::new().fg(color)),
-                    " ".into(),
-                    Span::styled(truncate_right(name, room), name_style),
-                    stats.dim(),
-                ]))
+                let mut left = vec![
+                    Span::raw("  ".repeat(*depth as usize)),
+                    Span::styled(
+                        if reviewed[*i] { "✓ " } else { "  " },
+                        Style::new().fg(Color::Green),
+                    ),
+                ];
+                if let Role::Test { .. } = role {
+                    left.push("└ ⚗ ".dim());
+                }
+                left.push(Span::styled(letter, Style::new().fg(color)));
+                left.push(" ".into());
+                if !prefix.is_empty() {
+                    left.push(prefix.clone().dim());
+                }
+                left.push(Span::styled(name.to_string(), name_style));
+                match role {
+                    Role::Test { by_graph: true } => left.push(" (graph)".dim()),
+                    Role::Class { tested: false } => left.push(" ⚠ no test".fg(Color::Yellow)),
+                    _ => {}
+                }
+                let mut stats = format!(" +{a}");
+                if r > 0 {
+                    stats.push_str(&format!(" -{r}"));
+                }
+                let right = if flat {
+                    // The name first, where it lives after, cut on the left.
+                    left.push(stats.dim());
+                    let used: usize = left.iter().map(Span::width).sum();
+                    let room = width.saturating_sub(used + 2);
+                    if room > 4 {
+                        vec![format!("  {}", truncate_left(place, room)).dim()]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    vec![stats.dim()]
+                };
+                ListItem::new(sides(left, right, width))
             }
         })
         .collect();
 
+    let (done, total) = (reviewed.iter().filter(|r| **r).count(), diff.files.len());
     let title = if v.filter.is_empty() {
-        format!(" files ({}) ", diff.files.len())
+        format!(" files ({total}) · {done}/{total} ✓ ")
     } else {
         format!(" files /{} ", v.filter)
     };
     let list = List::new(items)
-        .block(pane(focused).title(title))
+        .block(
+            pane(focused).title(title).title(
+                Line::from(format!(" m: {} ", v.explorer.name()))
+                    .right_aligned()
+                    .dim(),
+            ),
+        )
         .highlight_style(if focused {
             Style::new().bg(CURSOR_BG).add_modifier(Modifier::BOLD)
         } else {
@@ -127,4 +229,18 @@ fn render_diff(f: &mut Frame, area: Rect, app: &mut App) {
         lines.push(render_row(&mut app.sh, row, opts));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::abbreviate_package;
+
+    #[test]
+    fn abbreviates_long_packages_in_the_middle() {
+        assert_eq!(
+            abbreviate_package("fr.gouv.finances.douane.surveillance.mathieu", 30),
+            "fr.gouv…surveillance.mathieu"
+        );
+        assert_eq!(abbreviate_package("com.acme.app", 30), "com.acme.app");
+    }
 }

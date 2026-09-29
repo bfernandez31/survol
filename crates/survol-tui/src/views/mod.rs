@@ -3,6 +3,7 @@
 pub mod ask;
 pub mod comments;
 pub mod diff;
+pub mod explorer;
 pub mod fileview;
 pub mod flows;
 pub mod graph;

@@ -199,7 +199,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(
             match app.view {
                 View::Diff => {
-                    " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  gf file  e edit  / filter  ? help"
+                    " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  gf file  e edit  / filter  m files  ? help"
                 }
                 View::Stack => {
                     " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  c comment  V range  P review  a ask  gs graph  gf file  R regroup  ? help"
@@ -253,8 +253,11 @@ const HELP: &[(&str, &str)] = &[
     ("space", "toggle hunk reviewed, go to next"),
     ("r / v", "toggle file reviewed (folds it)"),
     ("o / za, Enter on header", "fold / unfold file"),
-    ("zM / zR", "fold / unfold all"),
+    ("zM / zR", "fold / unfold all (list: every directory)"),
     ("/", "filter files, Esc to clear"),
+    ("m", "files: tree → pairs (classes and tests) → flat"),
+    ("h / l (list)", "fold / unfold directory, parent"),
+    ("space on a directory", "mark all its files reviewed"),
     ("gs", "Graph view of the symbol under the cursor"),
     (
         "c",

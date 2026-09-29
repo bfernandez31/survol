@@ -52,10 +52,27 @@ view is usable at once; the worktree, the grouping and the graph are built in th
 
 ![Diff view: file tree on the left, the whole diff as one stream on the right](docs/screenshots/diff-view.png)
 
-Every file in one continuous stream, with a directory-ordered file tree, syntax
-highlighting, unified or split (`s`) layout. Mark hunks (`space`) or files (`r`) as
-reviewed, jump to the next unreviewed hunk (`u`), filter files (`/`), fold files.
-`gs` jumps to the Graph view of the symbol under the cursor.
+Every file in one continuous stream, with a file explorer, syntax highlighting, unified
+or split (`s`) layout. Mark hunks (`space`) or files (`r`) as reviewed, jump to the next
+unreviewed hunk (`u`), filter files (`/`), fold files. `gs` jumps to the Graph view of
+the symbol under the cursor.
+
+The explorer on the left has three modes, `m` cycles through them (the choice is kept
+with the review):
+
+- **tree** (default): a compact, foldable tree. Each module shows its source sets as
+  separate branches (`main`, `test`, `openapi`, `test/resources`...), with the package
+  root they share shown once; a chain of single directories is one line, a directory
+  holding a single file is merged into the file's line. Each directory shows how many of
+  its files are reviewed, and once folded its file count and `+` / `-`.
+- **pairs**: each changed class with the tests changed with it beneath (matched by name,
+  `Foo` / `FooTest` / `FooIT` / `Foo*IT` / `foo.spec.ts`, then by the test and call edges
+  of the code graph once built, marked `(graph)`); classes without a changed test are
+  flagged `⚠ no test`.
+- **flat**: one line per file, the name first, where it lives after it.
+
+In the list, `h` / `l` fold / unfold a directory, `zM` / `zR` fold / unfold them all,
+`space` on a directory marks all its files reviewed (again: unreviewed).
 
 ### Stack view
 
@@ -376,8 +393,11 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `space` | toggle hunk reviewed, go to next |
 | `r` / `v` | toggle file reviewed (folds it) |
 | `o` / `za`, `Enter` on header | fold / unfold file |
-| `zM` / `zR` | fold / unfold all |
+| `zM` / `zR` | fold / unfold all (in the list: every directory) |
 | `/` | filter files, `Esc` to clear |
+| `m` | file list: tree → pairs (classes and their tests) → flat |
+| `h` / `l` (list) | fold / unfold directory, parent |
+| `space` on a directory (list) | mark all its files reviewed |
 | `gs` | Graph view of the symbol under the cursor |
 | `c` | comment the line (on a draft: edit; on a thread: reply) |
 | `V` then `c` | select lines, comment the range |
