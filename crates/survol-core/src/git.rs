@@ -1,10 +1,21 @@
 //! Thin wrapper over the `git` binary.
 //!
 //! Shelling out keeps behaviour identical to the user's command line: same
-//! credentials, SSH config, `refs/merge-requests/*` support and rename detection.
+//! credentials, SSH config, `refs/merge-requests/*` / `refs/pull/*` support
+//! and rename detection.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use crate::forge::ForgeKind;
+
+/// The server-side ref of a merge / pull request's head.
+pub fn head_ref(forge: ForgeKind, iid: u64) -> String {
+    match forge {
+        ForgeKind::Gitlab => format!("refs/merge-requests/{iid}/head"),
+        ForgeKind::Github => format!("refs/pull/{iid}/head"),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -108,10 +119,16 @@ impl Git {
         self.bytes(&args).map(drop)
     }
 
-    /// Fetches the head of merge request `iid` into `refs/survol/mr/<iid>`.
-    pub fn fetch_merge_request(&self, remote: &str, iid: u64) -> Result<()> {
-        let spec = format!("+refs/merge-requests/{iid}/head:refs/survol/mr/{iid}");
+    /// Fetches the head of merge request `iid` into `refs/survol/mr/<iid>`:
+    /// `refs/merge-requests/<iid>/head` on GitLab, `refs/pull/<n>/head` on
+    /// GitHub.
+    pub fn fetch_merge_request(&self, remote: &str, forge: ForgeKind, iid: u64) -> Result<()> {
+        let spec = format!("+{}:refs/survol/mr/{iid}", head_ref(forge, iid));
         self.fetch(remote, &[&spec])
+    }
+
+    pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
+        self.text(&["merge-base", a, b])
     }
 
     /// Raw `git diff -M base head`, in the format expected by [`crate::diff::parse`].
@@ -273,6 +290,42 @@ mod tests {
             std::fs::read_to_string(wt.join("a.txt")).unwrap(),
             "one\n2\n"
         );
+    }
+
+    #[test]
+    fn fetches_pull_and_merge_request_heads() {
+        use crate::forge::ForgeKind;
+        let tmp = tempfile::tempdir().unwrap();
+        for d in ["server", "local"] {
+            std::fs::create_dir_all(tmp.path().join(d)).unwrap();
+        }
+        let server = repo(&tmp.path().join("server"));
+        let base = commit(&server, &[("a.txt", "1\n")], "base");
+        let head = commit(&server, &[("a.txt", "2\n")], "head");
+        server
+            .bytes(&["update-ref", "refs/pull/7/head", &head])
+            .unwrap();
+        server
+            .bytes(&["update-ref", "refs/merge-requests/8/head", &head])
+            .unwrap();
+        server
+            .bytes(&["reset", "--quiet", "--hard", &base])
+            .unwrap();
+
+        let local = repo(&tmp.path().join("local"));
+        let remote = tmp.path().join("server").display().to_string();
+        local.bytes(&["remote", "add", "origin", &remote]).unwrap();
+        local.fetch("origin", &["main"]).unwrap();
+        assert!(!local.has_commit(&head));
+        local
+            .fetch_merge_request("origin", ForgeKind::Github, 7)
+            .unwrap();
+        assert_eq!(local.rev_parse("refs/survol/mr/7").unwrap(), head);
+        local
+            .fetch_merge_request("origin", ForgeKind::Gitlab, 8)
+            .unwrap();
+        assert_eq!(local.rev_parse("refs/survol/mr/8").unwrap(), head);
+        assert_eq!(local.merge_base(&base, &head).unwrap(), base);
     }
 
     #[test]

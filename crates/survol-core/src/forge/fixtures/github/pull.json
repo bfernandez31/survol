@@ -1,0 +1,26 @@
+{
+  "number": 3529,
+  "node_id": "PR_kwDOAzJbyc8AAAABCrX8vg",
+  "title": "Implement glob-not `-G`",
+  "body": "New options  `-G` / `--glob-not` are added as a negation of `-g` / `--glob`:\r\n\r\nCloses #3522\r\n\r\nE.g. `-G tests` is equivalent to `-g '!tests'`\r\n\r\nMoreover, negation of glob-not is also possible in case:\r\n\r\nE.g. `-G '!tests' is equivalent to `-g tests``\r\n\r\nThis is inspired as analogous to how `-T/--type-not` relates to `-t/--type`",
+  "state": "open",
+  "draft": false,
+  "html_url": "https://github.com/BurntSushi/ripgrep/pull/3529",
+  "head": {
+    "ref": "new-feature/glob-not",
+    "sha": "2c17dbd768fa141b14aa9ce42e9ba681e2945813",
+    "repo": {
+      "full_name": "yilmazhasan/ripgrep"
+    }
+  },
+  "base": {
+    "ref": "master",
+    "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+    "repo": {
+      "full_name": "BurntSushi/ripgrep"
+    }
+  },
+  "user": {
+    "login": "yilmazhasan"
+  }
+}

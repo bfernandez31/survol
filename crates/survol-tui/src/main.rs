@@ -3,6 +3,8 @@
 mod app;
 mod editor;
 mod highlight;
+mod intraline;
+mod theme;
 mod ui;
 mod views;
 
@@ -25,12 +27,13 @@ use crate::app::{App, GraphStatus};
     version,
     about = "A bird's-eye view of large pull requests",
     long_about = "A bird's-eye view of large pull requests.\n\n\
-        Opens a GitLab merge request (or a local range) in a terminal review UI. \
+        Opens a GitLab merge request or a GitHub pull request (or a local range) \
+        in a terminal review UI. \
         Run `survol-cli doctor` to check your setup."
 )]
 struct Cli {
-    /// Merge request number (`123`, `!123`), merge request URL, or local range
-    /// `base..head`. Empty: the merge request of the current branch.
+    /// Merge / pull request number (`123`, `!123`, `#123`), its URL, or local
+    /// range `base..head`. Empty: the merge / pull request of the current branch.
     target: Option<String>,
     /// Repository to work in (defaults to the current directory).
     #[arg(short = 'C', long)]
@@ -62,6 +65,7 @@ fn main() -> Result<()> {
     cfg.llm.enabled &= !cli.no_llm;
     cfg.lsp.enabled &= !cli.no_lsp;
     cfg.llm.override_language(cli.lang.as_deref());
+    theme::init(theme::Theme::from_config(&cfg.theme).map_err(anyhow::Error::msg)?);
     let target = Target::parse(cli.target.as_deref())?;
 
     let review = review::open(&repo, &cfg, &target, |m| eprintln!("· {m}"))?;

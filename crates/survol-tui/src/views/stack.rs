@@ -152,6 +152,8 @@ pub struct StackView {
     pending: Option<char>,
     /// Other end of a `V` selection (content row index).
     pub visual: Option<usize>,
+    /// [`NoteIndex::generation`](crate::views::comments::NoteIndex) the rows were built with.
+    pub notes_gen: u64,
 }
 
 impl StackView {
@@ -298,6 +300,7 @@ impl StackView {
 
     fn build_content(&mut self, sh: &Shared) {
         self.rows.clear();
+        self.notes_gen = sh.notes.generation;
         self.visual = None;
         self.pos = Scroll {
             height: self.pos.height,
@@ -370,8 +373,29 @@ impl StackView {
     /// the cursor on the same line, else the same hunk.
     pub fn relayout(&mut self, sh: &Shared) {
         let at = self.cursor_hunk();
+        let note = match self.rows.get(self.pos.cursor) {
+            Some(StackRow::Diff(Row::Comment { note, part, .. })) => Some((*note, *part)),
+            _ => None,
+        };
+        let file_note = note.is_some() && at.is_none();
+        let old_cursor = self.pos.cursor;
         let offset = self.pos.cursor.saturating_sub(self.pos.scroll);
         self.build_content(sh);
+        let diff_row = |r: &StackRow| match r {
+            StackRow::Diff(r) => *r,
+            _ => Row::Spacer,
+        };
+        if file_note && let Some(n) = note {
+            // A note on a file: under its header, near where it was.
+            let from = self.rows[..old_cursor.min(self.rows.len())]
+                .iter()
+                .rposition(|r| matches!(r, StackRow::File(_)))
+                .unwrap_or(0);
+            self.pos.cursor = super::note_row(&self.rows, from, n, diff_row);
+            self.pos.scroll = self.pos.cursor.saturating_sub(offset);
+            self.pos.clamp(self.rows.len());
+            return;
+        }
         let Some((h, line)) = at else {
             return;
         };
@@ -383,7 +407,10 @@ impl StackView {
             _ => false,
         };
         if let Some(r) = self.rows.iter().position(same_line) {
-            self.pos.cursor = r;
+            self.pos.cursor = match note {
+                Some(n) => super::note_row(&self.rows, r, n, diff_row),
+                None => r,
+            };
             self.pos.scroll = r.saturating_sub(offset);
             self.pos.clamp(self.rows.len());
         } else if let Some(r) = self
@@ -489,6 +516,30 @@ impl StackView {
             Node::File { group, .. } => self.folded[group] = true,
         }
         self.refresh_tree(sh);
+    }
+
+    /// The note under the content cursor, if any.
+    fn cursor_note(&self) -> Option<u32> {
+        match self.rows.get(self.pos.cursor)? {
+            StackRow::Diff(Row::Comment { note, .. }) if self.focus == Focus::Content => {
+                Some(*note)
+            }
+            _ => None,
+        }
+    }
+
+    /// `o` / `za`: the note under the cursor whole or folded, else the node.
+    fn toggle_here(&mut self, sh: &mut Shared) {
+        let Some(note) = self.cursor_note() else {
+            return self.toggle_fold(sh);
+        };
+        sh.toggle_note(note);
+        self.relayout(sh);
+        let head = |r: &StackRow| matches!(*r, StackRow::Diff(Row::Comment { note: n, part: 0, .. }) if n == note);
+        if let Some(r) = self.rows.iter().position(head) {
+            self.pos.cursor = r;
+            self.pos.clamp(self.rows.len());
+        }
     }
 
     fn set_all_folded(&mut self, sh: &Shared, folded: bool) {
@@ -717,6 +768,20 @@ impl StackView {
             })
     }
 
+    /// `gf`: the whole file of the content line (or of the node).
+    fn whole_file(&self, sh: &Shared) -> Action {
+        if self.focus == Focus::Content
+            && let Some((h, line)) = self.cursor_hunk()
+        {
+            return sh.whole_file(sh.review.diff.hunks[h].file, Some(h), line);
+        }
+        match self.jump_target() {
+            Action::ShowHunk(h) => sh.whole_file(sh.review.diff.hunks[h].file, Some(h), None),
+            Action::ShowFile(f) => sh.whole_file(f, None, None),
+            _ => Action::None,
+        }
+    }
+
     fn open_in_editor(&self, sh: &mut Shared) {
         if let Action::ShowHunk(h) = self.jump_target() {
             let line = match (self.focus, self.cursor_hunk()) {
@@ -754,7 +819,8 @@ impl StackView {
                 },
                 ('g', KeyCode::Char('d')) => return self.jump_target(),
                 ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
-                ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_fold(sh),
+                ('g', KeyCode::Char('f')) => return self.whole_file(sh),
+                ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_here(sh),
                 ('z', KeyCode::Char('M')) => self.set_all_folded(sh, true),
                 ('z', KeyCode::Char('R')) => self.set_all_folded(sh, false),
                 _ => {}
@@ -795,8 +861,12 @@ impl StackView {
             KeyCode::Char('u') if !ctrl => self.next_unreviewed_group(sh),
             KeyCode::Char('J') | KeyCode::Char(']') => self.next_group(sh, true),
             KeyCode::Char('K') | KeyCode::Char('[') => self.next_group(sh, false),
-            KeyCode::Char('o') => self.toggle_fold(sh),
+            KeyCode::Char('o') => self.toggle_here(sh),
             KeyCode::Char('e') => self.open_in_editor(sh),
+            KeyCode::Enter if self.cursor_note().is_some() => {
+                let note = self.cursor_note().unwrap_or_default();
+                return Action::Thread(sh.notes.items[note as usize].kind);
+            }
             KeyCode::Char('0') => self.hscroll = 0,
             KeyCode::Char('c') if self.focus == Focus::Content => return self.comment(sh),
             KeyCode::Char('C') if self.focus == Focus::Content => match self.cursor_file(sh) {
@@ -1110,6 +1180,44 @@ pub(crate) mod tests {
         // gd from a group: its first hunk.
         v.on_key(&mut sh, key('g'), true);
         assert_eq!(v.on_key(&mut sh, key('d'), true), Action::ShowHunk(0));
+    }
+
+    #[test]
+    fn enter_on_a_note_opens_its_thread_and_o_unfolds_it() {
+        use survol_core::comments::{self, Anchor};
+
+        use crate::views::comments::NoteKind;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sh, mut v) = setup(dir.path());
+        let line = comments::line_anchor(&sh.review.diff, 0, 1);
+        let body = "one\n\ntwo\n\nthree\n\nfour";
+        let id = sh.comments.add(Anchor::Line { start: None, line }, body);
+        sh.rebuild_notes();
+        v.relayout(&sh);
+        v.focus = Focus::Content;
+        let head = |v: &StackView| {
+            v.rows
+                .iter()
+                .position(|r| matches!(r, StackRow::Diff(Row::Comment { part: 0, .. })))
+                .unwrap()
+        };
+        let notes = |v: &StackView| {
+            v.rows
+                .iter()
+                .filter(|r| matches!(r, StackRow::Diff(Row::Comment { .. })))
+                .count()
+        };
+        assert_eq!(notes(&v), 6, "head, 4 lines, fold hint");
+        v.pos.cursor = head(&v) + 2;
+        v.on_key(&mut sh, key('o'), true);
+        assert_eq!(notes(&v), 9);
+        assert_eq!(v.pos.cursor, head(&v), "on the head of the note");
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            v.on_key(&mut sh, enter, true),
+            Action::Thread(NoteKind::Draft(id))
+        );
     }
 
     #[test]

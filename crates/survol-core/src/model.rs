@@ -16,6 +16,18 @@ pub struct MergeRequest {
     pub start_sha: String,
     pub head_sha: String,
     pub web_url: String,
+    /// The forge hosting it, and its host as configured or detected.
+    #[serde(default)]
+    pub forge: crate::forge::ForgeKind,
+    #[serde(default)]
+    pub host: String,
+}
+
+impl MergeRequest {
+    /// `!12` on GitLab, `#12` on GitHub.
+    pub fn reference(&self) -> String {
+        format!("{}{}", self.forge.sigil(), self.iid)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

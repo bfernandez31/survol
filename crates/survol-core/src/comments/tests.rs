@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::forge::ForgeKind;
 use crate::forge::fake::{self, ok, status};
 use crate::forge::gitlab::Gitlab;
 
@@ -610,4 +611,240 @@ fn publishes_directly_on_old_instances() {
     let saved = CommentStore::load(&path).unwrap();
     assert_eq!(saved.published.len(), 2);
     assert_eq!(saved.drafts.len(), 1);
+}
+
+// ----- GitHub ---------------------------------------------------------------
+
+fn github(addr: &str) -> crate::forge::github::Github {
+    crate::forge::github::Github::new(
+        "github.test",
+        addr,
+        &format!("{addr}/graphql"),
+        "tok".into(),
+        None,
+    )
+    .unwrap()
+}
+
+const NO_PENDING: &str = r#"{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}}"#;
+
+fn thread_created(id: u64) -> fake::Response {
+    ok(&format!(
+        r#"{{"data":{{"addPullRequestReviewThread":{{"thread":{{"comments":{{"nodes":[{{"databaseId":{id},"body":""}}]}}}}}}}}}}"#
+    ))
+}
+
+fn review_updated(body: &str) -> fake::Response {
+    let v = json!({"data": {"updatePullRequestReview": {"pullRequestReview": {"databaseId": 55, "body": body}}}});
+    ok(&v.to_string())
+}
+
+#[test]
+fn plans_one_github_review() {
+    let d = diff();
+    let mut store = review_store(&d);
+    store.add(
+        Anchor::Reply {
+            discussion: "PRRT_abc".into(),
+            author: "alice".into(),
+        },
+        "Agreed, fixed.",
+    );
+    store.add(
+        Anchor::Reply {
+            discussion: "general:IC_1".into(),
+            author: "bob".into(),
+        },
+        "Will do.",
+    );
+    let p = plan(&store, &d, &shas(), &Capabilities::github("github.com"));
+    assert_eq!((p.forge, p.mode), (ForgeKind::Github, Mode::Drafts));
+    let reqs = p.requests("o/r", "7");
+    let paths: Vec<&str> = reqs.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/repos/o/r/pulls/7/reviews",
+            "/graphql",
+            "/graphql",
+            "/graphql",
+            "/graphql",
+            "/graphql",
+            "/graphql",
+            "/repos/o/r/pulls/7/reviews/:review/events",
+        ]
+    );
+    assert_eq!(reqs[0].body, Some(json!({"commit_id": "h0"})));
+    assert_eq!(
+        reqs[1].body,
+        Some(json!({"mutation": "addPullRequestReviewThread", "input": {
+            "pullRequestReviewId": ":review", "body": "Why a second B?",
+            "path": "src/App.java", "subjectType": "LINE", "line": 11, "side": "RIGHT"}}))
+    );
+    assert_eq!(
+        reqs[2].body.as_ref().unwrap()["input"],
+        json!({"pullRequestReviewId": ":review", "body": "Renamed on purpose?",
+               "path": "src/New.java", "subjectType": "LINE",
+               "line": 2, "side": "LEFT", "startLine": 1, "startSide": "LEFT"})
+    );
+    assert_eq!(
+        reqs[3].body.as_ref().unwrap()["input"],
+        json!({"pullRequestReviewId": ":review", "body": "Deleting this is fine.",
+               "path": "src/Gone.java", "subjectType": "FILE"})
+    );
+    assert_eq!(
+        reqs[4].body,
+        Some(
+            json!({"mutation": "addPullRequestReviewThreadReply", "input": {
+            "pullRequestReviewId": ":review", "pullRequestReviewThreadId": "PRRT_abc",
+            "body": "Agreed, fixed."}})
+        )
+    );
+    // A reply to a general comment: in the review body, mentioning its author.
+    assert_eq!(
+        reqs[5].body,
+        Some(json!({"mutation": "updatePullRequestReview", "input": {
+            "pullRequestReviewId": ":review", "body": "@bob Will do."}}))
+    );
+    assert_eq!(
+        reqs[6].body.as_ref().unwrap()["mutation"],
+        "updatePullRequestReview"
+    );
+    assert_eq!(reqs[7].body, Some(json!({"event": "COMMENT"})));
+
+    // Without drafts (never the case on GitHub, but supported): right away.
+    let mut direct = p.clone();
+    direct.mode = Mode::Direct;
+    let paths: Vec<String> = direct
+        .requests("o/r", "7")
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "/repos/o/r/pulls/7/comments",
+            "/repos/o/r/pulls/7/comments",
+            "/repos/o/r/pulls/7/comments",
+            "/graphql",
+            "/repos/o/r/issues/7/comments",
+            "/repos/o/r/issues/7/comments",
+        ]
+    );
+}
+
+#[test]
+fn publishes_one_github_review() {
+    let d = diff();
+    let dir = tempfile::tempdir().unwrap();
+    let path = comments_path(dir.path(), "mr-7");
+    let mut store = review_store(&d);
+    store.save(&path).unwrap();
+    let p = plan(&store, &d, &shas(), &Capabilities::github("github.com"));
+
+    let (addr, rx) = fake::serve(vec![
+        ok(NO_PENDING),
+        ok(r#"{"id":55,"node_id":"PRR_55","state":"PENDING","body":"","user":{"login":"me"}}"#),
+        thread_created(201),
+        thread_created(202),
+        thread_created(203),
+        review_updated("Looks consistent overall."),
+        ok(
+            r#"{"id":55,"node_id":"PRR_55","state":"COMMENTED","body":"Looks consistent overall."}"#,
+        ),
+    ]);
+    let n = publish(&github(&addr), "o/r", 7, &p, &mut store, &path, &mut |_| {}).unwrap();
+    assert_eq!(n, 4);
+
+    let reqs: Vec<fake::Request> = rx.try_iter().collect();
+    assert_eq!(reqs.len(), 7);
+    assert!(reqs.iter().all(|r| r.authorization == "Bearer tok"));
+    assert!(
+        reqs[0].json()["query"]
+            .as_str()
+            .unwrap()
+            .contains("PENDING")
+    );
+    assert_eq!(
+        (reqs[1].path.as_str(), reqs[1].json()),
+        ("/repos/o/r/pulls/7/reviews", json!({"commit_id": "h0"}))
+    );
+    let input = reqs[2].json()["variables"]["input"].clone();
+    assert_eq!(
+        input,
+        json!({"pullRequestReviewId": "PRR_55", "body": "Why a second B?",
+               "path": "src/App.java", "subjectType": "LINE", "line": 11, "side": "RIGHT"})
+    );
+    assert!(
+        reqs[2].json()["query"]
+            .as_str()
+            .unwrap()
+            .contains("addPullRequestReviewThread")
+    );
+    assert_eq!(reqs[4].json()["variables"]["input"]["subjectType"], "FILE");
+    assert_eq!(
+        reqs[5].json()["variables"]["input"],
+        json!({"pullRequestReviewId": "PRR_55", "body": "Looks consistent overall."})
+    );
+    assert_eq!(
+        (reqs[6].path.as_str(), reqs[6].json()),
+        (
+            "/repos/o/r/pulls/7/reviews/55/events",
+            json!({"event": "COMMENT", "body": "Looks consistent overall."})
+        )
+    );
+
+    let saved = CommentStore::load(&path).unwrap();
+    assert!(saved.drafts.is_empty() && saved.summary.is_empty());
+    assert_eq!(saved.published.len(), 3);
+}
+
+#[test]
+fn an_interrupted_github_review_resumes_on_the_pending_review() {
+    let d = diff();
+    let dir = tempfile::tempdir().unwrap();
+    let path = comments_path(dir.path(), "mr-7");
+    let mut store = review_store(&d);
+    let caps = Capabilities::github("github.com");
+    let p = plan(&store, &d, &shas(), &caps);
+    let (addr, _rx) = fake::serve(vec![
+        ok(NO_PENDING),
+        ok(r#"{"id":55,"node_id":"PRR_55","state":"PENDING","body":null}"#),
+        thread_created(201),
+        status("502 Bad Gateway", "oops"),
+    ]);
+    let err = publish(&github(&addr), "o/r", 7, &p, &mut store, &path, &mut |_| {}).unwrap_err();
+    assert!(err.to_string().contains("after 1 of 4"), "{err}");
+    let mut store = CommentStore::load(&path).unwrap();
+    assert_eq!(store.drafts[0].remote_id, Some(201));
+
+    // Again: the pending review is found, not created; the first thread is
+    // not sent twice; a body written in the browser is kept under the summary.
+    let p = plan(&store, &d, &shas(), &caps);
+    let pending = r#"{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[
+        {"id":"PRR_55","databaseId":55,"body":"From the browser.",
+         "comments":{"nodes":[{"databaseId":201,"body":"Why a second B?"}]}}]}}}}}"#;
+    let (addr, rx) = fake::serve(vec![
+        ok(pending),
+        thread_created(202),
+        thread_created(203),
+        review_updated("Looks consistent overall.\n\nFrom the browser."),
+        ok(r#"{"id":55,"node_id":"PRR_55","state":"COMMENTED"}"#),
+    ]);
+    publish(&github(&addr), "o/r", 7, &p, &mut store, &path, &mut |_| {}).unwrap();
+    let reqs: Vec<fake::Request> = rx.try_iter().collect();
+    assert_eq!(reqs.len(), 5);
+    assert_eq!(
+        reqs[1].json()["variables"]["input"]["body"],
+        "Renamed on purpose?"
+    );
+    assert_eq!(
+        reqs[3].json()["variables"]["input"]["body"],
+        "Looks consistent overall.\n\nFrom the browser."
+    );
+    assert_eq!(
+        reqs[4].json(),
+        json!({"event": "COMMENT", "body": "Looks consistent overall.\n\nFrom the browser."})
+    );
+    assert!(store.drafts.is_empty());
 }

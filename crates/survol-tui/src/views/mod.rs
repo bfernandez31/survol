@@ -3,6 +3,9 @@
 pub mod ask;
 pub mod comments;
 pub mod diff;
+pub mod explorer;
+pub mod export;
+pub mod fileview;
 pub mod flows;
 pub mod graph;
 pub mod stack;
@@ -127,6 +130,32 @@ fn push_pairs(rows: &mut Vec<Row>, hunk: usize, lines: &[DiffLine], notes: &Note
             pair(rows, removed.get(k).copied(), added.get(k).copied());
         }
     }
+}
+
+/// Row of line `part` of note `note` among the note rows following `from`
+/// (the line or file header the note is under); `from` if it is gone.
+pub fn note_row<T>(
+    rows: &[T],
+    from: usize,
+    (note, part): (u32, u16),
+    row: impl Fn(&T) -> Row,
+) -> usize {
+    let mut best = from;
+    for (i, r) in rows.iter().enumerate().skip(from + 1) {
+        match row(r) {
+            Row::Comment {
+                note: n, part: p, ..
+            } if n == note => {
+                best = i;
+                if p >= part {
+                    break;
+                }
+            }
+            Row::Comment { .. } => {}
+            _ => break,
+        }
+    }
+    best
 }
 
 /// Cursor and scroll of a scrollable pane, keeping a small margin.

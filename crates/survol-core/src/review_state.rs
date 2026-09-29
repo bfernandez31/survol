@@ -20,6 +20,9 @@ pub struct ReviewState {
     /// Head the state was last saved for.
     pub head_sha: String,
     pub reviewed: BTreeSet<String>,
+    /// How the Diff view lists the files (`tree`, `pairs`, `flat`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explorer: Option<String>,
 }
 
 impl ReviewState {

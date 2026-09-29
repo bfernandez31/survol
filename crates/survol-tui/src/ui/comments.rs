@@ -2,17 +2,20 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use survol_core::comments::{self, Anchor, Mode, Placement};
-use survol_core::forge::gitlab::encode;
+use survol_core::forge::ForgeKind;
+
+use survol_core::model::LineKind;
 
 use super::ask::{centered, popup_block};
 use super::rows::truncate_right;
-use super::{ACCENT, CURSOR_BG, wrap};
+use super::{markdown, wrap};
 use crate::app::{App, RemoteStatus};
-use crate::views::comments::{Confirm, Editor, PanelRow, panel_rows};
+use crate::theme::theme;
+use crate::views::comments::{Confirm, Editor, NoteKind, PanelRow, ThreadView, Tone, panel_rows};
 
 pub fn render_editor(f: &mut Frame, area: Rect, e: &Editor) {
     let w = 100.min(area.width);
@@ -20,7 +23,10 @@ pub fn render_editor(f: &mut Frame, area: Rect, e: &Editor) {
     let mut lines: Vec<Line> = e
         .context
         .iter()
-        .map(|c| Line::from(format!(" │ {}", truncate_right(c, width.saturating_sub(3)))).dim())
+        .map(|c| {
+            Line::from(format!(" │ {}", truncate_right(c, width.saturating_sub(3))))
+                .fg(theme().meta)
+        })
         .collect();
     if !lines.is_empty() {
         lines.push(Line::default());
@@ -39,11 +45,11 @@ pub fn render_editor(f: &mut Frame, area: Rect, e: &Editor) {
     let hint = if e.confirm_discard {
         Line::from(
             " Esc again discards the text · Ctrl-s saves "
-                .fg(Color::Yellow)
+                .fg(theme().warn)
                 .bold(),
         )
     } else {
-        Line::from(" Ctrl-s (or Alt-Enter) save · Enter new line · Esc cancel ".dim())
+        Line::from(" Ctrl-s (or Alt-Enter) save · Enter new line · Esc cancel ".fg(theme().meta))
     };
     f.render_widget(Clear, rect);
     f.render_widget(
@@ -65,33 +71,41 @@ fn first_line(s: &str) -> String {
 /// Where the review goes, for the panel's header.
 fn target_line(app: &App) -> Line<'static> {
     let sh = &app.sh;
+    let forge = sh.review.forge();
     match (&sh.review.mr, &app.remote_status) {
         (None, _) => Line::from(
             " local range: the drafts stay local (publishing needs a merge request)"
-                .fg(Color::Yellow),
+                .fg(theme().warn),
         ),
-        (Some(_), RemoteStatus::Fetching(since)) => {
-            Line::from(format!(" ⟳ asking GitLab… {}s", since.elapsed().as_secs()).fg(ACCENT))
-        }
+        (Some(_), RemoteStatus::Fetching(since)) => Line::from(
+            format!(" ⟳ asking {forge}… {}s", since.elapsed().as_secs()).fg(theme().accent),
+        ),
         (Some(_), RemoteStatus::Failed(e)) => {
-            Line::from(format!(" GitLab unreachable: {e} (r to retry)").fg(Color::Red))
+            Line::from(format!(" {forge} unreachable: {e} (r to retry)").fg(theme().error))
         }
         (Some(_), _) => match &sh.remote {
+            Some(r) if r.capabilities.forge == ForgeKind::Github => Line::from(
+                format!(
+                    " GitHub ({}): drafts fill a pending review, submitted at once",
+                    r.capabilities.version
+                )
+                .fg(theme().meta),
+            ),
             Some(r) if r.capabilities.draft_notes => Line::from(
                 format!(
                     " GitLab {}: drafts become draft notes, published at once",
                     r.capabilities.version
                 )
-                .dim(),
+                .fg(theme().meta),
             ),
             Some(r) => Line::from(
                 format!(
                     " GitLab {} has no draft notes: comments are posted one by one",
                     r.capabilities.version
                 )
-                .fg(Color::Yellow),
+                .fg(theme().warn),
             ),
-            None => Line::from(" GitLab: not fetched (r)".dim()),
+            None => Line::from(format!(" {forge}: not fetched (r)").fg(theme().meta)),
         },
     }
 }
@@ -128,7 +142,7 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
             let title = if name == "drafts" {
                 format!(" Drafts ({count})")
             } else {
-                format!(" Discussions on GitLab ({count})")
+                format!(" Discussions on {} ({count})", sh.review.forge())
             };
             lines.push(Line::from(title.bold()));
         }
@@ -139,9 +153,9 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
             PanelRow::Summary => {
                 let s = &sh.comments.summary;
                 vec![
-                    "  Summary  ".bold().fg(ACCENT),
+                    "  Summary  ".bold().fg(theme().accent),
                     if s.trim().is_empty() {
-                        "(none: Enter or S to write the overall comment)".dim()
+                        "(none: Enter or S to write the overall comment)".fg(theme().meta)
                     } else {
                         first_line(s).into()
                     },
@@ -156,16 +170,16 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
                     (Anchor::Reply { author, .. }, _) => format!("reply to @{author}"),
                     (_, p) => comments::describe(d, p),
                 };
-                let mut v = vec![Span::styled("  ✎ ", Style::new().fg(Color::Yellow))];
+                let mut v = vec![Span::styled("  ✎ ", Style::new().fg(theme().draft))];
                 match p {
-                    Placement::Stale => v.push("⚠ stale ".fg(Color::Red).bold()),
-                    Placement::Line { moved: true, .. } => v.push("moved ".fg(Color::Yellow)),
+                    Placement::Stale => v.push("⚠ stale ".fg(theme().error).bold()),
+                    Placement::Line { moved: true, .. } => v.push("moved ".fg(theme().warn)),
                     _ => {}
                 }
-                v.push(format!("{at}  ").fg(ACCENT));
+                v.push(format!("{at}  ").fg(theme().accent));
                 v.push(first_line(&draft.body).into());
                 if draft.remote_id.is_some() {
-                    v.push("  (draft note created, not published)".dim());
+                    v.push("  (draft note created, not published)".fg(theme().meta));
                 }
                 v
             }
@@ -173,9 +187,9 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
                 let disc = &discussions[di];
                 let first = &disc.notes[0];
                 let state = if disc.is_resolved() {
-                    " · resolved".dim()
+                    " · resolved".fg(theme().meta)
                 } else if disc.is_resolvable() {
-                    " · unresolved".fg(Color::Yellow)
+                    " · unresolved".fg(theme().warn)
                 } else {
                     "".into()
                 };
@@ -191,15 +205,15 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
                 };
                 let replies = disc.notes.iter().skip(1).filter(|n| !n.system).count();
                 let mut v = vec![
-                    Span::styled("  ◆ ", Style::new().fg(Color::Magenta)),
-                    format!("@{}", first.author.username).fg(Color::Magenta),
+                    Span::styled("  ◆ ", Style::new().fg(theme().discussion)),
+                    format!("@{}", first.author.username).fg(theme().discussion),
                     state,
-                    at.fg(ACCENT),
+                    at.fg(theme().accent),
                     "  ".into(),
                     first_line(&first.body).into(),
                 ];
                 if replies > 0 {
-                    v.push(format!("  (+{replies})").dim());
+                    v.push(format!("  (+{replies})").fg(theme().meta));
                 }
                 v
             }
@@ -210,7 +224,7 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
         }
         let mut line = Line::from(spans);
         if i == app.panel.sel {
-            line = line.patch_style(Style::new().bg(CURSOR_BG));
+            line = line.patch_style(Style::new().bg(theme().cursor_bg));
         }
         lines.push(line);
     }
@@ -219,12 +233,12 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
     let scroll = sel_line.saturating_sub(inner_h.saturating_sub(2)) as u16;
     let hint = match &app.panel.confirm {
         Some(Confirm::Delete(_)) => {
-            Line::from(" Delete this draft?  y / n ".fg(Color::Yellow).bold())
+            Line::from(" Delete this draft?  y / n ".fg(theme().warn).bold())
         }
         _ => Line::from(
-            " Enter go / edit summary · e edit (reply on a discussion) · d delete · S summary · p publish · r refresh · Esc close ",
+            " Enter go / edit summary · e edit (reply on a discussion) · t thread · d delete · S summary · p publish · r refresh · Esc close ",
         )
-        .dim(),
+        .fg(theme().meta),
     };
     let title = format!(
         " review · {} · {} draft(s){} ",
@@ -252,7 +266,7 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
     let sh = &app.sh;
     let width = rect.width.saturating_sub(4) as usize;
     let (project, iid) = match &sh.review.mr {
-        Some(mr) => (encode(&mr.project), mr.iid.to_string()),
+        Some(mr) => (mr.forge.api_project(&mr.project), mr.iid.to_string()),
         None => (":project".into(), ":iid".into()),
     };
     let requests = plan.requests(&project, &iid);
@@ -260,21 +274,27 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
         .remote
         .as_ref()
         .map_or("?".to_string(), |r| r.capabilities.version.clone());
+    let github = plan.forge == ForgeKind::Github;
     let mut lines = vec![Line::from(
         format!(
-            " Publish {} comment(s) to {} (GitLab {version})?",
+            " Publish {} comment(s) to {} ({} {version})?",
             plan.comments.len(),
-            sh.review.title()
+            sh.review.title(),
+            plan.forge
         )
         .bold(),
     )];
     match plan.mode {
+        Mode::Drafts if github => lines.push(Line::from(
+            " One pending review, then one submission (COMMENT): the review appears at once."
+                .fg(theme().meta),
+        )),
         Mode::Drafts => lines.push(Line::from(
-            " Draft notes, then one bulk publish: the review appears at once.".dim(),
+            " Draft notes, then one bulk publish: the review appears at once.".fg(theme().meta),
         )),
         Mode::Direct => lines.push(Line::from(
             " ⚠ This GitLab has no draft notes: each comment is posted right away, one by one, and notifies at once."
-                .fg(Color::Yellow)
+                .fg(theme().warn)
                 .bold(),
         )),
     }
@@ -282,13 +302,18 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
         && plan.mode == Mode::Drafts
         && r.pending_drafts > 0
     {
-        lines.push(Line::from(
+        let text = if github {
+            format!(
+                " ⚠ your pending review on GitHub already holds {} comment(s): they are submitted too.",
+                r.pending_drafts
+            )
+        } else {
             format!(
                 " ⚠ bulk publish also publishes your {} pending draft note(s) already on GitLab.",
                 r.pending_drafts
             )
-            .fg(Color::Yellow),
-        ));
+        };
+        lines.push(Line::from(text.fg(theme().warn)));
     }
     if !plan.skipped.is_empty() {
         lines.push(Line::from(
@@ -296,14 +321,16 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
                 " ⚠ {} stale draft(s) not sent (their line is gone).",
                 plan.skipped.len()
             )
-            .fg(Color::Yellow),
+            .fg(theme().warn),
         ));
     }
     lines.push(Line::default());
     let mut body: Vec<Line> = Vec::new();
     if *json {
         for r in &requests {
-            body.push(Line::from(format!(" {} {}", r.method, r.path).fg(ACCENT)));
+            body.push(Line::from(
+                format!(" {} {}", r.method, r.path).fg(theme().accent),
+            ));
             if let Some(b) = &r.body {
                 let pretty = format!("{b:#}");
                 body.extend(pretty.lines().map(|l| Line::from(format!("   {l}"))));
@@ -317,15 +344,17 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
                 ""
             };
             body.push(Line::from(vec![
-                format!(" {:>3}. ", i + 1).dim(),
-                format!("{:<34}", truncate_right(&c.what, 34)).fg(ACCENT),
+                format!(" {:>3}. ", i + 1).fg(theme().meta),
+                format!("{:<34}", truncate_right(&c.what, 34)).fg(theme().accent),
                 truncate_right(&first_line(&c.comment.body), width.saturating_sub(42)).into(),
-                done.dim(),
+                done.fg(theme().meta),
             ]));
         }
         body.push(Line::default());
         for r in &requests {
-            body.push(Line::from(format!("  {} {}", r.method, r.path).dim()));
+            body.push(Line::from(
+                format!("  {} {}", r.method, r.path).fg(theme().meta),
+            ));
         }
     }
     let room = rect.height.saturating_sub(2) as usize - lines.len().min(rect.height as usize);
@@ -336,8 +365,198 @@ fn render_publish(f: &mut Frame, rect: Rect, app: &App) {
         Paragraph::new(lines).block(
             popup_block(" publish the review ".into()).title_bottom(
                 Line::from(" y publish · n cancel · J exact JSON requests · j/k scroll ")
-                    .fg(Color::Yellow),
+                    .fg(theme().warn),
             ),
+        ),
+        rect,
+    );
+}
+
+// ----- thread ---------------------------------------------------------------
+
+/// Lines of code around the line a note is about, the line itself marked.
+fn thread_code(app: &mut App, hunk: usize, line: usize, width: usize) -> Vec<Line<'static>> {
+    let d = &app.sh.review.diff;
+    let lines = &d.hunks[hunk].lines;
+    let from = line.saturating_sub(3);
+    let rows: Vec<_> = (from..=line.min(lines.len().saturating_sub(1)))
+        .map(|i| (i, lines[i].kind, lines[i].old_line, lines[i].new_line))
+        .collect();
+    let hl = app.sh.highlighter.hunk(d, hunk);
+    let mut out = Vec::new();
+    for (i, kind, old, new) in rows {
+        let t = theme();
+        let (sign, bg) = match kind {
+            LineKind::Added => (
+                Span::styled(
+                    "+",
+                    Style::new().fg(t.added_sign).bg(t.added_sign_bg).bold(),
+                ),
+                Some(t.added_bg),
+            ),
+            LineKind::Removed => (
+                Span::styled(
+                    "-",
+                    Style::new().fg(t.removed_sign).bg(t.removed_sign_bg).bold(),
+                ),
+                Some(t.removed_bg),
+            ),
+            LineKind::Context => (Span::raw(" "), None),
+        };
+        let no = new.or(old).map(|n| n.to_string()).unwrap_or_default();
+        let mut spans = vec![
+            Span::styled(
+                if i == line { "▶" } else { " " },
+                Style::new().fg(t.accent).bold(),
+            ),
+            format!("{no:>5} ").fg(match kind {
+                LineKind::Added => t.added_line_nr,
+                LineKind::Removed => t.removed_line_nr,
+                LineKind::Context => t.line_nr,
+            }),
+            sign,
+            " ".into(),
+        ];
+        spans.extend(hl[i].iter().map(|(st, t)| Span::styled(t.clone(), *st)));
+        let mut l = super::graph::clip(spans, width);
+        if let Some(bg) = bg {
+            l = l.style(Style::new().bg(bg));
+        }
+        out.push(l);
+    }
+    out
+}
+
+/// A note of the thread: its head, then its rendered body.
+fn thread_note(
+    out: &mut Vec<Line<'static>>,
+    head: Vec<Span<'static>>,
+    body: &str,
+    tone: Tone,
+    width: usize,
+    app: &App,
+) {
+    out.push(Line::from(head));
+    let body = markdown::render(
+        body,
+        width.saturating_sub(4),
+        tone.body(),
+        Some(&app.sh.highlighter),
+    );
+    out.extend(body.into_iter().map(|mut l| {
+        l.spans.insert(0, Span::raw("   "));
+        l
+    }));
+}
+
+pub fn render_thread(f: &mut Frame, area: Rect, app: &mut App, v: &mut ThreadView) {
+    let rect = centered(
+        area,
+        (area.width * 9 / 10).clamp(40, 120),
+        (area.height * 9 / 10).max(10),
+    );
+    let width = rect.width.saturating_sub(2) as usize;
+    let placed = app.sh.notes.find(v.kind);
+    let at = placed.and_then(|i| app.sh.notes.items[i as usize].at);
+    let order = app.sh.notes.ordered(&app.sh.review.diff);
+    let rank = placed
+        .and_then(|i| order.iter().position(|&x| x == i))
+        .map(|p| format!(" {}/{} ", p + 1, order.len()))
+        .unwrap_or_default();
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some((h, l)) = at {
+        lines.extend(thread_code(app, h, l, width));
+        lines.push(Line::default());
+    }
+    let d = &app.sh.review.diff;
+    let sep = || Line::from("─".repeat(width.saturating_sub(2)).fg(theme().rule));
+    let (title, write) = match v.kind {
+        NoteKind::Remote(di) => {
+            let Some(disc) = app.sh.discussions().get(di) else {
+                return;
+            };
+            let resolved = disc.is_resolved();
+            let tone = if resolved {
+                Tone::Resolved
+            } else {
+                Tone::Remote
+            };
+            let where_ = match disc.position() {
+                Some(p) => format!(
+                    "{}:{}",
+                    p.new_path,
+                    p.new_line
+                        .or(p.old_line)
+                        .map_or("file".into(), |n| n.to_string())
+                ),
+                None => "general".into(),
+            };
+            for (i, n) in disc.notes.iter().filter(|n| !n.system).enumerate() {
+                if i > 0 {
+                    lines.push(sep());
+                }
+                let mut head = vec![
+                    Span::styled(
+                        if i == 0 { " ◆ " } else { " ↳ " },
+                        Style::new().fg(tone.bar()),
+                    ),
+                    format!("@{}", n.author.username)
+                        .fg(theme().discussion)
+                        .bold(),
+                ];
+                if i == 0 && disc.is_resolvable() {
+                    head.push(if resolved {
+                        "  resolved".fg(theme().meta)
+                    } else {
+                        "  ● unresolved".fg(theme().warn)
+                    });
+                }
+                if !n.created_at.is_empty() {
+                    let date = n
+                        .created_at
+                        .get(..16)
+                        .unwrap_or(&n.created_at)
+                        .replace('T', " ");
+                    head.push(format!("  {date}").fg(theme().meta));
+                }
+                thread_note(&mut lines, head, &n.body, tone, width, app);
+            }
+            // Replies drafted here, not published yet.
+            for draft in &app.sh.comments.drafts {
+                if matches!(&draft.anchor, comments::Anchor::Reply { discussion, .. } if *discussion == disc.id)
+                {
+                    lines.push(sep());
+                    let head = vec![
+                        " ✎ ".fg(theme().draft),
+                        "draft reply".fg(theme().draft).bold(),
+                    ];
+                    thread_note(&mut lines, head, &draft.body, Tone::Draft, width, app);
+                }
+            }
+            (format!(" thread · {where_} "), "c reply")
+        }
+        NoteKind::Draft(id) => {
+            let Some(draft) = app.sh.comments.get(id) else {
+                return;
+            };
+            let at = comments::describe(d, comments::place(&draft.anchor, d));
+            let head = vec![" ✎ ".fg(theme().draft), "draft".fg(theme().draft).bold()];
+            thread_note(&mut lines, head, &draft.body, Tone::Draft, width, app);
+            (format!(" draft · {at} "), "c edit")
+        }
+    };
+    let inner_h = rect.height.saturating_sub(2) as usize;
+    v.height = inner_h;
+    v.total = lines.len();
+    v.scroll = v.scroll.min(lines.len().saturating_sub(inner_h));
+    let hint = format!(" {write} · n/N next thread · j/k scroll · Esc close ");
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).scroll((v.scroll as u16, 0)).block(
+            popup_block(title)
+                .title(Line::from(rank).right_aligned().fg(theme().meta))
+                .title_bottom(Line::from(hint).fg(theme().meta)),
         ),
         rect,
     );

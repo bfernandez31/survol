@@ -32,7 +32,7 @@ Lire le code modifié isolément donne souvent l'impression que tout est correct
 
 - **Trouver des bugs.** Des agents le font déjà (CodeRabbit, PR-Agent, GitLab Duo dans la CI). `survol` ne remonte pas de liste de bugs ou d'alertes à la manière d'un linter.
 - Remplacer l'IDE ou Neovim.
-- Couvrir GitHub dès le départ. **GitLab d'abord**, en gardant une abstraction « forge » pour plus tard.
+- Couvrir GitHub dès le départ. **GitLab d'abord**, en gardant une abstraction « forge » pour plus tard. (GitHub est désormais pris en charge, voir §5.5.)
 - Des cas uniquement « migration mécanique » (montée de version de framework). Le cas principal, ce sont les grosses features et les réécritures.
 
 ## 3. Décisions déjà prises
@@ -58,6 +58,8 @@ Lire le code modifié isolément donne souvent l'impression que tout est correct
 | Coloration (étape 1) | `syntect` + `two-face` (TS, Kotlin…), thème `ansi` | Suit la palette du terminal (clair ou sombre). tree-sitter prendra le relais avec l'index (étape 3). |
 | TLS GitLab | `reqwest` + rustls avec le vérificateur de la plateforme, `ca_cert` ajouté au magasin système | La CA d'entreprise installée dans le trousseau fonctionne sans configuration. |
 | Jeton GitLab | `GITLAB_TOKEN`, sinon `glab config get token --host <host>` | Réutilise glab sans parser son fichier (ni le trousseau). |
+| Forge | Détectée depuis le remote : github.com (ou alias SSH `github.com-*`) ou un hôte de `[github] hosts` → GitHub, sinon GitLab. Une URL de PR / MR passée en argument l'emporte, `[forge] kind` / `host` force | Aucun changement pour GitLab ; un dépôt GitHub marche sans configuration. |
+| Jeton GitHub | `GITHUB_TOKEN`, `GH_TOKEN` (Enterprise : `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`), puis `[github] token`, puis `gh auth token --hostname <host>` | Même ordre que gh ; jamais affiché (`survol-cli config` le masque). |
 | Worktree | Créé en arrière-plan, la vue Diff est utilisable tout de suite | Le diff ne dépend pas du checkout. |
 | Vue Diff | Réécrite en s'inspirant de tuicr, pas de fork | Voir §9. |
 | Appel du CLI Claude | `claude -p --output-format json --tools "" --strict-mcp-config --disable-slash-commands --no-session-persistence --setting-sources "" --system-prompt …`, prompt sur stdin | Complétion pure en un tour : aucun outil, MCP, skill ni réglage utilisateur. Le LLM ne répond qu'à partir du prompt. |
@@ -263,6 +265,15 @@ Invariant clé : **chaque hunk appartient à exactement un groupe** (le groupe �
   - `GET /projects/:id/merge_requests/:iid/discussions` (afficher les discussions existantes)
 - Une `position` de commentaire inline exige `base_sha`, `start_sha`, `head_sha`, `old_path` / `new_path` et `old_line` / `new_line`. C'est le point technique le plus délicat : prévoir des tests dédiés.
 - Garder un trait `Forge` pour pouvoir ajouter GitHub plus tard.
+
+### 5.5 Intégration GitHub
+
+- `forge::github` : REST v3 (PR, commentaires de conversation, reviews) et GraphQL (`reviewThreads` pour l'état résolu, review en attente). Même client HTTP (`reqwest` bloquant, rustls) que GitLab.
+- Trait `Forge` : `kind()` et `capabilities()` ajoutés (GitHub : brouillons et commentaires de fichier toujours disponibles, version `github.com` ou `Enterprise Server x.y` via `GET /meta`). Le reste du trait est inchangé : les brouillons remplissent la review en attente de l'utilisateur (créée par `POST .../pulls/<n>/reviews` sans `event`, ou réutilisée), `create_draft_note` y ajoute un fil (`addPullRequestReviewThread`), une réponse (`addPullRequestReviewThreadReply`) ou du texte au corps de la review (`updatePullRequestReview` : commentaire global en tête, réponses aux commentaires généraux ensuite, avec `@auteur`), `publish_drafts` la soumet une fois (`COMMENT`). La reprise sans doublon fonctionne comme pour GitLab (`remote_id`).
+- Positions : la `Position` de GitLab reste la représentation interne ; `new_line` → `RIGHT`, `old_line` seule → `LEFT`, `line_range` → `startLine` / `startSide` (une plage finissant sur une ligne retirée part du côté gauche ; ajoutée → retirée impossible sur GitHub : commentaire sur la dernière ligne), `position_type: file` → `subjectType: FILE`.
+- Tête : `refs/pull/<n>/head` ; base : merge-base (calculée localement) de `base.sha` et de la tête, comme le diff de GitHub.
+- Discussions : fils de review (résolus ou non, réponses, fils obsolètes sous l'en-tête du fichier), plus commentaires de conversation et corps des reviews soumises, en notes générales (id préfixé `general:`).
+- Vérifié en lecture seule sur BurntSushi/ripgrep#3529 (fetch, diff de 6 fichiers comme sur GitHub, 6 discussions dont l'état résolu, détection par branche et par URL, `publish --dry-run`, TUI). Publication testée seulement contre le faux serveur (réponses enregistrées).
 
 ### 5.5 Intégration Neovim
 

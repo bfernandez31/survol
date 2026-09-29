@@ -22,11 +22,14 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub forge: ForgeConfig,
     pub gitlab: GitlabConfig,
+    pub github: GithubConfig,
     pub git: GitConfig,
     pub review: ReviewConfig,
     pub llm: LlmConfig,
     pub lsp: LspConfig,
+    pub theme: ThemeConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -36,6 +39,33 @@ pub struct GitlabConfig {
     /// Required; overridden by `GITLAB_HOST`.
     pub host: Option<String>,
     /// Extra PEM bundle trusted on top of the system store (corporate CA).
+    pub ca_cert: Option<PathBuf>,
+}
+
+/// Which forge to talk to. By default it is detected from the git remote:
+/// github.com or a `[github] hosts` entry is GitHub, anything else GitLab.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ForgeConfig {
+    /// `github` or `gitlab`: skips the detection.
+    pub kind: Option<crate::forge::ForgeKind>,
+    /// Host of the forge when the remote does not say it (an SSH alias...).
+    /// For GitLab, `[gitlab] host` wins.
+    pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubConfig {
+    /// GitHub Enterprise Server hosts, e.g. `github.corp.example`: a remote
+    /// on one of them is reviewed as GitHub. github.com needs nothing.
+    pub hosts: Vec<String>,
+    /// Token, when neither `GITHUB_TOKEN` / `GH_TOKEN` provide one; before
+    /// `gh auth token`. Printed redacted.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "redacted")]
+    pub token: Option<String>,
+    /// Extra PEM bundle trusted on top of the system store (Enterprise
+    /// Server behind a corporate CA).
     pub ca_cert: Option<PathBuf>,
 }
 
@@ -117,6 +147,22 @@ impl LlmConfig {
             self.language = lang.to_string();
         }
     }
+}
+
+/// `[theme]`: colours of the TUI. `syntax` picks the code colours
+/// (`catppuccin-mocha`, the default, or `ansi` for the terminal palette);
+/// `powerline = false` drops the header's powerline arrows (they need a Nerd
+/// Font); every other key overrides a colour role with `#rrggbb`, e.g.
+/// `added_bg = "#302145"`. The TUI validates the role names.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syntax: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub powerline: Option<bool>,
+    #[serde(flatten)]
+    pub colors: std::collections::BTreeMap<String, String>,
 }
 
 /// `[lsp]`: language servers that refine the code graph after the
@@ -252,6 +298,14 @@ impl Config {
     }
 }
 
+/// Secrets are never printed (`survol-cli config`).
+fn redacted<S: serde::Serializer>(v: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(_) => s.serialize_str("<redacted>"),
+        None => s.serialize_none(),
+    }
+}
+
 fn read_table(path: &Path) -> Result<Option<toml::Table>, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -291,6 +345,18 @@ fn merge(base: &mut toml::Table, over: toml::Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_takes_powerline_syntax_and_colour_roles() {
+        let cfg: Config = toml::from_str(
+            "[theme]\npowerline = false\nsyntax = \"ansi\"\nborder_focus = \"#112233\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.theme.powerline, Some(false));
+        assert_eq!(cfg.theme.syntax.as_deref(), Some("ansi"));
+        assert_eq!(cfg.theme.colors["border_focus"], "#112233");
+        assert_eq!(cfg.theme.colors.len(), 1);
+    }
 
     #[test]
     fn project_overrides_user_and_env_overrides_both() {

@@ -4,14 +4,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use survol_core::flows::{Change, FlowStatus, Layer, Repeat, Terminal, Via};
 
 use super::graph::{cursor_line, two_sided};
-use super::{ACCENT, pane, wrap};
+use super::{pane, wrap};
 use crate::app::App;
+use crate::theme::theme;
 use crate::views::Focus;
 use crate::views::flows::{BaseStatus, EntryRow, FlowsState, Side};
 
@@ -20,11 +21,9 @@ pub fn list_title(v: &FlowsState) -> Line<'static> {
     let n = v.flows.iter().filter(|f| f.after.is_some()).count();
     let mut spans = vec![format!(" impacted entry points ({n}) ").bold()];
     match &v.base {
-        BaseStatus::Running(since) => spans.push(
-            format!("⟳ before/after {}s ", since.elapsed().as_secs())
-                .fg(ACCENT)
-                .dim(),
-        ),
+        BaseStatus::Running(since) => {
+            spans.push(format!("⟳ before/after {}s ", since.elapsed().as_secs()).fg(theme().meta))
+        }
         BaseStatus::Done => {
             let d = v
                 .flows
@@ -33,10 +32,10 @@ pub fn list_title(v: &FlowsState) -> Line<'static> {
                 .count();
             spans.push(Span::styled(
                 format!("{d} changed before/after "),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme().status_modified),
             ));
         }
-        BaseStatus::Failed(_) => spans.push("before/after failed ".fg(Color::Red)),
+        BaseStatus::Failed(_) => spans.push("before/after failed ".fg(theme().error)),
         BaseStatus::NotStarted => {}
     }
     Line::from(spans)
@@ -49,29 +48,30 @@ pub fn entry_row(v: &FlowsState, row: EntryRow, width: usize) -> Vec<Span<'stati
             let n = v.flows.iter().filter(|f| f.entry.kind == k).count();
             vec![Span::styled(
                 format!("▣ {} ({n})", k.title()),
-                Style::new().fg(Color::Blue).bold(),
+                Style::new().fg(theme().layer).bold(),
             )]
         }
         EntryRow::Flow(i) => {
+            let t = theme();
             let f = &v.flows[i];
             let mut left = vec![
                 "  ".into(),
-                Span::styled(f.entry.label.clone(), Style::new().fg(ACCENT)),
+                Span::styled(f.entry.label.clone(), Style::new().fg(t.accent)),
             ];
             if f.entry.label != f.entry.name {
-                left.push(format!("  {}", f.entry.name).dim());
+                left.push(format!("  {}", f.entry.name).fg(theme().meta));
             }
             let mut right: Vec<Span<'static>> = Vec::new();
             match f.diff.as_ref().map(|d| d.status) {
-                Some(FlowStatus::New) => right.push(" new".fg(Color::Green).bold()),
-                Some(FlowStatus::Removed) => right.push(" gone".fg(Color::Red).bold()),
-                Some(FlowStatus::Changed) => right.push(" Δ".fg(Color::Yellow).bold()),
+                Some(FlowStatus::New) => right.push(" new".fg(t.status_added).bold()),
+                Some(FlowStatus::Removed) => right.push(" gone".fg(t.status_deleted).bold()),
+                Some(FlowStatus::Changed) => right.push(" Δ".fg(t.status_modified).bold()),
                 _ => {}
             }
             if let Some(a) = &f.after {
-                right.push(format!(" {} mod", a.changed_steps).fg(Color::Yellow));
+                right.push(format!(" {} mod", a.changed_steps).fg(t.status_modified));
                 if a.confidence < 0.995 {
-                    right.push(format!(" {:.2}", a.confidence).fg(Color::Yellow).dim());
+                    right.push(format!(" {:.2}", a.confidence).fg(t.confidence));
                 }
             }
             right.push(" ".into());
@@ -81,15 +81,15 @@ pub fn entry_row(v: &FlowsState, row: EntryRow, width: usize) -> Vec<Span<'stati
 }
 
 fn layer_style(l: Layer) -> Style {
+    let t = theme();
     let c = match l {
-        Layer::View => Color::Magenta,
-        Layer::Controller => Color::Blue,
-        Layer::Service => Color::Cyan,
-        Layer::Repository => Color::Green,
-        Layer::Entity => Color::Green,
-        Layer::External => Color::Red,
-        Layer::Config => Color::Gray,
-        Layer::Code => Color::DarkGray,
+        Layer::View => t.layer_view,
+        Layer::Controller => t.layer_controller,
+        Layer::Service => t.layer_service,
+        Layer::Repository | Layer::Entity => t.layer_repository,
+        Layer::External => t.layer_external,
+        Layer::Config => t.layer_config,
+        Layer::Code => t.layer_code,
     };
     Style::new().fg(c)
 }
@@ -120,7 +120,7 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
             "  Select an entry point."
         };
         f.render_widget(
-            Paragraph::new(vec![Line::default(), Line::from(msg.dim())])
+            Paragraph::new(vec![Line::default(), Line::from(msg.fg(theme().meta))])
                 .block(pane(focused).title(" flow ")),
             area,
         );
@@ -132,19 +132,19 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
         Span::styled(
             format!("[{}] ", side.label()),
             Style::new().fg(match side {
-                Side::After => ACCENT,
-                Side::Before => Color::Magenta,
-                Side::Diff => Color::Yellow,
+                Side::After => theme().status_added,
+                Side::Before => theme().status_deleted,
+                Side::Diff => theme().status_modified,
             }),
         ),
     ];
     let relevant = flow.diff.as_ref().is_some_and(|d| d.is_relevant());
     if relevant {
-        title.push(" b before/after ".dim());
+        title.push(" b before/after ".fg(theme().meta));
     }
     let block = pane(focused)
         .title(Line::from(title))
-        .title_bottom(Line::from(" x Mermaid · Enter symbol · e edit · gd diff ").dim());
+        .title_bottom(Line::from(" x Mermaid · Enter symbol · e edit · gd diff ").fg(theme().meta));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let width = inner.width as usize;
@@ -152,9 +152,9 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
     let mut head: Vec<Line<'static>> = Vec::new();
     if let Some(d) = &flow.diff {
         let color = if relevant {
-            Color::Yellow
+            theme().status_modified
         } else {
-            Color::DarkGray
+            theme().meta
         };
         let mut text = d.summary();
         if !d.new_external.is_empty() {
@@ -169,7 +169,7 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
         }
     } else if matches!(v.base, BaseStatus::Running(_)) {
         head.push(Line::from(
-            " building the base revision for before / after…".dim(),
+            " building the base revision for before / after…".fg(theme().meta),
         ));
     }
 
@@ -182,59 +182,60 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
     let lines = app.graph.flows.lines();
     let mut out = head;
     let end = (pos.scroll + h).min(lines.len());
+    let t = theme();
     for (i, l) in lines.iter().enumerate().take(end).skip(pos.scroll) {
         let s = l.step;
         let (sign, sign_style) = match l.change {
-            Some(Change::Added) => ("+", Style::new().fg(Color::Green).bold()),
-            Some(Change::Removed) => ("-", Style::new().fg(Color::Red).bold()),
+            Some(Change::Added) => ("+", Style::new().fg(t.status_added).bold()),
+            Some(Change::Removed) => ("-", Style::new().fg(t.status_deleted).bold()),
             _ => (" ", Style::new()),
         };
         let name_style = if l.change == Some(Change::Removed) {
-            Style::new().fg(Color::Red).crossed_out()
+            Style::new().fg(t.status_deleted).crossed_out()
         } else if l.change == Some(Change::Added) {
-            Style::new().fg(Color::Green)
+            Style::new().fg(t.status_added)
         } else if s.changed {
-            Style::new().fg(Color::Yellow).bold()
+            Style::new().fg(t.status_modified).bold()
         } else if s.reaches_changed {
-            Style::new().fg(ACCENT)
+            Style::new().fg(t.accent)
         } else {
-            Style::new().dim()
+            Style::new().fg(t.meta)
         };
         let mut left = vec![
             Span::styled(sign, sign_style),
-            format!("{}{}", "  ".repeat(s.depth), via_glyph(s.via)).fg(ACCENT),
+            format!("{}{}", "  ".repeat(s.depth), via_glyph(s.via)).fg(t.accent),
             Span::styled(s.name.clone(), name_style),
             Span::styled(format!(" {}", s.layer.label()), layer_style(s.layer)),
         ];
         match s.terminal {
-            Some(Terminal::Persistence) => left.push(" [db]".fg(Color::Green).bold()),
-            Some(Terminal::External) => left.push(" [external]".fg(Color::Red).bold()),
-            Some(Terminal::Event) => left.push(" [event]".fg(Color::Magenta).bold()),
+            Some(Terminal::Persistence) => left.push(" [db]".fg(t.db).bold()),
+            Some(Terminal::External) => left.push(" [external]".fg(t.external).bold()),
+            Some(Terminal::Event) => left.push(" [event]".fg(t.event).bold()),
             _ => {}
         }
         if let Some(d) = &s.detail {
-            left.push(format!("  {d}").fg(Color::Blue).dim());
+            left.push(format!("  {d}").fg(t.meta));
         }
         match s.repeat {
-            Some(Repeat::Cycle) => left.push(" ↻ cycle".dim()),
-            Some(Repeat::Seen) => left.push(" ↑ above".dim()),
+            Some(Repeat::Cycle) => left.push(" ↻ cycle".fg(theme().meta)),
+            Some(Repeat::Seen) => left.push(" ↑ above".fg(theme().meta)),
             None => {}
         }
         if l.rerouted {
-            left.push(" rerouted".fg(Color::Yellow).italic());
+            left.push(" rerouted".fg(t.status_modified).italic());
         }
         if s.hidden > 0 {
-            left.push(format!(" +{}", s.hidden).dim());
+            left.push(format!(" +{}", s.hidden).fg(theme().meta));
         }
         if s.truncated {
-            left.push(" …".dim());
+            left.push(" …".fg(theme().meta));
         }
         let mut right = Vec::new();
         if s.confidence < 0.995 {
-            right.push(format!("{:.2} ", s.confidence).fg(Color::Yellow).dim());
+            right.push(format!("{:.2} ", s.confidence).fg(t.confidence));
         }
         right.push(if s.changed {
-            "modified ".fg(Color::Yellow)
+            "modified ".fg(t.status_modified)
         } else {
             "         ".into()
         });
@@ -242,7 +243,7 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
         out.push(cursor_line(line, i == pos.cursor && focused, width));
         if i == pos.cursor && !focused {
             let l = out.pop().expect("just pushed");
-            out.push(l.style(Style::new().bg(Color::Rgb(40, 40, 50))));
+            out.push(l.style(Style::new().bg(theme().inactive_cursor_bg)));
         }
     }
     f.render_widget(Paragraph::new(out), inner);

@@ -3,12 +3,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use survol_core::ask::Answer;
 
-use super::{ACCENT, CURSOR_BG, wrap};
+pub(super) use super::popup_block;
+use super::{markdown, meta, wrap};
+use crate::highlight::Highlighter;
+use crate::theme::theme;
 use crate::views::ask::{AnswerView, AskInput, HistoryView, Pending};
 
 /// A centered rectangle of at most `w` × `h`.
@@ -23,14 +26,6 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-pub fn popup_block(title: String) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Line::from(title).bold())
-}
-
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 pub fn spinner(elapsed_ms: u128) -> &'static str {
@@ -42,36 +37,34 @@ pub fn render_input(f: &mut Frame, area: Rect, input: &AskInput, model: &str) {
     let rect = centered(area, 90, sugg.len() as u16 + 9);
     let width = rect.width.saturating_sub(4) as usize;
     let mut lines = vec![
-        Line::from(vec![" about ".dim(), input.label.clone().bold()]),
+        Line::from(vec![meta(" about "), input.label.clone().bold()]),
         Line::default(),
     ];
     let text = format!("{}▏", input.text);
     for (i, l) in wrap(&text, width.saturating_sub(3)).into_iter().enumerate() {
         let lead = if i == 0 { " > " } else { "   " };
-        lines.push(Line::from(vec![lead.fg(ACCENT).bold(), l.into()]));
+        lines.push(Line::from(vec![lead.fg(theme().accent).bold(), l.into()]));
     }
     lines.push(Line::default());
-    lines.push(Line::from(
-        " Suggestions (↑ ↓ to pick, or its number):".dim(),
-    ));
+    lines.push(Line::from(meta(
+        " Suggestions (↑ ↓ to pick, or its number):",
+    )));
     for (i, s) in sugg.iter().enumerate() {
         let style = if input.suggestion == Some(i) {
-            Style::new().bg(CURSOR_BG).bold()
+            Style::new().bg(theme().cursor_bg).bold()
         } else {
             Style::new()
         };
         lines.push(Line::from(vec![
-            format!("  {}. ", i + 1).fg(ACCENT),
+            format!("  {}. ", i + 1).fg(theme().accent),
             Span::styled(s.to_string(), style),
         ]));
     }
     f.render_widget(Clear, rect);
     f.render_widget(
-        Paragraph::new(lines).block(
-            popup_block(" ask the LLM ".into()).title_bottom(
-                Line::from(format!(" Enter ask · Esc cancel · model: {model} ")).dim(),
-            ),
-        ),
+        Paragraph::new(lines).block(popup_block(" ask the LLM ".into()).title_bottom(Line::from(
+            meta(format!(" Enter ask · Esc cancel · model: {model} ")),
+        ))),
         rect,
     );
 }
@@ -83,7 +76,7 @@ pub fn render_pending(f: &mut Frame, area: Rect, p: &Pending) {
     let mut lines = vec![
         Line::from(vec![
             format!(" {} ", spinner(elapsed.as_millis()))
-                .fg(ACCENT)
+                .fg(theme().accent)
                 .bold(),
             format!("asking about {}… {}s", p.label, elapsed.as_secs()).bold(),
         ]),
@@ -93,9 +86,9 @@ pub fn render_pending(f: &mut Frame, area: Rect, p: &Pending) {
         lines.push(Line::from(format!("   {l}").italic()));
     }
     lines.push(Line::default());
-    lines.push(Line::from(
-        " Esc: keep reviewing, the answer comes back with A".dim(),
-    ));
+    lines.push(Line::from(meta(
+        " Esc: keep reviewing, the answer comes back with A",
+    )));
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(lines).block(popup_block(" ask the LLM ".into())),
@@ -103,95 +96,39 @@ pub fn render_pending(f: &mut Frame, area: Rect, p: &Pending) {
     );
 }
 
-/// Word-wrapped answer with its references styled; also the line of the
-/// selected reference.
+/// The answer rendered from markdown, its references styled; also the line
+/// of the selected reference.
 pub fn answer_lines(
     a: &Answer,
     selected: Option<usize>,
     width: usize,
+    hl: Option<&Highlighter>,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    let width = width.max(20);
-    let text = a.text.as_str();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut link_line = None;
-    let mut para_start = 0;
-    for para in text.split('\n') {
-        let indent = if para.trim_start().starts_with("- ") {
-            para.len() - para.trim_start().len() + 2
-        } else {
-            0
-        };
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let mut used = 0;
-        for (off, word) in words(para) {
-            let w = word.chars().count();
-            if used > 0 && used + 1 + w > width {
-                lines.push(Line::from(std::mem::take(&mut spans)));
-                spans.push(" ".repeat(indent).into());
-                used = indent;
-            } else if used > 0 {
-                spans.push(" ".into());
-                used += 1;
-            } else if off > 0 {
-                // Leading spaces of the paragraph.
-                spans.push(" ".repeat(off.min(8)).into());
-                used += off.min(8);
-            }
-            let start = para_start + off;
-            let end = start + word.len();
-            let mut pos = start;
-            for (i, r) in a.refs.iter().enumerate() {
-                if r.end <= start || r.start >= end {
-                    continue;
-                }
-                let (rs, re) = (r.start.max(start), r.end.min(end));
-                if rs > pos {
-                    spans.push(text[pos..rs].to_string().into());
-                }
-                let style = if !r.valid {
-                    Style::new()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::CROSSED_OUT)
-                } else if selected == Some(i) {
-                    link_line = Some(lines.len());
-                    Style::new().fg(Color::Black).bg(ACCENT).bold()
-                } else {
-                    Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED)
-                };
-                spans.push(Span::styled(text[rs..re].to_string(), style));
-                pos = re;
-            }
-            if pos < end {
-                spans.push(text[pos..end].to_string().into());
-            }
-            used += w;
-        }
-        lines.push(Line::from(spans));
-        para_start += para.len() + 1;
-    }
+    let marks: Vec<(std::ops::Range<usize>, Style)> = a
+        .refs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let style = if !r.valid {
+                Style::new()
+                    .fg(theme().error)
+                    .add_modifier(Modifier::CROSSED_OUT)
+            } else if selected == Some(i) {
+                Style::new().fg(theme().block_fg).bg(theme().accent).bold()
+            } else {
+                Style::new()
+                    .fg(theme().accent)
+                    .add_modifier(Modifier::UNDERLINED)
+            };
+            (r.start..r.end, style)
+        })
+        .collect();
+    let (lines, at) = markdown::render_marked(&a.text, width.max(20), Style::new(), hl, &marks);
+    let link_line = selected.and_then(|i| at.get(i).copied().flatten());
     (lines, link_line)
 }
 
-/// Words of `s` with their byte offset.
-fn words(s: &str) -> Vec<(usize, &str)> {
-    let mut out = Vec::new();
-    let mut start = None;
-    for (i, c) in s.char_indices() {
-        if c.is_whitespace() {
-            if let Some(b) = start.take() {
-                out.push((b, &s[b..i]));
-            }
-        } else if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if let Some(b) = start {
-        out.push((b, &s[b..]));
-    }
-    out
-}
-
-pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView) {
+pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView, hl: &Highlighter) {
     let rect = centered(
         area,
         (area.width * 9 / 10).clamp(40, 120),
@@ -199,7 +136,7 @@ pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView) {
     );
     let block = popup_block(format!(" {} ", v.answer.label)).title_bottom(
         Line::from(" Tab/n link · Enter go (graph) · d diff · e editor · j/k scroll · A history · Esc close ")
-            .dim(),
+            .fg(theme().meta),
     );
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
@@ -212,20 +149,22 @@ pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView) {
         .collect();
     let a = &v.answer;
     let valid = a.refs.len() - a.unknown_refs();
-    let mut info = vec![Span::from(format!(" {} link(s)", valid)).fg(ACCENT)];
+    let mut info = vec![Span::from(format!(" {} link(s)", valid)).fg(theme().accent)];
     if a.unknown_refs() > 0 {
         info.push(
-            format!(" · {} unknown reference(s), struck out", a.unknown_refs()).fg(Color::Red),
+            format!(" · {} unknown reference(s), struck out", a.unknown_refs()).fg(theme().error),
         );
     }
     if let Some(m) = &a.model {
-        info.push(format!(" · {m}").dim());
+        info.push(meta(format!(" · {m}")));
     }
     if a.from_cache {
-        info.push(" · cached".dim());
+        info.push(meta(" · cached"));
     }
     head.push(Line::from(info));
-    head.push(Line::from("─".repeat(inner.width as usize).dim()));
+    head.push(Line::from(
+        "─".repeat(inner.width as usize).fg(theme().rule),
+    ));
     let head_h = (head.len() as u16).min(inner.height.saturating_sub(2));
     let top = Rect::new(inner.x, inner.y, inner.width, head_h);
     let body = Rect::new(
@@ -236,7 +175,7 @@ pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView) {
     );
     f.render_widget(Paragraph::new(head), top);
 
-    let (lines, link_line) = answer_lines(&v.answer, v.link, width);
+    let (lines, link_line) = answer_lines(&v.answer, v.link, width, Some(hl));
     v.height = body.height as usize;
     v.total_lines = lines.len();
     if v.link_line != link_line {
@@ -281,12 +220,12 @@ pub fn render_history(f: &mut Frame, area: Rect, h: &HistoryView, history: &[Ans
     let width = rect.width.saturating_sub(2) as usize;
     let mut lines = Vec::new();
     if history.is_empty() {
-        lines.push(Line::from(" no question yet".dim()));
+        lines.push(Line::from(meta(" no question yet")));
     }
     for (i, a) in history.iter().rev().enumerate() {
         let mut spans = vec![
-            format!(" {:>7}  ", ago(a.asked_at)).dim(),
-            format!("{}  ", a.label).fg(ACCENT),
+            meta(format!(" {:>7}  ", ago(a.asked_at))),
+            format!("{}  ", a.label).fg(theme().accent),
             a.question.clone().into(),
         ];
         let used: usize = spans.iter().map(Span::width).sum();
@@ -295,7 +234,7 @@ pub fn render_history(f: &mut Frame, area: Rect, h: &HistoryView, history: &[Ans
         }
         let mut line = Line::from(spans);
         if i == h.sel {
-            line = line.patch_style(Style::new().bg(CURSOR_BG));
+            line = line.patch_style(Style::new().bg(theme().cursor_bg));
         }
         lines.push(line);
     }
@@ -304,7 +243,7 @@ pub fn render_history(f: &mut Frame, area: Rect, h: &HistoryView, history: &[Ans
     f.render_widget(
         Paragraph::new(lines).scroll((scroll, 0)).block(
             popup_block(format!(" questions of this review ({}) ", history.len()))
-                .title_bottom(Line::from(" Enter open · j/k move · Esc close ").dim()),
+                .title_bottom(Line::from(" Enter open · j/k move · Esc close ").fg(theme().meta)),
         ),
         rect,
     );
@@ -318,7 +257,7 @@ mod tests {
 
     #[test]
     fn wraps_answers_and_styles_references() {
-        let text = "Saves the pet [src/Owner.java:12] then calls [Nope.java:3].\n- a bullet that wraps over the line width";
+        let text = "Saves the pet [src/Owner.java:12] then calls [Nope.java:3].\n\n- a **bullet** that wraps over the line width";
         let r = |s: &str, valid| {
             let start = text.find(s).unwrap();
             CodeRef {
@@ -345,7 +284,7 @@ mod tests {
             asked_at: 0,
             from_cache: false,
         };
-        let (lines, link) = answer_lines(&a, Some(0), 24);
+        let (lines, link) = answer_lines(&a, Some(0), 24, None);
         let plain: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -356,7 +295,8 @@ mod tests {
                 "Saves the pet",
                 "[src/Owner.java:12] then",
                 "calls [Nope.java:3].",
-                "- a bullet that wraps",
+                "",
+                "• a bullet that wraps",
                 "  over the line width",
             ]
         );
@@ -366,7 +306,7 @@ mod tests {
             .iter()
             .find(|s| s.content == "src/Owner.java:12")
             .unwrap();
-        assert_eq!(span.style.bg, Some(ACCENT));
+        assert_eq!(span.style.bg, Some(theme().accent));
         let bad = lines[2]
             .spans
             .iter()

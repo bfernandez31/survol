@@ -4,8 +4,8 @@
 
 ![survol: the end-to-end flow of a front-end route, from the Angular component down to the repositories](docs/screenshots/graph-flows.png)
 
-survol is a terminal UI for reviewing very large GitLab merge requests (hundreds of files,
-often AI-generated). It helps you understand **how the whole change fits together**
+survol is a terminal UI for reviewing very large GitLab merge requests and GitHub pull
+requests (hundreds of files, often AI-generated). It helps you understand **how the whole change fits together**
 (what calls what, how it is wired, what untouched code it affects) and form an
 architectural opinion without reading every line. It is **not a bug finder**.
 
@@ -22,6 +22,7 @@ Steps 0 to 6 are implemented.
   - [Diff view](#diff-view)
   - [Stack view](#stack-view)
   - [Graph view](#graph-view)
+  - [Whole file](#whole-file)
   - [Questions to the LLM](#questions-to-the-llm)
   - [Comments and publishing](#comments-and-publishing)
   - [Neovim](#neovim-integration)
@@ -33,6 +34,7 @@ Steps 0 to 6 are implemented.
 - [Neovim plugin](#neovim-plugin)
 - [Privacy and safety](#privacy-and-safety)
 - [GitLab notes](#gitlab-notes)
+- [GitHub notes](#github-notes)
 - [Limitations](#limitations)
 - [Development](#development)
 - [License](#license)
@@ -43,18 +45,37 @@ survol has three views sharing one review state. `Tab` / `Shift-Tab` (or `1` `2`
 switches between them. "Reviewed" is keyed by hunk content: when new commits are pushed,
 only the hunks that actually changed come back as unreviewed.
 
-The MR head is fetched from `refs/merge-requests/<iid>/head` and checked out in a dedicated
-worktree under `.git/survol/worktrees/`, so your working branch is never touched. The Diff
+The forge is detected from the git remote: github.com (or a GitHub Enterprise host listed
+in the config) is GitHub, anything else GitLab. The MR head is fetched from
+`refs/merge-requests/<iid>/head` (a PR's from `refs/pull/<n>/head`) and checked out in a
+dedicated worktree under `.git/survol/worktrees/`, so your working branch is never touched. The Diff
 view is usable at once; the worktree, the grouping and the graph are built in the background.
 
 ### Diff view
 
 ![Diff view: file tree on the left, the whole diff as one stream on the right](docs/screenshots/diff-view.png)
 
-Every file in one continuous stream, with a directory-ordered file tree, syntax
-highlighting, unified or split (`s`) layout. Mark hunks (`space`) or files (`r`) as
-reviewed, jump to the next unreviewed hunk (`u`), filter files (`/`), fold files.
-`gs` jumps to the Graph view of the symbol under the cursor.
+Every file in one continuous stream, with a file explorer, syntax highlighting, unified
+or split (`s`) layout. Mark hunks (`space`) or files (`r`) as reviewed, jump to the next
+unreviewed hunk (`u`), filter files (`/`), fold files. `gs` jumps to the Graph view of
+the symbol under the cursor.
+
+The explorer on the left has three modes, `m` cycles through them (the choice is kept
+with the review):
+
+- **tree** (default): a compact, foldable tree. Each module shows its source sets as
+  separate branches (`main`, `test`, `openapi`, `test/resources`...), with the package
+  root they share shown once; a chain of single directories is one line, a directory
+  holding a single file is merged into the file's line. Each directory shows how many of
+  its files are reviewed, and once folded its file count and `+` / `-`.
+- **pairs**: each changed class with the tests changed with it beneath (matched by name,
+  `Foo` / `FooTest` / `FooIT` / `Foo*IT` / `foo.spec.ts`, then by the test and call edges
+  of the code graph once built, marked `(graph)`); classes without a changed test are
+  flagged `⚠ no test`.
+- **flat**: one line per file, the name first, where it lives after it.
+
+In the list, `h` / `l` fold / unfold a directory, `zM` / `zR` fold / unfold them all,
+`space` on a directory marks all its files reviewed (again: unreviewed).
 
 ### Stack view
 
@@ -100,7 +121,11 @@ the new root, `Backspace` / `Ctrl-o` goes back. The right pane previews the code
 
 **Module map**: packages / directories with their dependencies in and out (`←` / `→`
 counts, `Δ` changed symbols). `Enter` lists a module's changed symbols, `x` writes the
-map as Mermaid to `.git/survol/exports/`.
+map as Mermaid to `.git/survol/exports/`, `X` also writes a self-contained HTML page next
+to it and opens it in the browser (`open` on macOS, `xdg-open` elsewhere; only the mermaid
+script is loaded from a CDN, the diagram stays in the file). After an export, `S` adds the
+diagram to the overall comment of the review (the editor opens on it): GitLab and GitHub render
+Mermaid blocks, so everyone sees it in the merge request.
 
 ![Module map: modules with incoming / outgoing dependencies, and the detail of one module](docs/screenshots/graph-module-map.png)
 
@@ -113,7 +138,8 @@ screenshot at the top). `n` / `N` jump between changed steps.
 
 The base revision's graph is built in the background. When a flow differs, `b` cycles
 **after → before → merged**: added (`+`) and removed (`-`) steps, reroutes, new external
-calls, persistence accesses gone. `x` writes the flow (or its before / after) as Mermaid.
+calls, persistence accesses gone. `x` writes the flow (or its before / after) as Mermaid,
+`X` opens it in the browser, `S` adds it to the overall comment.
 
 ![Flow before / after: an edit screen rerouted from the pet and owner endpoints to a new visit details endpoint](docs/screenshots/graph-flow-before-after.png)
 
@@ -124,6 +150,17 @@ methods: confirmed edges go to confidence 1, wrong guesses are removed, missed c
 added. The header shows `⟳ LSP: refining 12/40`, then `LSP ✓n` (the graph is swapped in
 place) or `LSP ✗` (the heuristic graph stays). Bounded by `[lsp] budget_secs`, cached per
 head commit.
+
+### Whole file
+
+`gf` in any view (on a diff line, a hunk, a group, a symbol, a flow step) opens the
+**whole file** at the head, full screen, at that line: the lines the diff adds are
+highlighted, the removed ones shown in place, the notes under their line. The scrollbar
+on the right marks the changes (green / red) and the threads. `n` / `N` jump from change
+to change, `]c` / `[c` from thread to thread, `d` hides / shows the removed lines, `s`
+shows the file side by side (base / head), `c` (or `V` then `c`) comments a line of the
+diff (lines outside the hunks cannot be commented yet), `Enter` on a note opens its
+thread, `e` opens the editor at the line, `Esc` closes.
 
 ### Questions to the LLM
 
@@ -138,25 +175,34 @@ with `file:line` and confidence, the group summary, the hunks, `.survol/instruct
 It cites code as `[path:line]`: `Tab` / `n` selects the next link, `Enter` opens the
 Graph view of the symbol there (or the line in the Diff view), `d` the Diff view, `e` the
 editor. References to lines the model was not given are struck out and not navigable.
-`A` reopens the last answer, then the review's question history. Answers are cached.
+`A` reopens the last answer, then the review's question history. Answers are cached and
+rendered as markdown (lists, emphasis, code blocks highlighted), links included.
 
 ### Comments and publishing
 
 ![A draft comment shown under its line in the Diff view](docs/screenshots/diff-draft-comment.png)
 
 In the Diff and Stack views, `c` comments the line under the cursor (on a draft: edits it;
-on a GitLab discussion: replies to it), `V` then `c` a range of lines within one hunk, `C`
+on a GitLab discussion or GitHub review thread: replies to it), `V` then `c` a range of lines within one hunk, `C`
 the whole file. Drafts are local and follow their line when new commits arrive (a draft
 whose line is gone is marked *stale* and never published). For a merge request, the
-existing discussions are fetched in the background and shown under their line, with author
-and resolved state.
+existing discussions are fetched in the background and shown under their line, with author,
+date, resolved state and every reply.
+
+Notes are rendered as markdown (bold, italics, `code`, lists, headings, quotes, fenced
+code blocks highlighted) and wrapped to the width of the pane. A long note is folded to
+its first lines: `o` (or `za`) on it shows it whole, again folds it back. `Enter` on a
+note opens its **thread**: the code it is about, the note and all its replies (and your
+reply drafts); `c` replies (or edits a draft), `n` / `N` goes to the next / previous
+thread of the diff.
 
 ![Review panel: overall comment and drafts; on a local range, drafts stay local](docs/screenshots/review-panel.png)
 
 `P` opens the **Review panel**: the overall comment (`S`), the drafts (`Enter` go, `e`
-edit, `d` delete), the discussions (`e` reply) and `p` publish. Publishing shows what will
-be sent (`J` for the exact JSON requests) and waits for `y`. It creates GitLab draft notes,
-then publishes them all at once (`bulk_publish`), so the review appears in one go. A local
+edit, `d` delete), the discussions (`e` reply, `t` thread) and `p` publish. Publishing shows what will
+be sent (`J` for the exact JSON requests) and waits for `y`. On GitLab it creates draft
+notes, then publishes them all at once (`bulk_publish`); on GitHub it fills your pending
+review, then submits it once (`COMMENT`). Either way the review appears in one go. A local
 range (`base..head`) keeps its drafts local.
 
 ### Neovim integration
@@ -172,8 +218,9 @@ keymaps; `:SurvolBack` shows the same TUI where you left it. See [Neovim plugin]
 | Tool | Needed for | Notes |
 |---|---|---|
 | Rust toolchain | building | Pinned by `rust-toolchain.toml` (1.98.1, installed by rustup on first build); MSRV 1.90, edition 2024 |
-| `git` | everything | survol shells out to the `git` binary (your credentials, SSH, `refs/merge-requests/*`) |
-| `glab` | optional | GitLab token source (`glab auth login --hostname <host>`); or set `GITLAB_TOKEN` |
+| `git` | everything | survol shells out to the `git` binary (your credentials, SSH, `refs/merge-requests/*`, `refs/pull/*`) |
+| `glab` | optional, GitLab | GitLab token source (`glab auth login --hostname <host>`); or set `GITLAB_TOKEN` |
+| `gh` | optional, GitHub | GitHub token source (`gh auth login`); or set `GITHUB_TOKEN` / `GH_TOKEN` |
 | Claude Code CLI (`claude`) | optional | Grouping and questions; logged in. Without it, use `--no-llm` |
 | Neovim ≥ 0.10 | optional | The plugin; otherwise files open in `$VISUAL` / `$EDITOR` |
 | `jdtls` | optional, Java | `brew install jdtls` |
@@ -190,7 +237,7 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
 
 ## Quick start
 
-1. Configure your GitLab host in `~/.config/survol/config.toml` (see
+1. GitLab: configure your host in `~/.config/survol/config.toml` (see
    [Configuration](#configuration)), or export `GITLAB_HOST`:
 
    ```toml
@@ -198,8 +245,11 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
    host = "gitlab.corp.example"
    ```
 
-2. Check the setup (git, repository, GitLab host / CA / token / API version, glab, nvim,
-   the LLM CLI and its account, the language servers):
+   GitHub (github.com): nothing to configure when `gh` is logged in (`gh auth login`) or
+   `GITHUB_TOKEN` is set. GitHub Enterprise: list its host (see [GitHub notes](#github-notes)).
+
+2. Check the setup (git, repository, detected forge, host / CA / token / API version, glab
+   or gh, nvim, the LLM CLI and its account, the language servers):
 
    ```sh
    survol-cli doctor
@@ -208,10 +258,11 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
 3. Open a review from the repository:
 
    ```sh
-   survol                 # MR of the current branch
-   survol 123             # MR !123 of this repo's project (also `!123`)
+   survol                 # MR / PR of the current branch
+   survol 123             # MR !123 / PR #123 of this repo's project (also `!123`, `'#123'`)
    survol https://gitlab.corp.example/group/app/-/merge_requests/123
-   survol main..feat      # local range, diffed from the merge base (no GitLab needed)
+   survol https://github.com/owner/repo/pull/123
+   survol main..feat      # local range, diffed from the merge base (no forge needed)
    survol --no-llm 123    # never call the LLM: the Stack view groups by directory
    survol --lang fr 123   # LLM titles, summaries and answers in French
    survol --no-lsp 123    # heuristic graph only: start no language server
@@ -225,7 +276,7 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
    | `Tab` / `1` `2` `3` | Diff / Stack / Graph |
    | `j` `k`, `n` `N`, `J` `K` | move, next hunk, next file / group |
    | `space`, `u` | mark reviewed and go on, next unreviewed |
-   | `gs`, `gd`, `e` | Graph view of the symbol, back to the Diff, open in editor |
+   | `gs`, `gd`, `gf`, `e` | Graph view of the symbol, back to the Diff, whole file, open in editor |
    | `m`, `f` | Graph mode, flows |
    | `a`, `A` | ask the LLM, previous answers |
    | `c`, `V` `c`, `C`, `P` | comment line / range / file, Review panel |
@@ -241,12 +292,23 @@ configuration and the files it was read from.
 ### Full reference
 
 ```toml
+[forge]                            # default: detected from the git remote (github.com or a
+# kind = "github"                  # [github] hosts entry: GitHub; anything else: GitLab)
+# host = "github.corp.example"     # the host when the remote does not say it (an SSH alias)
+
 [gitlab]
 host = "gitlab.corp.example"      # required for merge requests (or GITLAB_HOST); https:// optional
 # ca_cert = "/path/to/corp-ca.pem"  # extra PEM trusted on top of the system store (or SURVOL_CA_CERT)
 
+[github]                           # github.com needs nothing
+# hosts = ["github.corp.example"]  # GitHub Enterprise Server hosts: their remotes are GitHub
+# token = "ghp_..."                # after GITHUB_TOKEN / GH_TOKEN, before `gh auth token`;
+#                                  # printed redacted by `survol-cli config`
+# ca_cert = "/path/to/corp-ca.pem" # extra PEM for an Enterprise Server behind a corporate CA
+
 [git]
-remote = "origin"                  # remote to fetch refs/merge-requests/* from
+remote = "origin"                  # remote to detect the forge from and to fetch
+                                   # refs/merge-requests/* or refs/pull/* from
 
 [review]
 mechanical_globs = []              # extra globs for the mechanical group, on top of the built-in
@@ -282,10 +344,46 @@ enabled = true
 
 [lsp.typescript]                   # TS and JS. default: typescript-language-server --stdio,
 enabled = true                     # else TypeScript >= 7's `tsc --lsp --stdio`
+
+[theme]                            # colours of the TUI, tuned for Catppuccin Mocha
+# syntax = "ansi"                  # code colours: catppuccin-mocha (default) or ansi (terminal palette)
+# powerline = false                # header without powerline arrows (they need a Nerd Font)
+# added_bg = "#302145"             # any role below, as #rrggbb
 ```
 
 Every `[lsp.<language>]` section takes the same four keys: `enabled`, `command`, `args`,
 `env`. Without `command`, the built-in candidates are tried in order.
+
+The default theme, "amethyst", shows added lines in dark violet and removed lines in dark
+amber, each with its `+` / `-` in a deeper block of the same hue, coloured line numbers,
+and the words that changed between a removed line and its added counterpart on a brighter
+background. Every syntax colour keeps at least 7:1 contrast on the line backgrounds
+(comments 5:1).
+
+The chrome around it ("mauve powerline") follows the same rule: what is added is mauve,
+what is removed is peach, everywhere (status letters, `+a -r` counts, new / gone flows,
+before / after). Green only means reviewed, red only an error, pink a forge discussion.
+The header is a powerline bar of pastel blocks with dark text (set `powerline = false`
+without a Nerd Font: the blocks are then separated by a space), the focused pane and the
+footer's keys are mauve, secondary text is overlay2 instead of the terminal's faint.
+
+`[theme]` roles, each a `#rrggbb` value:
+
+- diff: `added_bg`, `removed_bg`, `added_word_bg`, `removed_word_bg`, `added_sign_bg`,
+  `removed_sign_bg`, `added_sign`, `removed_sign`, `added_line_nr`, `removed_line_nr`
+  (also the `+a -r` counts and the whole-file scrollbar marks), `line_nr`, `reviewed`
+  (code of a reviewed hunk), `comment` (comments with `syntax = "ansi"`), `cursor_bg`,
+  `select_bg`, `inactive_cursor_bg`;
+- chrome: `text`, `meta` (secondary text), `block_fg` (dark text on blocks), `header_bg`,
+  `badge_bg`, `tab_fg`, `tab_bg`, `tab_active_bg`, `title_bg`, `progress_bg`,
+  `progress_done_bg`, `grouping_bg`, `graph_bg`, `threads_bg`, `drafts_bg`, `border`,
+  `border_focus`, `footer_bg`, `key`, `accent`, `dir`, `file_header_bg`, `rule`, `hunk`,
+  `hunk_reviewed`, `code`, `link`, `bullet`, `gutter`, `popup_bg`, `popup_border`,
+  `popup_title_bg`, `layer`, `relation`;
+- meaning: `status_added`, `status_modified`, `status_deleted`, `status_renamed`, `ok`,
+  `warn`, `error`, `draft`, `discussion`, `resolved`, `confidence`, `mechanical`, `intact`,
+  `in_diff`, `db`, `external`, `event`, `layer_view`, `layer_controller`, `layer_service`,
+  `layer_repository`, `layer_external`, `layer_config`, `layer_code`.
 
 ### Environment variables
 
@@ -294,6 +392,8 @@ Every `[lsp.<language>]` section takes the same four keys: `enabled`, `command`,
 | `GITLAB_HOST` | Overrides `[gitlab] host` |
 | `GITLAB_TOKEN` | GitLab token. Otherwise `glab config get token --host <host>` is used |
 | `SURVOL_CA_CERT` | Overrides `[gitlab] ca_cert` |
+| `GITHUB_TOKEN`, `GH_TOKEN` | github.com token, in this order. Then `[github] token`, then `gh auth token --hostname github.com` |
+| `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` | GitHub Enterprise Server token (as for gh). Then `[github] token`, then `gh auth token --hostname <host>` |
 | `SURVOL_LLM_LOG=<dir>` | Keeps every prompt and raw LLM answer in `<dir>` (debugging cost / latency) |
 | `XDG_CONFIG_HOME` | Location of the user config (`$XDG_CONFIG_HOME/survol/config.toml`) |
 | `NVIM` | Set by Neovim's terminal: `e` opens files in that parent Neovim |
@@ -338,6 +438,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `gg` / `G` | top / bottom |
 | `h` / `l`, `0` | scroll content horizontally, reset |
 | `s` | unified ↔ split |
+| `gf` | whole file at the head, changes in place (see Popups) |
 | `e` | open in editor (parent Neovim if any) |
 | `a` | ask the LLM about the node / group / hunk |
 | `A` | last answer, then the review's questions |
@@ -355,12 +456,17 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `space` | toggle hunk reviewed, go to next |
 | `r` / `v` | toggle file reviewed (folds it) |
 | `o` / `za`, `Enter` on header | fold / unfold file |
-| `zM` / `zR` | fold / unfold all |
+| `zM` / `zR` | fold / unfold all (in the list: every directory) |
 | `/` | filter files, `Esc` to clear |
+| `m` | file list: tree → pairs (classes and their tests) → flat |
+| `h` / `l` (list) | fold / unfold directory, parent |
+| `space` on a directory (list) | mark all its files reviewed |
 | `gs` | Graph view of the symbol under the cursor |
 | `c` | comment the line (on a draft: edit; on a thread: reply) |
 | `V` then `c` | select lines, comment the range |
 | `C` | comment the whole file |
+| `o` / `za` on a note | show the whole note, fold it back |
+| `Enter` on a note | its thread: code, note, replies (`c` reply, `n` / `N` next) |
 
 ### Stack
 
@@ -377,6 +483,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `R` | regroup without cache (asks: LLM call) |
 | `gs` | Graph view of the hunk's symbol |
 | `c` / `V` then `c` / `C` (content) | comment line / range / file |
+| `o` / `za`, `Enter` on a note | whole note / fold it back; its thread |
 
 ### Graph
 
@@ -392,12 +499,14 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `gd` | the symbol's hunks in the Diff view |
 | `Ctrl-l`, `j` / `k` | preview pane, scroll it |
 | `x` | write the module map as Mermaid (`.git/survol/exports`) |
+| `X` | same, plus an HTML page opened in the browser |
+| `S` | add the last exported diagram to the overall comment |
 | `f` | flows: impacted entry points and their end-to-end flow |
 | flows: `Enter` / `l`, `h` | into the flow, back to the entry points |
 | flows: `n` / `N` | next / previous changed (or added / removed) step |
 | flows: `Enter` | symbol view of the step |
 | flows: `b` | after → before → merged (when the flow differs) |
-| flows: `x` | write the flow as Mermaid (`.git/survol/exports`) |
+| flows: `x` / `X` | write the flow as Mermaid (`X`: and open it in the browser) |
 
 ### Popups
 
@@ -406,7 +515,9 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | Question input | type, or `↑` / `↓` (`Tab`, `Ctrl-n` / `Ctrl-p`) or `1`–`9` to pick a suggestion; `Ctrl-u` clear; `Enter` ask; `Esc` cancel |
 | Answer | `Tab` / `n`, `Shift-Tab` / `N` next / previous link; `Enter` go (Graph, else Diff); `d` Diff; `e` editor; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `A` history; `Esc` / `q` close |
 | Comment editor | `Ctrl-s` or `Alt-Enter` save; `Enter` new line; `Tab` indent; `Ctrl-u` clear the line; `Esc` cancel (twice if the text changed) |
-| Review panel | `Enter` go / edit summary; `e` edit (reply on a discussion); `d` delete; `S` summary; `p` publish; `r` refresh; `Esc` / `P` close |
+| Whole file (`gf`) | `n` / `N` next / previous change; `]c` / `[c` next / previous thread; `d` hide / show removed lines; `s` side by side; `c`, `V` then `c` comment a diff line / range; `o` / `za` fold a note; `Enter` on a note: thread, else editor; `e` editor; `h` / `l`, `gg` / `G`, `Ctrl-d` / `Ctrl-u` move; `Esc` / `q` close |
+| Thread | `c` reply (edit on a draft); `n` / `N` next / previous thread; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `Esc` / `q` close |
+| Review panel | `Enter` go / edit summary; `e` edit (reply on a discussion); `t` thread; `d` delete; `S` summary; `p` publish; `r` refresh; `Esc` / `P` close |
 | Publish confirmation | `y` publish; `n` cancel; `J` exact JSON requests; `j` / `k` scroll |
 
 ## CLI reference
@@ -415,8 +526,8 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 
 ```
 survol [OPTIONS] [TARGET]
-  TARGET        MR number (123, !123), MR URL, or local range base..head.
-                Empty: the MR of the current branch
+  TARGET        MR / PR number (123, !123, #123), MR / PR URL, or local range
+                base..head. Empty: the MR / PR of the current branch
   -C, --repo    repository to work in (default: current directory)
   --no-llm      never call the LLM (same as [llm] enabled = false)
   --lang LANG   language of LLM-written text (overrides [llm] language)
@@ -430,16 +541,16 @@ The engine as JSON commands, for scripts, tests and debugging. Every command tak
 
 | Command | What it does | Options |
 |---|---|---|
-| `doctor` | Checks git, GitLab access, nvim, the LLM CLI, the language servers | `--json` |
+| `doctor` | Checks git, the detected forge and its access (host, token source, API), nvim, the LLM CLI, the language servers | `--json` |
 | `config` | Prints the effective configuration and where it is read from | |
-| `fetch` | Fetches a merge request and checks it out in its worktree | |
+| `fetch` | Fetches a merge / pull request and checks it out in its worktree | |
 | `diff` | Parsed diff (files, hunks) as JSON | |
 | `group` | Stack grouping as JSON | `--no-cache`, `--no-llm`, `--lang` |
 | `graph` | Changed symbols with callers, callees, tests as JSON | `--symbol NAME`, `--modules`, `--mermaid`, `--no-cache`, `--lsp` (refine and print edge counts by confidence before / after on stderr) |
 | `flows` | Impacted entry points and their end-to-end flows, with before / after | `--entry NAME`, `--mermaid`, `--no-base`, `--no-cache` |
 | `ask` | Asks a question about a symbol, a group or a hunk | `--symbol NAME`, `--group N` (1 = first), `--hunk ID`, `--no-cache`, `--prompt` (print the prompt, no LLM call), `--lang` |
-| `comments` | Local drafts (and where they land) and the MR's discussions | |
-| `publish` | Publishes the drafts to the MR | `--dry-run` (print the exact requests), `--yes` (required to send) |
+| `comments` | Local drafts (and where they land) and the MR / PR's discussions | |
+| `publish` | Publishes the drafts to the MR / PR | `--dry-run` (print the exact requests), `--yes` (required to send) |
 
 Examples (with [jq](https://jqlang.org)):
 
@@ -511,12 +622,22 @@ and runs `$VISUAL` / `$EDITOR`.
 - **Which account**: `[llm] config_dir` sets `CLAUDE_CONFIG_DIR` for the CLI. Put it in the
   project's `.survol/config.toml` to route work code to a work account without touching
   your default one; `survol-cli doctor` shows the account in use.
-- **No telemetry.** survol itself only talks to your GitLab host (API, `git fetch`); the LLM CLI does its own network calls when enabled.
-- **GitLab writes need confirmation**: `y` in the TUI after the full list of requests,
+- **No telemetry.** survol itself only talks to your forge: the GitLab host, or GitHub
+  (`api.github.com`, or your Enterprise Server) for API calls, and your git remote for
+  `git fetch`; the LLM CLI does its own network calls when enabled.
+- **Tokens** are read from the environment, the config, `glab` or `gh`, sent only to the
+  forge's API as a bearer header, and never printed (`doctor` shows where a token comes
+  from, `survol-cli config` prints `[github] token` redacted, HTTP errors carry no header).
+- **Mermaid pages** (`X`): the HTML file loads the mermaid script from `cdn.jsdelivr.net`
+  in your browser; the diagram itself stays in the local file. `x` writes the Markdown
+  only.
+- **Forge writes need confirmation**: `y` in the TUI after the full list of requests,
   `--yes` on the command line. `publish --dry-run` prints the exact requests and sends
   nothing. Local ranges are never published.
 - **Warning**: `bulk_publish` publishes *all* your pending draft notes on the MR, including
-  drafts you started in the browser. The confirmation shows how many are already there.
+  drafts you started in the browser; on GitHub, submitting publishes your whole pending
+  review, comments started in the browser included. The confirmation shows how many are
+  already there.
 - Stale drafts (their line is gone) are never sent. An interrupted publication resumes
   without duplicates.
 
@@ -537,6 +658,35 @@ and runs `$VISUAL` / `$EDITOR`.
   positions, especially multi-line ranges (`line_range`) and file comments. Positions were
   tested against a fake GitLab server, not yet against a production instance.
 
+## GitHub notes
+
+- **Detection**: a remote on `github.com` (or an SSH alias such as `github.com-work`) is
+  GitHub; so is a host listed in `[github] hosts` (GitHub Enterprise Server). A pull
+  request URL on the command line wins; `[forge] kind = "github"` (with `[forge] host`)
+  forces it. Anything else stays GitLab, as before.
+- **API**: REST v3 (`api.github.com`, or `https://<host>/api/v3`) and GraphQL (review
+  threads with their resolved state, the pending review). Token: `GITHUB_TOKEN`,
+  `GH_TOKEN` (Enterprise: `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`), then
+  `[github] token`, then `gh auth token --hostname <host>`. A classic token needs the
+  `repo` scope for private repositories; a fine-grained one, *Pull requests: read and
+  write* (read is enough to review without publishing).
+- **Diff**: the PR head comes from `refs/pull/<n>/head` (fork PRs included), the base is
+  the merge base of the base branch and the head, as GitHub diffs it.
+- **Discussions**: review threads (resolved or not, every reply, on their line; outdated
+  ones under their file), plus the PR conversation comments and the bodies of submitted
+  reviews, as general notes.
+- **Publishing**: one review. survol reuses your pending review, or creates one on the
+  reviewed head (`POST .../pulls/<n>/reviews` without `event`), adds each draft to it by
+  GraphQL (`addPullRequestReviewThread`: `line` / `side`, `startLine` / `startSide` for a
+  range, `subjectType: FILE` for a file; `addPullRequestReviewThreadReply` for a reply to a
+  thread), writes the overall comment as the review body, then submits it once with the
+  `COMMENT` event. Draft notes and file comments are always available (no version gating).
+- **Mapping**: an added or unchanged line is on the `RIGHT` side (new number), a removed
+  line on the `LEFT` (old number). GitHub has no range going from an added line to a
+  removed one: such a range becomes a comment on its last line.
+- GitHub cannot thread a reply to a conversation comment or a review body: survol adds it
+  to the review body, mentioning the author (`@alice ...`).
+
 ## Limitations
 
 - **Languages**: Java, Kotlin, TypeScript/TSX, JavaScript. Other files appear in the Diff
@@ -556,7 +706,9 @@ and runs `$VISUAL` / `$EDITOR`.
   aligned by id (a repeated step is not expanded again); the base graph is complete up to
   5,000 files, otherwise limited to the neighbourhood of the flows.
 - **Editor**: only the line (not the column) is passed from the views.
-- **GitHub** is not supported (the forge abstraction is ready for it).
+- **GitHub**: publishing was tested against a fake server only (recorded API responses),
+  not against github.com; review threads beyond 100 comments are cut at 100; GitHub
+  Enterprise Server versions without file-level comments (`subjectType`) are not detected.
 - Grouping and publishing still need validation on a large real GitLab MR.
 
 ## Development

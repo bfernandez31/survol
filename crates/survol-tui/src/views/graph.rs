@@ -19,6 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::graph::{EdgeKind, Graph, Link, ModuleMap, Role, SymIdx, SymbolKind};
 use survol_core::model::{Diff, LineKind};
 
+use super::export::{self, Diagram};
 use super::flows::{EntryRow, FlowsState};
 use super::{Focus, Scroll};
 use crate::app::{Action, Shared};
@@ -463,6 +464,8 @@ pub struct GraphView {
     pub hscroll: usize,
     sources: HashMap<(String, bool), Rc<Source>>,
     pending: Option<char>,
+    /// Last diagram exported (`x`), for `S`.
+    pub last_export: Option<Diagram>,
 }
 
 impl GraphView {
@@ -959,6 +962,28 @@ impl GraphView {
         }
     }
 
+    /// `gf`: the whole file of the selected node, at its line.
+    fn whole_file(&self, sh: &mut Shared) -> Action {
+        let Some(g) = &sh.graph else {
+            return Action::None;
+        };
+        let Some(t) = self.target(g) else {
+            sh.notify("select a symbol to see its file");
+            return Action::None;
+        };
+        if t.removed {
+            sh.notify("removed symbol: its file at the head");
+        }
+        let line = if t.removed {
+            1
+        } else {
+            t.line
+                .saturating_add_signed(self.preview_offset as i32)
+                .max(1)
+        };
+        Action::WholeFile { path: t.file, line }
+    }
+
     fn open_in_editor(&self, sh: &mut Shared) {
         let Some(g) = &sh.graph else {
             return;
@@ -1012,24 +1037,30 @@ impl GraphView {
         }
     }
 
-    fn export_mermaid(&self, sh: &mut Shared) {
+    /// `x` / `X`: the module map as Mermaid; `open`: in the browser too.
+    fn export_mermaid(&mut self, sh: &mut Shared, open: bool) {
         let Some(map) = &self.modules else {
             return;
         };
-        let dir = match sh.review.repo.survol_dir() {
-            Ok(d) => d.join("exports"),
-            Err(e) => return sh.notify(format!("cannot export: {e}")),
+        let d = Diagram {
+            title: format!("Module map of {}", sh.review.title()),
+            mermaid: map.to_mermaid(),
         };
         let head = survol_core::review::short(&sh.review.head_sha);
-        let path = dir.join(format!("modules-{head}.md"));
-        let text = format!(
-            "# Module map of {}\n\n```mermaid\n{}```\n",
-            sh.review.title(),
-            map.to_mermaid()
-        );
-        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {
-            Ok(()) => sh.notify(format!("module map written to {}", path.display())),
-            Err(e) => sh.notify(format!("cannot write {}: {e}", path.display())),
+        let text = format!("# {}\n\n```mermaid\n{}```\n", d.title, d.mermaid);
+        if export::export(sh, &format!("modules-{head}"), &text, &d, open) {
+            self.last_export = Some(d);
+        }
+    }
+
+    /// `S` after an export: the diagram into the overall comment.
+    fn add_to_summary(&self, sh: &mut Shared) -> Action {
+        match &self.last_export {
+            Some(d) => Action::AddToSummary(d.markdown()),
+            None => {
+                sh.notify("export a diagram first: x (module map, flow)");
+                Action::None
+            }
         }
     }
 
@@ -1041,45 +1072,7 @@ impl GraphView {
         if let Some(s) = self.sources.get(&key) {
             return Some(s.clone());
         }
-        let diff = &sh.review.diff;
-        let file = diff.files.iter().find(|f| f.path == t.file);
-        let text = if t.removed {
-            let old = file.and_then(|f| f.old_path.as_deref()).unwrap_or(&t.file);
-            git_show(sh, &sh.review.base_sha, old)
-        } else if sh.worktree_ready {
-            std::fs::read_to_string(sh.review.worktree.join(&t.file))
-                .ok()
-                .or_else(|| git_show(sh, &sh.review.head_sha, &t.file))
-        } else {
-            git_show(sh, &sh.review.head_sha, &t.file)
-        }?;
-        let lines: Vec<String> = text.lines().map(str::to_string).collect();
-        let spans = if lines.len() > 20_000 {
-            lines
-                .iter()
-                .map(|l| vec![(Default::default(), crate::highlight::expand_tabs(l))])
-                .collect()
-        } else {
-            sh.highlighter
-                .lines(&t.file, lines.iter().map(String::as_str))
-        };
-        let mut changed = HashSet::new();
-        if let Some(f) = file {
-            for h in diff.file_hunks(diff.files.iter().position(|x| x.path == f.path)?) {
-                for l in &h.lines {
-                    match (t.removed, l.kind) {
-                        (false, LineKind::Added) => changed.extend(l.new_line),
-                        (true, LineKind::Removed) => changed.extend(l.old_line),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        let src = Rc::new(Source {
-            lines,
-            spans,
-            changed,
-        });
+        let src = Rc::new(load_source(sh, &t.file, t.removed)?);
         self.sources.insert(key, src.clone());
         Some(src)
     }
@@ -1100,6 +1093,7 @@ impl GraphView {
                     Focus::Content => self.preview_offset = 0,
                 },
                 ('g', KeyCode::Char('d')) => return self.to_diff(sh),
+                ('g', KeyCode::Char('f')) => return self.whole_file(sh),
                 ('z', KeyCode::Char('a' | 'o' | 'c')) => {
                     if let Some(g) = &sh.graph {
                         self.toggle_fold(g);
@@ -1145,8 +1139,13 @@ impl GraphView {
                 self.query.clear();
             }
             KeyCode::Char('e') => self.open_in_editor(sh),
-            KeyCode::Char('x') if self.mode == Mode::Flows => self.flows.export(sh),
-            KeyCode::Char('x') => self.export_mermaid(sh),
+            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Flows => {
+                if let Some(d) = self.flows.export(sh, c == 'X') {
+                    self.last_export = Some(d);
+                }
+            }
+            KeyCode::Char(c @ ('x' | 'X')) => self.export_mermaid(sh, c == 'X'),
+            KeyCode::Char('S') => return self.add_to_summary(sh),
             KeyCode::Char('o') => self.toggle_fold(g),
             KeyCode::Char('0') => self.hscroll = 0,
             _ => match self.focus {
@@ -1281,6 +1280,51 @@ fn toggle(set: &mut HashSet<Rel>, rel: Rel) {
     if !set.remove(&rel) {
         set.insert(rel);
     }
+}
+
+/// The file `path` at the head (or, `removed`, at the base), highlighted,
+/// with the lines the diff adds (removes) marked. From the worktree when
+/// ready, else from git.
+pub fn load_source(sh: &mut Shared, path: &str, removed: bool) -> Option<Source> {
+    let diff = &sh.review.diff;
+    let fi = diff.files.iter().position(|f| f.path == path);
+    let file = fi.map(|i| &diff.files[i]);
+    let text = if removed {
+        let old = file.and_then(|f| f.old_path.as_deref()).unwrap_or(path);
+        git_show(sh, &sh.review.base_sha, old)
+    } else if sh.worktree_ready {
+        std::fs::read_to_string(sh.review.worktree.join(path))
+            .ok()
+            .or_else(|| git_show(sh, &sh.review.head_sha, path))
+    } else {
+        git_show(sh, &sh.review.head_sha, path)
+    }?;
+    let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let spans = if lines.len() > 20_000 {
+        lines
+            .iter()
+            .map(|l| vec![(Default::default(), crate::highlight::expand_tabs(l))])
+            .collect()
+    } else {
+        sh.highlighter.lines(path, lines.iter().map(String::as_str))
+    };
+    let mut changed = HashSet::new();
+    if let Some(fi) = fi {
+        for h in diff.file_hunks(fi) {
+            for l in &h.lines {
+                match (removed, l.kind) {
+                    (false, LineKind::Added) => changed.extend(l.new_line),
+                    (true, LineKind::Removed) => changed.extend(l.old_line),
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(Source {
+        lines,
+        spans,
+        changed,
+    })
 }
 
 fn git_show(sh: &Shared, rev: &str, path: &str) -> Option<String> {
@@ -1560,6 +1604,29 @@ mod tests {
     }
 
     #[test]
+    fn module_map_export_goes_to_the_overall_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let (mut sh, mut v) = setup(dir.path());
+        // S before any export: nothing to add.
+        assert_eq!(v.on_key(&mut sh, key('S')), Action::None);
+        v.export_mermaid(&mut sh, false);
+        let md = dir.path().join(".git/survol/exports/modules-head.md");
+        assert!(md.exists(), "{:?}", sh.message());
+        assert!(!md.with_extension("html").exists(), "x writes no page");
+        assert!(sh.message().unwrap().contains("S adds it"));
+        let Action::AddToSummary(text) = v.on_key(&mut sh, key('S')) else {
+            panic!("nothing to add");
+        };
+        assert!(text.starts_with("#### Module map of base..head"));
+        assert!(text.contains("```mermaid\nflowchart"));
+    }
+
+    #[test]
     fn gd_and_gs_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let (mut sh, mut v) = setup(dir.path());
@@ -1567,6 +1634,15 @@ mod tests {
         v.show_symbol(&sh, find);
         v.on_key(&mut sh, key('g'));
         assert_eq!(v.on_key(&mut sh, key('d')), Action::ShowHunk(0));
+        // gf: the whole file, at the symbol.
+        v.on_key(&mut sh, key('g'));
+        assert_eq!(
+            v.on_key(&mut sh, key('f')),
+            Action::WholeFile {
+                path: PATH.into(),
+                line: sh.graph.as_ref().unwrap().symbol(find).line,
+            }
+        );
         // An unchanged symbol has no hunk to show.
         select_node(&sh, &mut v, "OwnerController.show");
         v.on_key(&mut sh, key('g'));
@@ -1583,6 +1659,12 @@ mod tests {
         d.pos.cursor = row;
         d.on_key(&mut sh, key('g'));
         assert_eq!(d.on_key(&mut sh, key('s')), Action::ShowSymbol(find));
+        d.on_key(&mut sh, key('g'));
+        let Action::WholeFile { path, line } = d.on_key(&mut sh, key('f')) else {
+            panic!("no whole file");
+        };
+        assert_eq!(path, PATH);
+        assert_eq!(Some(line), sh.review.diff.hunks[0].lines[1].new_line);
     }
 
     #[test]

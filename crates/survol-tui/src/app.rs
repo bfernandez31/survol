@@ -24,10 +24,11 @@ use crate::views::ask::{
     AnswerOutcome, AnswerView, AskInput, HistoryOutcome, HistoryView, InputOutcome, Pending,
 };
 use crate::views::comments::{
-    CommentTarget, Confirm, Editor, EditorOutcome, NoteIndex, PanelOutcome, PanelRow, ReviewPanel,
-    panel_rows,
+    CommentTarget, Confirm, Editor, EditorOutcome, NoteIndex, NoteKind, PanelOutcome, PanelRow,
+    ReviewPanel, ThreadOutcome, ThreadView, panel_rows,
 };
 use crate::views::diff::DiffView;
+use crate::views::fileview::{FileOutcome, FileView};
 use crate::views::graph::GraphView;
 use crate::views::stack::StackView;
 
@@ -52,7 +53,7 @@ impl View {
 }
 
 /// What a view asks the application to do after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
     /// Show this hunk in the Diff view.
@@ -70,6 +71,15 @@ pub enum Action {
     },
     /// Write or edit a comment.
     Comment(CommentTarget),
+    /// Show the whole thread of a note.
+    Thread(NoteKind),
+    /// Open the overall comment with this text added at its end.
+    AddToSummary(String),
+    /// Show the whole file `path`, at head line `line`.
+    WholeFile {
+        path: String,
+        line: u32,
+    },
 }
 
 /// A modal window over the views.
@@ -83,6 +93,10 @@ pub enum Popup {
     Comment(Editor),
     /// The Review panel ([`App::panel`]).
     Review,
+    /// The whole thread of a note.
+    Thread(ThreadView),
+    /// The whole file (`gf`).
+    File(FileView),
 }
 
 /// The merge request's side of the review.
@@ -156,6 +170,11 @@ impl Shared {
         }
     }
 
+    /// `o` on a note: shows it whole, or folds it back.
+    pub fn toggle_note(&mut self, note: u32) {
+        self.notes.toggle_fold(note, &self.highlighter);
+    }
+
     pub fn discussions(&self) -> &[Discussion] {
         self.remote
             .as_ref()
@@ -165,7 +184,11 @@ impl Shared {
     /// Places drafts and discussions again (views must relayout after).
     pub fn rebuild_notes(&mut self) {
         let discussions = self.remote.as_ref().map_or(&[][..], |r| &r.discussions);
-        self.notes = NoteIndex::build(&self.review.diff, &self.comments, discussions);
+        let mut notes = NoteIndex::build(&self.review.diff, &self.comments, discussions);
+        notes.expanded = std::mem::take(&mut self.notes.expanded);
+        notes.set_width(self.notes.width(), &self.highlighter);
+        notes.generation = self.notes.generation + 1;
+        self.notes = notes;
     }
 
     /// Writes the draft comments; called after every change.
@@ -204,18 +227,10 @@ impl Shared {
         }
     }
 
-    /// File and line to open for a position, on the new side.
-    fn editor_target(
-        &self,
-        file: usize,
-        hunk: Option<usize>,
-        line: Option<usize>,
-    ) -> Result<(PathBuf, u32), &'static str> {
+    /// Head line of a position: the line (the next one with a head number
+    /// for a removed line), else the start of the hunk, else 1.
+    pub fn head_line(&self, hunk: Option<usize>, line: Option<usize>) -> u32 {
         let d = &self.review.diff;
-        let f = &d.files[file];
-        if f.status == FileStatus::Deleted {
-            return Err("file deleted in this review");
-        }
         let line = match (hunk, line) {
             (Some(h), Some(l)) => {
                 let hunk = &d.hunks[h];
@@ -228,7 +243,32 @@ impl Shared {
             (Some(h), None) => d.hunks[h].new_range.start,
             _ => 1,
         };
-        Ok((self.review.worktree.join(&f.path), line.max(1)))
+        line.max(1)
+    }
+
+    /// File and line to open for a position, on the new side.
+    fn editor_target(
+        &self,
+        file: usize,
+        hunk: Option<usize>,
+        line: Option<usize>,
+    ) -> Result<(PathBuf, u32), &'static str> {
+        let f = &self.review.diff.files[file];
+        if f.status == FileStatus::Deleted {
+            return Err("file deleted in this review");
+        }
+        Ok((
+            self.review.worktree.join(&f.path),
+            self.head_line(hunk, line),
+        ))
+    }
+
+    /// `gf`: the whole-file view of `file` at a position.
+    pub fn whole_file(&self, file: usize, hunk: Option<usize>, line: Option<usize>) -> Action {
+        Action::WholeFile {
+            path: self.review.diff.files[file].path.clone(),
+            line: self.head_line(hunk, line),
+        }
     }
 
     /// Opens `file` at the hunk / line in the editor (parent Neovim if any).
@@ -333,6 +373,8 @@ pub struct App {
 
     /// The Review panel (`P`), kept between openings.
     pub panel: ReviewPanel,
+    /// The whole-file view, while a comment or a thread opened from it shows.
+    file_back: Option<FileView>,
     pub remote_status: RemoteStatus,
     remote_rx: Option<mpsc::Receiver<Result<Option<RemoteReview>, String>>>,
     /// Progress of a publication running in the background.
@@ -371,6 +413,7 @@ impl App {
             history,
             last_answer: None,
             panel: ReviewPanel::default(),
+            file_back: None,
             remote_status: RemoteStatus::Local,
             remote_rx: None,
             publishing: None,
@@ -499,6 +542,7 @@ impl App {
         self.stack.reorder_with_graph(&self.sh, &g);
         self.sh.graph = Some(g);
         self.graph.on_graph_ready(&self.sh);
+        self.diff.on_graph_ready(&self.sh);
     }
 
     /// The heuristic graph is ready and the worktree checked out: refine the
@@ -684,6 +728,17 @@ impl App {
                 self.switch(View::Diff);
             }
             Action::Comment(t) => self.open_editor(t, false),
+            Action::Thread(kind) => self.open_thread(kind, false),
+            Action::AddToSummary(text) => {
+                self.open_editor(CommentTarget::Summary, false);
+                if let Some(Popup::Comment(e)) = &mut self.popup {
+                    e.append(&text);
+                }
+            }
+            Action::WholeFile { path, line } => match FileView::open(&mut self.sh, &path, line) {
+                Ok(v) => self.popup = Some(Popup::File(v)),
+                Err(e) => self.sh.notify(e),
+            },
             Action::ShowSymbol(s) => {
                 if self.sh.graph.is_some() {
                     self.graph.show_symbol(&self.sh, s);
@@ -939,15 +994,77 @@ impl App {
             },
             Popup::Comment(mut e) => match e.on_key(key) {
                 EditorOutcome::Continue => self.popup = Some(Popup::Comment(e)),
-                EditorOutcome::Cancel => {
-                    if e.from_panel {
-                        self.popup = Some(Popup::Review);
-                    }
-                }
+                EditorOutcome::Cancel => self.editor_closed(&e),
                 EditorOutcome::Save(text) => {
                     self.save_comment(e.target, &text);
-                    if e.from_panel {
+                    self.editor_closed(&e);
+                }
+            },
+            Popup::File(mut v) => match v.on_key(&mut self.sh, key) {
+                FileOutcome::Continue => self.popup = Some(Popup::File(v)),
+                FileOutcome::Close => {}
+                FileOutcome::Edit(line) => {
+                    self.sh.open_path(&v.path, line);
+                    self.popup = Some(Popup::File(v));
+                }
+                FileOutcome::Comment(target) => {
+                    self.open_editor(target, false);
+                    match &mut self.popup {
+                        Some(Popup::Comment(e)) => {
+                            e.from_file = true;
+                            self.file_back = Some(v);
+                        }
+                        _ => self.popup = Some(Popup::File(v)),
+                    }
+                }
+                FileOutcome::Thread(kind) => {
+                    self.open_thread(kind, false);
+                    if let Some(Popup::Thread(t)) = &mut self.popup {
+                        t.from_file = true;
+                    }
+                    self.file_back = Some(v);
+                }
+            },
+            Popup::Thread(mut t) => match t.on_key(key) {
+                ThreadOutcome::Continue => self.popup = Some(Popup::Thread(t)),
+                ThreadOutcome::Close => {
+                    if t.from_panel {
                         self.popup = Some(Popup::Review);
+                    } else if t.from_file {
+                        self.back_to_file();
+                    }
+                }
+                ThreadOutcome::Write(target) => {
+                    self.open_editor(target, false);
+                    match &mut self.popup {
+                        Some(Popup::Comment(e)) => {
+                            e.from_thread = Some(t.kind);
+                            e.from_file = t.from_file;
+                        }
+                        _ => self.popup = Some(Popup::Thread(t)),
+                    }
+                }
+                ThreadOutcome::Next(forward) => {
+                    let order = self.sh.notes.ordered(&self.sh.review.diff);
+                    let cur = self
+                        .sh
+                        .notes
+                        .find(t.kind)
+                        .and_then(|i| order.iter().position(|&x| x == i));
+                    let next = match (cur, forward) {
+                        (_, _) if order.is_empty() => None,
+                        (None, _) => Some(0),
+                        (Some(i), true) => Some((i + 1) % order.len()),
+                        (Some(i), false) => Some((i + order.len() - 1) % order.len()),
+                    };
+                    match next {
+                        Some(i) => {
+                            let mut v =
+                                ThreadView::new(self.sh.notes.items[order[i] as usize].kind);
+                            v.from_panel = t.from_panel;
+                            self.popup = Some(Popup::Thread(v));
+                        }
+                        None => self.popup = Some(Popup::Thread(t)),
                     }
                 }
             },
@@ -963,6 +1080,53 @@ impl App {
     }
 
     // ----- comments ------------------------------------------------------
+
+    /// Shows the whole thread of a note; a reply drafted to a discussion
+    /// shows the discussion.
+    pub fn open_thread(&mut self, kind: NoteKind, from_panel: bool) {
+        let kind = match kind {
+            NoteKind::Draft(id) => match self.sh.comments.get(id).map(|d| &d.anchor) {
+                Some(Anchor::Reply { discussion, .. }) => self
+                    .sh
+                    .discussions()
+                    .iter()
+                    .position(|d| &d.id == discussion)
+                    .map_or(kind, NoteKind::Remote),
+                _ => kind,
+            },
+            k => k,
+        };
+        let mut v = ThreadView::new(kind);
+        v.from_panel = from_panel;
+        self.popup = Some(Popup::Thread(v));
+    }
+
+    /// Where to go back once the editor is closed.
+    fn editor_closed(&mut self, e: &Editor) {
+        if e.from_panel {
+            self.popup = Some(Popup::Review);
+            return;
+        }
+        if let Some(kind) = e.from_thread {
+            // An emptied draft is gone: nothing to go back to.
+            let gone = matches!(kind, NoteKind::Draft(id) if self.sh.comments.get(id).is_none());
+            if !gone {
+                let mut t = ThreadView::new(kind);
+                t.from_file = self.file_back.is_some();
+                self.popup = Some(Popup::Thread(t));
+                return;
+            }
+        }
+        self.back_to_file();
+    }
+
+    /// Shows again the whole-file view left for a comment or a thread.
+    fn back_to_file(&mut self) {
+        if let Some(mut v) = self.file_back.take() {
+            v.relayout(&self.sh);
+            self.popup = Some(Popup::File(v));
+        }
+    }
 
     /// Fetches the instance version and the discussions of the merge request
     /// in the background (nothing for a local range).
@@ -994,7 +1158,8 @@ impl App {
         match res {
             Ok(remote) => self.set_remote(remote),
             Err(e) => {
-                self.sh.notify(format!("GitLab discussions: {e}"));
+                let forge = self.sh.review.forge();
+                self.sh.notify(format!("{forge} discussions: {e}"));
                 self.remote_status = RemoteStatus::Failed(e);
             }
         }
@@ -1169,6 +1334,7 @@ impl App {
             PanelOutcome::AskPublish => self.prepare_publish(),
             PanelOutcome::Publish(plan) => self.start_publish(plan),
             PanelOutcome::Refresh => self.start_remote(),
+            PanelOutcome::Thread(kind) => self.open_thread(kind, true),
         }
     }
 
@@ -1218,19 +1384,24 @@ impl App {
         if self.publishing.is_some() {
             return self.sh.notify("already publishing");
         }
+        let forge = self.sh.review.forge();
         let caps = match (&self.remote_status, &self.sh.remote) {
             (RemoteStatus::Ready, Some(r)) => r.capabilities.clone(),
             (RemoteStatus::Fetching(_), _) => {
-                return self
-                    .sh
-                    .notify("still asking GitLab for its version and discussions…");
+                return self.sh.notify(format!(
+                    "still asking {forge} for its version and discussions…"
+                ));
             }
             (RemoteStatus::Failed(e), _) => {
                 return self
                     .sh
-                    .notify(format!("cannot reach GitLab ({e}): r to retry"));
+                    .notify(format!("cannot reach {forge} ({e}): r to retry"));
             }
-            _ => return self.sh.notify("GitLab is not reachable: r to retry"),
+            _ => {
+                return self
+                    .sh
+                    .notify(format!("{forge} is not reachable: r to retry"));
+            }
         };
         let plan = comments::plan(
             &self.sh.comments,
@@ -1290,9 +1461,11 @@ impl App {
         self.publishing = None;
         self.sh.reload_comments();
         match res {
-            Ok(n) => self
-                .sh
-                .notify(format!("review published: {n} comment(s) on GitLab")),
+            Ok(n) => {
+                let forge = self.sh.review.forge();
+                self.sh
+                    .notify(format!("review published: {n} comment(s) on {forge}"))
+            }
             Err(e) => self.sh.notify(format!(
                 "publication failed: {e} (p retries, without duplicates)"
             )),
@@ -1653,6 +1826,8 @@ mod tests {
             start_sha: "s".into(),
             head_sha: "h".into(),
             web_url: String::new(),
+            forge: Default::default(),
+            host: String::new(),
         });
         let mut app = App::new(
             review,
@@ -1718,6 +1893,226 @@ mod tests {
             panic!("no confirmation");
         };
         assert_eq!(plan.mode, comments::Mode::Direct);
+    }
+
+    #[test]
+    fn notes_fold_and_open_their_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        let mut r = remote(Some(1), "17.3.0");
+        r.discussions[0].notes[0].body =
+            "**Why** this?\n\n1. one\n2. two\n3. three\n4. four\n5. five".into();
+        app.set_remote(Some(r));
+        // Head, 4 lines, then the fold indicator.
+        let rows = comment_rows(&app);
+        assert_eq!(rows.len(), 6);
+        cursor_to(&mut app, rows[2]);
+        app.on_key(key('o'));
+        let rows = comment_rows(&app);
+        assert_eq!(rows.len(), 9, "whole: head, 7 lines, fold hint");
+        assert!(matches!(
+            app.diff.rows[app.diff.pos.cursor],
+            Row::Comment { part: 0, .. }
+        ));
+        // za folds it back.
+        app.on_key(key('z'));
+        app.on_key(key('a'));
+        assert_eq!(comment_rows(&app).len(), 6);
+
+        // Enter: the thread; c replies, then back to the thread.
+        crate::ui::tests::screen(&mut app, 100, 24);
+        app.on_key(code(KeyCode::Enter));
+        let Some(Popup::Thread(t)) = &app.popup else {
+            panic!("no thread");
+        };
+        assert_eq!(t.kind, NoteKind::Remote(0));
+        let screen = crate::ui::tests::screen(&mut app, 100, 30).join("\n");
+        assert!(screen.contains("thread · src/b.rs:1"), "{screen}");
+        assert!(screen.contains("5. five"), "{screen}");
+        assert!(screen.contains("▶"), "the code line: {screen}");
+        app.on_key(key('c'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no editor");
+        };
+        assert_eq!(e.title, "reply to @alice");
+        type_text(&mut app, "Done.");
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.popup, Some(Popup::Thread(_))));
+        let screen = crate::ui::tests::screen(&mut app, 100, 30).join("\n");
+        assert!(screen.contains("draft reply"), "{screen}");
+        // n wraps around the notes of the diff: the reply draft, then back.
+        app.on_key(key('n'));
+        app.on_key(code(KeyCode::Esc));
+        assert!(app.popup.is_none());
+        // From the Review panel, t: the thread, Esc back to the panel.
+        app.on_key(key('P'));
+        app.on_key(key('G'));
+        app.on_key(key('t'));
+        assert!(matches!(app.popup, Some(Popup::Thread(_))));
+        app.on_key(code(KeyCode::Esc));
+        assert!(matches!(app.popup, Some(Popup::Review)));
+    }
+
+    #[test]
+    fn whole_file_view_comments_and_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, grouping) = fixture(dir.path());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let head: String = (1..=12)
+            .map(|i| match i {
+                1 => "b\n".to_string(),
+                10 => "d\n".to_string(),
+                i => format!("line {i}\n"),
+            })
+            .collect();
+        std::fs::write(dir.path().join("src/a.rs"), head).unwrap();
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.stack.set_grouping(&app.sh, grouping);
+        // gf on the added line of the second hunk.
+        cursor_to(&mut app, Row::Line { hunk: 1, line: 1 });
+        app.on_key(key('g'));
+        app.on_key(key('f'));
+        let Some(Popup::File(v)) = &app.popup else {
+            panic!("no file view: {:?}", app.sh.message());
+        };
+        assert_eq!(v.cursor_line(), 10);
+        assert_eq!(v.counts(), (2, 0));
+        let screen = crate::ui::tests::screen(&mut app, 110, 30).join("\n");
+        assert!(
+            screen.contains("src/a.rs · whole file · 12 lines · 2 change(s)"),
+            "{screen}"
+        );
+        assert!(screen.contains("line 5"), "unchanged lines too: {screen}");
+        assert!(screen.contains("- c"), "removed lines in place: {screen}");
+        // c: a draft on that line, then back to the file view with it.
+        app.on_key(key('c'));
+        type_text(&mut app, "Why d?");
+        app.on_key(ctrl('s'));
+        let Some(Popup::File(v)) = &app.popup else {
+            panic!("not back to the file");
+        };
+        assert_eq!(v.counts(), (2, 1));
+        // ]c... already on it: [c goes back up to it, Enter shows its thread.
+        app.on_key(key('G'));
+        app.on_key(key('['));
+        app.on_key(key('c'));
+        app.on_key(code(KeyCode::Enter));
+        assert!(matches!(app.popup, Some(Popup::Thread(_))));
+        app.on_key(code(KeyCode::Esc));
+        assert!(matches!(app.popup, Some(Popup::File(_))));
+        app.on_key(code(KeyCode::Esc));
+        assert!(app.popup.is_none());
+        // From the Stack view too.
+        app.on_key(key('2'));
+        app.on_key(key('g'));
+        app.on_key(key('f'));
+        assert!(matches!(app.popup, Some(Popup::File(_))));
+    }
+
+    #[test]
+    fn a_diagram_is_added_to_the_overall_comment_in_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.sh.comments.summary = "LGTM".into();
+        app.apply(Action::AddToSummary(
+            "```mermaid\nflowchart LR\n```\n".into(),
+        ));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no editor");
+        };
+        assert_eq!(e.target, CommentTarget::Summary);
+        assert_eq!(e.text, "LGTM\n\n```mermaid\nflowchart LR\n```\n");
+        // Esc asks first: the diagram is not saved yet.
+        app.on_key(code(KeyCode::Esc));
+        assert!(matches!(app.popup, Some(Popup::Comment(_))));
+        app.on_key(ctrl('s'));
+        assert!(app.sh.comments.summary.ends_with("flowchart LR\n```"));
+    }
+
+    #[test]
+    fn file_explorer_folds_reviews_directories_and_switches_mode() {
+        use crate::views::explorer::{Mode, SideItem};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        let kinds = |app: &App| -> Vec<String> {
+            app.diff
+                .sidebar
+                .iter()
+                .map(|it| match it {
+                    SideItem::Dir { label, .. } => format!("{label}/"),
+                    SideItem::File { file, .. } => format!("#{file}"),
+                })
+                .collect()
+        };
+        assert_eq!(kinds(&app), ["src/", "#0", "#1", "#2", "#3"]);
+        app.on_key(ctrl('h'));
+        assert_eq!(app.diff.side_sel, 1, "on the current file");
+        // h: up to the directory, then fold it; l unfolds it.
+        app.on_key(key('h'));
+        assert_eq!(app.diff.side_sel, 0);
+        app.on_key(key('h'));
+        assert_eq!(kinds(&app), ["src/", "#2", "#3"]);
+        let screen = crate::ui::tests::screen(&mut app, 120, 20).join("\n");
+        assert!(screen.contains("▸ src"), "{screen}");
+        assert!(screen.contains("2 files +3 -3 0/2"), "{screen}");
+        app.on_key(key('l'));
+        assert_eq!(kinds(&app).len(), 5);
+        // space on the directory: both its files reviewed.
+        app.on_key(key(' '));
+        let d = &app.sh.review.diff;
+        assert!(app.sh.state.is_file_reviewed(d, 0) && app.sh.state.is_file_reviewed(d, 1));
+        assert!(!app.sh.state.is_file_reviewed(d, 2));
+        // zM / zR in the list: directories, not the files of the diff.
+        app.on_key(key('z'));
+        app.on_key(key('M'));
+        assert_eq!(kinds(&app).len(), 3);
+        app.on_key(key('z'));
+        app.on_key(key('R'));
+        assert_eq!(kinds(&app).len(), 5);
+        // m: pairs, then flat, remembered in the review state.
+        app.on_key(key('m'));
+        assert_eq!(app.diff.explorer, Mode::Pairs);
+        let saved = ReviewState::load(&dir.path().join("state.json")).unwrap();
+        assert_eq!(saved.explorer.as_deref(), Some("pairs"));
+        let screen = crate::ui::tests::screen(&mut app, 120, 20).join("\n");
+        assert!(screen.contains("m: pairs"), "{screen}");
+        app.on_key(key('m'));
+        assert_eq!(kinds(&app), ["#0", "#1", "#2", "#3"]);
+        let screen = crate::ui::tests::screen(&mut app, 120, 20).join("\n");
+        assert!(screen.contains("✓ M a.rs +2 -2"), "{screen}");
+        // A new session starts in the last mode.
+        let (review, _) = fixture(dir.path());
+        let app = App::new(
+            review,
+            saved,
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        assert_eq!(app.diff.explorer, Mode::Pairs);
     }
 
     #[test]

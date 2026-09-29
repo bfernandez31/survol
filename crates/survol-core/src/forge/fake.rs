@@ -45,12 +45,15 @@ pub fn status(status: &'static str, body: &str) -> Response {
 }
 
 /// Serves `responses`, one per connection; returns the base URL and the
-/// requests received.
+/// requests received. `{addr}` in a header value becomes the base URL
+/// (pagination links).
 pub fn serve(responses: Vec<Response>) -> (String, mpsc::Receiver<Request>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = format!("http://{}", listener.local_addr().unwrap());
     let (tx, rx) = mpsc::channel();
+    let base = addr.clone();
     std::thread::spawn(move || {
+        let addr = base;
         for resp in responses {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
@@ -90,7 +93,7 @@ pub fn serve(responses: Vec<Response>) -> (String, mpsc::Receiver<Request>) {
             let extra: String = resp
                 .headers
                 .iter()
-                .map(|(k, v)| format!("{k}: {v}\r\n"))
+                .map(|(k, v)| format!("{k}: {}\r\n", v.replace("{addr}", &addr)))
                 .collect();
             write!(
                 stream,

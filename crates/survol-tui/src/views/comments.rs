@@ -1,43 +1,154 @@
 //! Review comments in the TUI: the notes shown under their line (local
-//! drafts and GitLab discussions), the comment editor and the Review panel.
+//! drafts and GitLab discussions, rendered from markdown and folded when
+//! long), the thread popup, the comment editor and the Review panel.
 //! Rendering lives in `ui/comments.rs` (and `ui/rows.rs` for inline notes).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use survol_core::comments::{self, Anchor, CommentStore, Placement};
 use survol_core::forge::Discussion;
 use survol_core::model::Diff;
 
 use super::Row;
+use crate::highlight::Highlighter;
+use crate::theme::theme;
+use crate::ui::markdown;
 
-/// Width at which note bodies are wrapped.
-const WRAP: usize = 96;
-/// Body lines shown per note under its line.
-const MAX_BODY_LINES: usize = 12;
+/// Width note bodies are wrapped at until the renderer gives the pane's.
+const DEFAULT_WIDTH: usize = 96;
+/// Columns left of a note body in the diff pane: the line numbers, then `┃ `
+/// (and one spare column).
+pub const NOTE_INDENT: usize = 15;
+/// Lines of text a folded note shows under its head.
+const FOLDED_LINES: usize = 4;
 
+/// Colour family of a note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoteStyle {
-    DraftHead,
+pub enum Tone {
     Draft,
-    RemoteHead,
     Remote,
     Resolved,
-    Reply,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl Tone {
+    /// Bar left of the note.
+    pub fn bar(self) -> Color {
+        match self {
+            Tone::Draft => theme().draft,
+            Tone::Remote => theme().discussion,
+            Tone::Resolved => theme().resolved,
+        }
+    }
+
+    fn head(self) -> Style {
+        match self {
+            Tone::Draft => Style::new().fg(theme().draft).bold(),
+            Tone::Remote => Style::new().fg(theme().discussion).bold(),
+            Tone::Resolved => Style::new().fg(theme().resolved),
+        }
+    }
+
+    /// Base style of the body text.
+    pub fn body(self) -> Style {
+        match self {
+            Tone::Draft | Tone::Remote => Style::new(),
+            Tone::Resolved => Style::new().fg(theme().resolved),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NoteKind {
     Draft(u64),
     /// Index into the fetched discussions.
     Remote(usize),
 }
 
-/// A note as displayed under its line: one entry per screen line.
+/// A reply shown under a discussion.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply {
+    pub author: String,
+    pub date: String,
+    pub body: String,
+}
+
+/// A note as displayed under its line: its raw text, and its screen lines
+/// once laid out at the pane's width.
+#[derive(Debug, Clone, PartialEq)]
 pub struct InlineNote {
     pub kind: NoteKind,
-    pub lines: Vec<(NoteStyle, String)>,
+    pub tone: Tone,
+    head: String,
+    /// Raw markdown body.
+    body: String,
+    replies: Vec<Reply>,
+    /// The line `(hunk, line)` it is about, else under the header of `file`.
+    pub at: Option<(usize, usize)>,
+    pub file: usize,
+    pub lines: Vec<Line<'static>>,
+    /// Longer than a folded note: `o` shows it whole.
+    pub foldable: bool,
+}
+
+impl InlineNote {
+    fn new(kind: NoteKind, tone: Tone, head: String, body: String) -> Self {
+        Self {
+            kind,
+            tone,
+            head,
+            body,
+            replies: Vec::new(),
+            at: None,
+            file: 0,
+            lines: Vec::new(),
+            foldable: false,
+        }
+    }
+
+    /// Renders the head, the body and the replies at `width` columns, folded
+    /// to a few lines unless `expanded`.
+    fn layout(&mut self, width: usize, expanded: bool, hl: Option<&Highlighter>) {
+        let body_style = self.tone.body();
+        let mut text = markdown::render(&self.body, width, body_style, hl);
+        for r in &self.replies {
+            let mut head = format!("↳ @{}", r.author);
+            if !r.date.is_empty() {
+                head.push_str(&format!(" · {}", r.date));
+            }
+            text.push(Line::from(Span::styled(
+                head,
+                Style::new().fg(theme().discussion),
+            )));
+            for mut l in markdown::render(&r.body, width.saturating_sub(2), body_style, hl) {
+                l.spans.insert(0, Span::raw("  "));
+                text.push(l);
+            }
+        }
+        let mut lines = vec![Line::from(Span::styled(
+            self.head.clone(),
+            self.tone.head(),
+        ))];
+        // Folding a single line away saves nothing.
+        self.foldable = text.len() > FOLDED_LINES + 1;
+        let hint = Style::new().fg(theme().meta);
+        if self.foldable && !expanded {
+            let more = text.len() - FOLDED_LINES;
+            lines.extend(text.into_iter().take(FOLDED_LINES));
+            lines.push(Line::from(Span::styled(
+                format!("▸ {more} more line(s) · o expand · Enter thread"),
+                hint,
+            )));
+        } else {
+            lines.extend(text);
+            if self.foldable {
+                lines.push(Line::from(Span::styled("▾ o fold · Enter thread", hint)));
+            }
+        }
+        self.lines = lines;
+    }
 }
 
 /// The notes of the review and where they go in the diff.
@@ -48,31 +159,24 @@ pub struct NoteIndex {
     by_file: HashMap<usize, Vec<u32>>,
     /// Drafts whose line is gone.
     pub stale: usize,
+    /// Notes shown whole (`o`), kept across rebuilds.
+    pub expanded: HashSet<NoteKind>,
+    /// Width the notes are laid out at.
+    width: usize,
+    /// Code blocks are highlighted (laid out by the renderer).
+    highlighted: bool,
+    /// Changes whenever the notes or their layout change: views built with
+    /// another generation must lay out their rows again.
+    pub generation: u64,
 }
 
-fn wrap_into(out: &mut Vec<(NoteStyle, String)>, style: NoteStyle, text: &str, max: usize) {
-    let mut n = 0;
-    for para in text.lines() {
-        for l in crate::ui::wrap(para, WRAP) {
-            if n == max {
-                out.push((style, "…".into()));
-                return;
-            }
-            out.push((style, l));
-            n += 1;
-        }
-    }
+/// `2026-09-29T10:42:00.000Z` → `2026-09-29 10:42`.
+fn short_date(s: &str) -> String {
+    s.get(..16).unwrap_or(s).replace('T', " ")
 }
 
 /// Where a note goes: a line `(hunk, line)`, else under the header of the file.
 type Spot = (Option<(usize, usize)>, usize);
-
-fn first_line(s: &str) -> &str {
-    s.lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-}
 
 impl NoteIndex {
     pub fn build(diff: &Diff, store: &CommentStore, discussions: &[Discussion]) -> Self {
@@ -89,7 +193,6 @@ impl NoteIndex {
             let Some((file, at)) = comments::place_position(pos, diff) else {
                 continue;
             };
-            let mut lines = Vec::new();
             let resolved = d.is_resolved();
             let first = &d.notes[0];
             let mut head = format!("◆ @{}", first.author.username);
@@ -100,6 +203,9 @@ impl NoteIndex {
                     " · unresolved"
                 });
             }
+            if !first.created_at.is_empty() {
+                head.push_str(&format!(" · {}", short_date(&first.created_at)));
+            }
             if at.is_none() {
                 let line = pos.new_line.or(pos.old_line);
                 match line {
@@ -107,30 +213,24 @@ impl NoteIndex {
                     None => head.push_str(" · on the file"),
                 }
             }
-            let style = if resolved {
-                NoteStyle::Resolved
+            let tone = if resolved {
+                Tone::Resolved
             } else {
-                NoteStyle::RemoteHead
+                Tone::Remote
             };
-            lines.push((style, head));
-            let body = if resolved {
-                NoteStyle::Resolved
-            } else {
-                NoteStyle::Remote
-            };
-            wrap_into(&mut lines, body, &first.body, MAX_BODY_LINES);
-            for n in d.notes.iter().skip(1).filter(|n| !n.system) {
-                let mut l = format!("↳ @{}: {}", n.author.username, first_line(&n.body));
-                if l.chars().count() > WRAP {
-                    l = l.chars().take(WRAP - 1).collect::<String>() + "…";
-                }
-                lines.push((NoteStyle::Reply, l));
-            }
-            let idx = ix.push(NoteKind::Remote(di), lines);
-            match at {
-                Some(hl) => ix.by_line.entry(hl).or_default().push(idx),
-                None => ix.by_file.entry(file).or_default().push(idx),
-            }
+            let mut note = InlineNote::new(NoteKind::Remote(di), tone, head, first.body.clone());
+            note.replies = d
+                .notes
+                .iter()
+                .skip(1)
+                .filter(|n| !n.system)
+                .map(|n| Reply {
+                    author: n.author.username.clone(),
+                    date: short_date(&n.created_at),
+                    body: n.body.clone(),
+                })
+                .collect();
+            ix.push(note, at, file);
             disc_at.insert(d.id.as_str(), (at, file));
         }
         for d in &store.drafts {
@@ -153,7 +253,7 @@ impl NoteIndex {
                     if moved {
                         head.push_str(" · moved: the code around it changed");
                     }
-                    Some((Some((hunk, line)), 0))
+                    Some((Some((hunk, line)), diff.hunks[hunk].file))
                 }
                 Placement::File { file } => {
                     head.push_str(" · on the file");
@@ -174,20 +274,81 @@ impl NoteIndex {
             let Some((at, file)) = target else {
                 continue;
             };
-            let mut lines = vec![(NoteStyle::DraftHead, head)];
-            wrap_into(&mut lines, NoteStyle::Draft, &d.body, MAX_BODY_LINES);
-            let idx = ix.push(NoteKind::Draft(d.id), lines);
-            match at {
-                Some(hl) => ix.by_line.entry(hl).or_default().push(idx),
-                None => ix.by_file.entry(file).or_default().push(idx),
-            }
+            let note = InlineNote::new(NoteKind::Draft(d.id), Tone::Draft, head, d.body.clone());
+            ix.push(note, at, file);
         }
+        ix.width = DEFAULT_WIDTH;
+        ix.layout(None);
         ix
     }
 
-    fn push(&mut self, kind: NoteKind, lines: Vec<(NoteStyle, String)>) -> u32 {
-        self.items.push(InlineNote { kind, lines });
-        (self.items.len() - 1) as u32
+    /// Adds `note` at its place.
+    fn push(&mut self, mut note: InlineNote, at: Option<(usize, usize)>, file: usize) -> u32 {
+        note.at = at;
+        note.file = file;
+        self.items.push(note);
+        let idx = (self.items.len() - 1) as u32;
+        match at {
+            Some(hl) => self.by_line.entry(hl).or_default().push(idx),
+            None => self.by_file.entry(file).or_default().push(idx),
+        }
+        idx
+    }
+
+    fn layout(&mut self, hl: Option<&Highlighter>) {
+        for n in &mut self.items {
+            let expanded = self.expanded.contains(&n.kind);
+            n.layout(self.width, expanded, hl);
+        }
+        self.generation += 1;
+    }
+
+    /// Lays the notes out at `width` columns, code blocks highlighted.
+    pub fn set_width(&mut self, width: usize, hl: &Highlighter) {
+        if width == self.width && self.highlighted {
+            return;
+        }
+        self.width = width;
+        self.highlighted = true;
+        self.layout(Some(hl));
+    }
+
+    /// `o`: shows note `note` whole, or folds it back.
+    pub fn toggle_fold(&mut self, note: u32, hl: &Highlighter) {
+        let Some(n) = self.items.get_mut(note as usize) else {
+            return;
+        };
+        if !self.expanded.remove(&n.kind) {
+            self.expanded.insert(n.kind);
+        }
+        n.layout(self.width, self.expanded.contains(&n.kind), Some(hl));
+        self.generation += 1;
+    }
+
+    /// Index of the note `kind`, if placed in the diff.
+    pub fn find(&self, kind: NoteKind) -> Option<u32> {
+        self.items
+            .iter()
+            .position(|n| n.kind == kind)
+            .map(|i| i as u32)
+    }
+
+    /// The placed notes in the order of the diff.
+    pub fn ordered(&self, diff: &Diff) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (f, file) in diff.files.iter().enumerate() {
+            out.extend_from_slice(self.at_file(f));
+            for &h in &file.hunk_ids {
+                for l in 0..diff.hunks[h].lines.len() {
+                    out.extend_from_slice(self.at_line(h, l));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
     }
 
     pub fn at_line(&self, hunk: usize, line: usize) -> &[u32] {
@@ -285,6 +446,79 @@ pub fn row_target(
     }
 }
 
+// ----- thread ---------------------------------------------------------------
+
+/// The whole thread of a note (`Enter` on it): the code it is about, the
+/// note and its replies, rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadView {
+    pub kind: NoteKind,
+    pub scroll: usize,
+    /// Updated by the renderer.
+    pub height: usize,
+    pub total: usize,
+    /// Back to the Review panel when closed.
+    pub from_panel: bool,
+    /// Back to the whole-file view when closed.
+    pub from_file: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadOutcome {
+    Continue,
+    Close,
+    /// Reply to the discussion, or edit the draft.
+    Write(CommentTarget),
+    /// The next (`true`) or previous thread of the diff.
+    Next(bool),
+}
+
+impl ThreadView {
+    pub fn new(kind: NoteKind) -> Self {
+        Self {
+            kind,
+            scroll: 0,
+            height: 10,
+            total: 0,
+            from_panel: false,
+            from_file: false,
+        }
+    }
+
+    pub fn target(&self) -> CommentTarget {
+        match self.kind {
+            NoteKind::Draft(id) => CommentTarget::Draft(id),
+            NoteKind::Remote(d) => CommentTarget::Reply(d),
+        }
+    }
+
+    fn scroll_by(&mut self, delta: isize) {
+        let max = self.total.saturating_sub(self.height);
+        self.scroll = self.scroll.saturating_add_signed(delta).min(max);
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) -> ThreadOutcome {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half = (self.height / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return ThreadOutcome::Close,
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_by(-1),
+            KeyCode::Char('d') if ctrl => self.scroll_by(half),
+            KeyCode::Char('u') if ctrl => self.scroll_by(-half),
+            KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_by(half * 2),
+            KeyCode::PageUp => self.scroll_by(-half * 2),
+            KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
+            KeyCode::Char('G') | KeyCode::End => self.scroll_by(isize::MAX / 2),
+            KeyCode::Char('c' | 'e') if !ctrl => return ThreadOutcome::Write(self.target()),
+            KeyCode::Char('n') | KeyCode::Tab => return ThreadOutcome::Next(true),
+            KeyCode::Char('N') | KeyCode::BackTab => return ThreadOutcome::Next(false),
+            _ => {}
+        }
+        ThreadOutcome::Continue
+    }
+}
+
 // ----- editor ---------------------------------------------------------------
 
 /// A comment being written.
@@ -300,6 +534,10 @@ pub struct Editor {
     pub confirm_discard: bool,
     /// Back to the Review panel when done.
     pub from_panel: bool,
+    /// Back to this thread when done.
+    pub from_thread: Option<NoteKind>,
+    /// Back to the whole-file view when done.
+    pub from_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,7 +557,19 @@ impl Editor {
             text,
             confirm_discard: false,
             from_panel: false,
+            from_thread: None,
+            from_file: false,
         }
+    }
+
+    /// Adds `text` at the end, as a new paragraph (not saved yet).
+    pub fn append(&mut self, text: &str) {
+        let body = self.text.trim_end();
+        self.text = if body.is_empty() {
+            text.to_string()
+        } else {
+            format!("{body}\n\n{text}")
+        };
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> EditorOutcome {
@@ -427,6 +677,8 @@ pub enum PanelOutcome {
     AskPublish,
     Publish(comments::Plan),
     Refresh,
+    /// The whole thread of a draft or discussion.
+    Thread(NoteKind),
 }
 
 impl ReviewPanel {
@@ -487,6 +739,13 @@ impl ReviewPanel {
                 }
                 None => {}
             },
+            KeyCode::Char('t') => match row {
+                Some(PanelRow::Draft(id)) => return PanelOutcome::Thread(NoteKind::Draft(id)),
+                Some(PanelRow::Discussion(d)) => {
+                    return PanelOutcome::Thread(NoteKind::Remote(d));
+                }
+                _ => {}
+            },
             KeyCode::Char('d' | 'x') => {
                 if let Some(PanelRow::Draft(id)) = row {
                     self.confirm = Some(Confirm::Delete(id));
@@ -513,6 +772,13 @@ mod tests {
 
     fn key(c: KeyCode) -> KeyEvent {
         KeyEvent::new(c, KeyModifiers::NONE)
+    }
+
+    fn text(n: &InlineNote) -> Vec<String> {
+        n.lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
     }
 
     fn discussion(new_line: Option<u32>, resolved: bool) -> Discussion {
@@ -568,17 +834,20 @@ mod tests {
         let remote = &ix.items[at[0] as usize];
         assert_eq!(remote.kind, NoteKind::Remote(0));
         assert_eq!(
-            remote.lines,
+            text(remote),
             [
-                (NoteStyle::RemoteHead, "◆ @alice · unresolved".to_string()),
-                (NoteStyle::Remote, "Why B?".to_string()),
-                (NoteStyle::Remote, "It was b.".to_string()),
-                (NoteStyle::Reply, "↳ @bob: Renamed.".to_string()),
+                "◆ @alice · unresolved",
+                "Why B?",
+                "It was b.",
+                "↳ @bob",
+                "  Renamed.",
             ]
         );
+        assert_eq!(remote.tone, Tone::Remote);
+        assert_eq!(remote.at, Some((0, 2)));
         assert_eq!(ix.items[at[1] as usize].kind, NoteKind::Draft(id));
         assert_eq!(
-            ix.items[at[2] as usize].lines[0].1,
+            text(&ix.items[at[2] as usize])[0],
             "✎ draft · reply to @alice"
         );
         assert_eq!(ix.at_file(0).len(), 1);
@@ -586,18 +855,95 @@ mod tests {
         // A resolved discussion outside the diff goes under the file header.
         let ix = NoteIndex::build(&d, &CommentStore::default(), &[discussion(Some(40), true)]);
         let f = ix.at_file(0);
+        let note = &ix.items[f[0] as usize];
+        assert_eq!(note.tone, Tone::Resolved);
         assert_eq!(
-            ix.items[f[0] as usize].lines[0],
-            (
-                NoteStyle::Resolved,
-                "◆ @alice · resolved · line 40, outside the diff shown".to_string()
-            )
+            text(note)[0],
+            "◆ @alice · resolved · line 40, outside the diff shown"
         );
 
         let rows = panel_rows(&d, &store, &[discussion(Some(2), false)]);
         assert_eq!(rows[0], PanelRow::Summary);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[4], PanelRow::Discussion(0));
+    }
+
+    #[test]
+    fn notes_wrap_at_the_pane_width_and_show_replies_fully() {
+        let d = survol_core::diff::parse(RAW.as_bytes()).unwrap();
+        let mut disc = discussion(Some(2), false);
+        disc.notes[0].body = "The lock is taken after the read: move it before.".into();
+        disc.notes[1].body = "Fixed.\nThe read now happens under the lock.".into();
+        let hl = Highlighter::new();
+        let mut ix = NoteIndex::build(&d, &CommentStore::default(), &[disc]);
+        let gen0 = ix.generation;
+        ix.set_width(20, &hl);
+        assert!(ix.generation > gen0, "a new layout is a new generation");
+        // Long: folded to its first lines.
+        assert!(ix.items[0].foldable);
+        assert_eq!(
+            text(&ix.items[0]),
+            [
+                "◆ @alice · unresolved",
+                "The lock is taken",
+                "after the read: move",
+                "it before.",
+                "↳ @bob",
+                "▸ 4 more line(s) · o expand · Enter thread",
+            ]
+        );
+        // `o`: whole, replies included.
+        ix.toggle_fold(0, &hl);
+        let whole = text(&ix.items[0]);
+        assert_eq!(
+            whole[1..whole.len() - 1],
+            [
+                "The lock is taken",
+                "after the read: move",
+                "it before.",
+                "↳ @bob",
+                "  Fixed.",
+                "  The read now",
+                "  happens under the",
+                "  lock.",
+            ]
+        );
+        assert!(whole[whole.len() - 1].starts_with("▾ o fold"));
+        // Nothing is lost: every line fits.
+        assert!(
+            whole[1..whole.len() - 1]
+                .iter()
+                .all(|l| l.chars().count() <= 20)
+        );
+        let gen1 = ix.generation;
+        ix.set_width(20, &hl);
+        assert_eq!(ix.generation, gen1, "same width: nothing to redo");
+        // The expanded state survives a rebuild.
+        assert!(ix.expanded.contains(&NoteKind::Remote(0)));
+    }
+
+    #[test]
+    fn markdown_bodies_are_rendered() {
+        let d = survol_core::diff::parse(RAW.as_bytes()).unwrap();
+        let mut store = CommentStore::default();
+        let line = comments::line_anchor(&d, 0, 2);
+        store.add(
+            Anchor::Line { start: None, line },
+            "**Why** `B`?\n\n- one\n- two",
+        );
+        let ix = NoteIndex::build(&d, &store, &[]);
+        assert_eq!(
+            text(&ix.items[0]),
+            ["✎ draft", "Why B?", "", "• one", "• two"]
+        );
+        let why = &ix.items[0].lines[1].spans[0];
+        assert!(
+            why.style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(ix.ordered(&d), [0]);
+        assert_eq!(ix.find(NoteKind::Draft(1)), Some(0));
     }
 
     #[test]
@@ -642,6 +988,31 @@ mod tests {
             Ok(CommentTarget::File(2))
         );
         assert!(row_target(&notes, Row::Hunk(3), None).is_err());
+    }
+
+    #[test]
+    fn thread_scrolls_writes_and_moves_on() {
+        let mut t = ThreadView::new(NoteKind::Remote(2));
+        t.height = 5;
+        t.total = 12;
+        t.on_key(key(KeyCode::Char('G')));
+        assert_eq!(t.scroll, 7);
+        t.on_key(key(KeyCode::Char('k')));
+        assert_eq!(t.scroll, 6);
+        assert_eq!(
+            t.on_key(key(KeyCode::Char('c'))),
+            ThreadOutcome::Write(CommentTarget::Reply(2))
+        );
+        assert_eq!(
+            t.on_key(key(KeyCode::Char('N'))),
+            ThreadOutcome::Next(false)
+        );
+        assert_eq!(t.on_key(key(KeyCode::Esc)), ThreadOutcome::Close);
+        let mut d = ThreadView::new(NoteKind::Draft(4));
+        assert_eq!(
+            d.on_key(key(KeyCode::Char('e'))),
+            ThreadOutcome::Write(CommentTarget::Draft(4))
+        );
     }
 
     #[test]
@@ -692,10 +1063,16 @@ mod tests {
             PanelOutcome::Jump(PanelRow::Draft(7))
         );
         assert_eq!(
+            p.on_key(key(KeyCode::Char('t')), &rows),
+            PanelOutcome::Thread(NoteKind::Draft(7))
+        );
+        assert_eq!(
             p.on_key(key(KeyCode::Char('p')), &rows),
             PanelOutcome::AskPublish
         );
         let plan = comments::Plan {
+            forge: Default::default(),
+            commit: String::new(),
             mode: comments::Mode::Drafts,
             comments: vec![],
             skipped: vec![],
