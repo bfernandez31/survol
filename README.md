@@ -120,8 +120,10 @@ the new root, `Backspace` / `Ctrl-o` goes back. The right pane previews the code
 ![Symbol view: a Spring endpoint with its callees, tests, the Angular services calling it over HTTP and the OpenAPI spec configuring it](docs/screenshots/graph-symbol-view.png)
 
 **Module map**: packages / directories with their dependencies in and out (`←` / `→`
-counts, `Δ` changed symbols). `Enter` lists a module's changed symbols, `x` writes the
-map as Mermaid to `.git/survol/exports/`, `X` also writes a self-contained HTML page next
+counts, `Δ` changed symbols, `changed/total files`). Only the changed modules are shown,
+first, then the modules they depend on or that use them; the title counts the unrelated
+modules left out and `t` toggles the whole repository's map. `Enter` lists a module's
+changed symbols, `x` writes the shown map as Mermaid to `.git/survol/exports/`, `X` also writes a self-contained HTML page next
 to it and opens it in the browser (`open` on macOS, `xdg-open` elsewhere; only the mermaid
 script is loaded from a CDN, the diagram stays in the file). After an export, `S` adds the
 diagram to the overall comment of the review (the editor opens on it): GitLab and GitHub render
@@ -498,6 +500,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `e` | open the node's line in the editor |
 | `gd` | the symbol's hunks in the Diff view |
 | `Ctrl-l`, `j` / `k` | preview pane, scroll it |
+| `t` (module map) | all modules ↔ changed ones and their neighbours |
 | `x` | write the module map as Mermaid (`.git/survol/exports`) |
 | `X` | same, plus an HTML page opened in the browser |
 | `S` | add the last exported diagram to the overall comment |

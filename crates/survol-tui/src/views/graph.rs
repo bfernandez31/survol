@@ -449,6 +449,11 @@ pub struct GraphView {
     pub mod_rows: Vec<ModRow>,
     pub mod_pos: Scroll,
     open_modules: HashSet<usize>,
+    /// `t`: every module of the repository, not only the changed ones and
+    /// their neighbours.
+    pub all_modules: bool,
+    /// Modules left out of the map (not impacted, `all_modules` off).
+    pub hidden_modules: usize,
 
     pub flows: FlowsState,
 
@@ -492,6 +497,21 @@ impl GraphView {
         }
     }
 
+    /// `t`: all modules ↔ the changed ones and their neighbours, the cursor
+    /// kept on its module when still shown.
+    fn toggle_all_modules(&mut self, g: &Graph) {
+        let current = match self.mod_rows.get(self.mod_pos.cursor) {
+            Some(ModRow::Module(m)) | Some(ModRow::Symbol { module: m, .. }) => Some(*m),
+            None => None,
+        };
+        self.all_modules = !self.all_modules;
+        self.rebuild_modules(g);
+        let i = current
+            .and_then(|m| self.mod_rows.iter().position(|r| *r == ModRow::Module(m)))
+            .unwrap_or(0);
+        self.select(i);
+    }
+
     pub fn is_module_open(&self, m: usize) -> bool {
         self.open_modules.contains(&m)
     }
@@ -507,8 +527,27 @@ impl GraphView {
             return;
         };
         let changed = g.changed_symbols();
+        // Changed modules first, then their neighbours, then (all) the rest,
+        // each by name. No changed module: everything.
+        let impacted = map.impacted();
+        let show_all = self.all_modules || !map.modules.iter().any(|m| m.changed());
+        let rank = |i: usize| {
+            if map.modules[i].changed() {
+                0
+            } else if impacted[i] {
+                1
+            } else {
+                2
+            }
+        };
+        let mut order: Vec<usize> = (0..map.modules.len())
+            .filter(|&i| show_all || impacted[i])
+            .collect();
+        order.sort_by_key(|&i| rank(i));
+        self.hidden_modules = map.modules.len() - order.len();
         let mut rows = Vec::new();
-        for (i, m) in map.modules.iter().enumerate() {
+        for i in order {
+            let m = &map.modules[i];
             rows.push(ModRow::Module(i));
             if self.open_modules.contains(&i) {
                 let mut syms: Vec<SymIdx> = changed
@@ -1044,7 +1083,11 @@ impl GraphView {
         };
         let d = Diagram {
             title: format!("Module map of {}", sh.review.title()),
-            mermaid: map.to_mermaid(),
+            mermaid: if self.all_modules {
+                map.to_mermaid()
+            } else {
+                map.to_mermaid_of(&map.impacted())
+            },
         };
         let head = survol_core::review::short(&sh.review.head_sha);
         let text = format!("# {}\n\n```mermaid\n{}```\n", d.title, d.mermaid);
@@ -1134,6 +1177,7 @@ impl GraphView {
                 }
             }
             KeyCode::Char('b') if self.mode == Mode::Flows => self.flows.cycle_side(sh),
+            KeyCode::Char('t') if self.mode == Mode::Modules => self.toggle_all_modules(g),
             KeyCode::Char('/') => {
                 self.query_editing = true;
                 self.query.clear();
@@ -1696,6 +1740,43 @@ mod tests {
         assert_eq!(v.mode, Mode::Symbol);
         v.on_key(&mut sh, code(KeyCode::Backspace));
         assert_eq!(v.mode, Mode::Modules);
+    }
+
+    #[test]
+    fn module_map_shows_changed_modules_first_then_their_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sh, mut v) = setup(dir.path());
+        v.on_key(&mut sh, key('m'));
+        assert_eq!(v.mode, Mode::Modules);
+        let map = v.modules.clone().unwrap();
+        let impacted = map.impacted();
+        let shown: Vec<usize> = v
+            .mod_rows
+            .iter()
+            .filter_map(|r| match r {
+                ModRow::Module(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(map.modules[shown[0]].name, "app.owner");
+        assert!(shown.iter().all(|&i| impacted[i]));
+        let changed_rank: Vec<bool> = shown.iter().map(|&i| map.modules[i].changed()).collect();
+        assert!(
+            changed_rank.windows(2).all(|w| w[0] >= w[1]),
+            "changed first"
+        );
+        assert_eq!(v.hidden_modules, map.modules.len() - shown.len());
+
+        // t: every module, the cursor still on its module.
+        v.select(shown.len() - 1);
+        let at = v.mod_rows[v.mod_pos.cursor];
+        v.on_key(&mut sh, key('t'));
+        assert!(v.all_modules);
+        assert_eq!(v.mod_rows.len(), map.modules.len());
+        assert_eq!(v.hidden_modules, 0);
+        assert_eq!(v.mod_rows[v.mod_pos.cursor], at);
+        v.on_key(&mut sh, key('t'));
+        assert_eq!(v.mod_rows.len(), shown.len());
     }
 
     #[test]
