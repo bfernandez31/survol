@@ -316,7 +316,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                     " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x/X Mermaid  S to comment  e edit  gd diff  h back  m mode  ? help"
                 }
                 Mode::Modules => {
-                    " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x/X Mermaid  S to comment  / find  m mode  ? help"
+                    " j/k move  Enter/l changed symbols  Enter on symbol: graph  t all/impacted  e edit  gd diff  x/X Mermaid  S to comment  / find  m mode  ? help"
                 }
                 _ => {
                     " j/k move  Enter symbol graph  J/K module  e edit  gd diff  gf file  a ask  / find symbol  m mode  C-l preview  ? help"
@@ -421,6 +421,10 @@ const HELP: &[(&str, &str)] = &[
     ("e", "open the node's line in the editor"),
     ("gd", "the symbol's hunks in the Diff view"),
     ("Ctrl-l, j / k", "preview pane, scroll it"),
+    (
+        "t (module map)",
+        "all modules ↔ changed ones and their neighbours",
+    ),
     ("x", "write the module map as Mermaid (.git/survol/exports)"),
     ("X", "same, plus an HTML page opened in the browser"),
     ("S", "add the last exported diagram to the overall comment"),

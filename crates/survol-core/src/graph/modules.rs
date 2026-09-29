@@ -97,18 +97,39 @@ pub(super) fn module_map(g: &Graph) -> ModuleMap {
 }
 
 impl ModuleMap {
+    /// Per module: changed, or depending on / used by a changed module.
+    pub fn impacted(&self) -> Vec<bool> {
+        let mut keep: Vec<bool> = self.modules.iter().map(ModuleNode::changed).collect();
+        for e in &self.edges {
+            let (a, b) = (self.modules[e.from].changed(), self.modules[e.to].changed());
+            keep[e.from] |= b;
+            keep[e.to] |= a;
+        }
+        keep
+    }
+
     /// Mermaid flowchart of the modules: changed modules highlighted, edges
     /// labelled with their weight. Modules with neither edge nor change are
     /// left out to keep the chart readable.
     pub fn to_mermaid(&self) -> String {
+        self.to_mermaid_of(&vec![true; self.modules.len()])
+    }
+
+    /// [`Self::to_mermaid`] limited to the modules `keep` marks.
+    pub fn to_mermaid_of(&self, keep: &[bool]) -> String {
+        let edges: Vec<&ModuleEdge> = self
+            .edges
+            .iter()
+            .filter(|e| keep[e.from] && keep[e.to])
+            .collect();
         let mut used = vec![false; self.modules.len()];
-        for e in &self.edges {
+        for e in &edges {
             used[e.from] = true;
             used[e.to] = true;
         }
         let mut out = String::from("flowchart LR\n");
         for (i, m) in self.modules.iter().enumerate() {
-            if !used[i] && !m.changed() {
+            if !keep[i] || (!used[i] && !m.changed()) {
                 continue;
             }
             let name = m.name.replace('"', "'");
@@ -121,7 +142,7 @@ impl ModuleMap {
                 out.push_str(&format!("  m{i}[\"{name}\"]\n"));
             }
         }
-        for e in &self.edges {
+        for e in edges {
             out.push_str(&format!("  m{} -->|{}| m{}\n", e.from, e.count, e.to));
         }
         out.push_str("  classDef changed fill:#fde68a,stroke:#b45309,color:#000\n");
@@ -157,5 +178,38 @@ mod mermaid_tests {
         assert!(m.contains("m1[\"b\"]"));
         assert!(m.contains("m0 -->|3| m1"));
         assert!(!m.contains("lonely"));
+    }
+
+    #[test]
+    fn impacted_keeps_changed_modules_and_their_neighbours() {
+        let node = |name: &str, changed_files| ModuleNode {
+            name: name.into(),
+            files: 1,
+            changed_files,
+            changed_symbols: changed_files,
+            test: false,
+        };
+        let edge = |from, to| ModuleEdge {
+            from,
+            to,
+            count: 1,
+            kinds: BTreeMap::new(),
+        };
+        // user -> a (changed) -> b -> far; other stands alone.
+        let map = ModuleMap {
+            modules: vec![
+                node("a", 1),
+                node("b", 0),
+                node("far", 0),
+                node("other", 0),
+                node("user", 0),
+            ],
+            edges: vec![edge(4, 0), edge(0, 1), edge(1, 2)],
+        };
+        let keep = map.impacted();
+        assert_eq!(keep, vec![true, true, false, false, true]);
+        let m = map.to_mermaid_of(&keep);
+        assert!(m.contains("m4 -->|1| m0") && m.contains("m0 -->|1| m1"));
+        assert!(!m.contains("far") && !m.contains("m1 -->|1| m2"));
     }
 }

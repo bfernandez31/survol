@@ -264,7 +264,15 @@ fn list_title(g: &Graph, v: &GraphView) -> Line<'static> {
                 .modules
                 .as_ref()
                 .map_or(0, |m| m.modules.iter().filter(|x| x.changed()).count());
-            Line::from(format!(" modules ({n}, {c} changed) ").bold())
+            let mut spans = vec![format!(" modules ({n}, {c} changed) ").bold()];
+            if v.hidden_modules > 0 {
+                spans.push(
+                    format!("{} unrelated hidden · t: all ", v.hidden_modules).fg(theme().meta),
+                );
+            } else if v.all_modules {
+                spans.push("t: impacted only ".fg(theme().meta));
+            }
+            Line::from(spans)
         }
         Mode::Symbol => {
             let Some(st) = &v.symbol else {
