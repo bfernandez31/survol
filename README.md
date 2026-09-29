@@ -138,7 +138,8 @@ with `file:line` and confidence, the group summary, the hunks, `.survol/instruct
 It cites code as `[path:line]`: `Tab` / `n` selects the next link, `Enter` opens the
 Graph view of the symbol there (or the line in the Diff view), `d` the Diff view, `e` the
 editor. References to lines the model was not given are struck out and not navigable.
-`A` reopens the last answer, then the review's question history. Answers are cached.
+`A` reopens the last answer, then the review's question history. Answers are cached and
+rendered as markdown (lists, emphasis, code blocks highlighted), links included.
 
 ### Comments and publishing
 
@@ -148,13 +149,20 @@ In the Diff and Stack views, `c` comments the line under the cursor (on a draft:
 on a GitLab discussion: replies to it), `V` then `c` a range of lines within one hunk, `C`
 the whole file. Drafts are local and follow their line when new commits arrive (a draft
 whose line is gone is marked *stale* and never published). For a merge request, the
-existing discussions are fetched in the background and shown under their line, with author
-and resolved state.
+existing discussions are fetched in the background and shown under their line, with author,
+date, resolved state and every reply.
+
+Notes are rendered as markdown (bold, italics, `code`, lists, headings, quotes, fenced
+code blocks highlighted) and wrapped to the width of the pane. A long note is folded to
+its first lines: `o` (or `za`) on it shows it whole, again folds it back. `Enter` on a
+note opens its **thread**: the code it is about, the note and all its replies (and your
+reply drafts); `c` replies (or edits a draft), `n` / `N` goes to the next / previous
+thread of the diff.
 
 ![Review panel: overall comment and drafts; on a local range, drafts stay local](docs/screenshots/review-panel.png)
 
 `P` opens the **Review panel**: the overall comment (`S`), the drafts (`Enter` go, `e`
-edit, `d` delete), the discussions (`e` reply) and `p` publish. Publishing shows what will
+edit, `d` delete), the discussions (`e` reply, `t` thread) and `p` publish. Publishing shows what will
 be sent (`J` for the exact JSON requests) and waits for `y`. It creates GitLab draft notes,
 then publishes them all at once (`bulk_publish`), so the review appears in one go. A local
 range (`base..head`) keeps its drafts local.
@@ -361,6 +369,8 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `c` | comment the line (on a draft: edit; on a thread: reply) |
 | `V` then `c` | select lines, comment the range |
 | `C` | comment the whole file |
+| `o` / `za` on a note | show the whole note, fold it back |
+| `Enter` on a note | its thread: code, note, replies (`c` reply, `n` / `N` next) |
 
 ### Stack
 
@@ -377,6 +387,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `R` | regroup without cache (asks: LLM call) |
 | `gs` | Graph view of the hunk's symbol |
 | `c` / `V` then `c` / `C` (content) | comment line / range / file |
+| `o` / `za`, `Enter` on a note | whole note / fold it back; its thread |
 
 ### Graph
 
@@ -406,7 +417,8 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | Question input | type, or `↑` / `↓` (`Tab`, `Ctrl-n` / `Ctrl-p`) or `1`–`9` to pick a suggestion; `Ctrl-u` clear; `Enter` ask; `Esc` cancel |
 | Answer | `Tab` / `n`, `Shift-Tab` / `N` next / previous link; `Enter` go (Graph, else Diff); `d` Diff; `e` editor; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `A` history; `Esc` / `q` close |
 | Comment editor | `Ctrl-s` or `Alt-Enter` save; `Enter` new line; `Tab` indent; `Ctrl-u` clear the line; `Esc` cancel (twice if the text changed) |
-| Review panel | `Enter` go / edit summary; `e` edit (reply on a discussion); `d` delete; `S` summary; `p` publish; `r` refresh; `Esc` / `P` close |
+| Thread | `c` reply (edit on a draft); `n` / `N` next / previous thread; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `Esc` / `q` close |
+| Review panel | `Enter` go / edit summary; `e` edit (reply on a discussion); `t` thread; `d` delete; `S` summary; `p` publish; `r` refresh; `Esc` / `P` close |
 | Publish confirmation | `y` publish; `n` cancel; `J` exact JSON requests; `j` / `k` scroll |
 
 ## CLI reference

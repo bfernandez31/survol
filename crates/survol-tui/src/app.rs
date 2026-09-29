@@ -24,8 +24,8 @@ use crate::views::ask::{
     AnswerOutcome, AnswerView, AskInput, HistoryOutcome, HistoryView, InputOutcome, Pending,
 };
 use crate::views::comments::{
-    CommentTarget, Confirm, Editor, EditorOutcome, NoteIndex, PanelOutcome, PanelRow, ReviewPanel,
-    panel_rows,
+    CommentTarget, Confirm, Editor, EditorOutcome, NoteIndex, NoteKind, PanelOutcome, PanelRow,
+    ReviewPanel, ThreadOutcome, ThreadView, panel_rows,
 };
 use crate::views::diff::DiffView;
 use crate::views::graph::GraphView;
@@ -70,6 +70,8 @@ pub enum Action {
     },
     /// Write or edit a comment.
     Comment(CommentTarget),
+    /// Show the whole thread of a note.
+    Thread(NoteKind),
 }
 
 /// A modal window over the views.
@@ -83,6 +85,8 @@ pub enum Popup {
     Comment(Editor),
     /// The Review panel ([`App::panel`]).
     Review,
+    /// The whole thread of a note.
+    Thread(ThreadView),
 }
 
 /// The merge request's side of the review.
@@ -156,6 +160,11 @@ impl Shared {
         }
     }
 
+    /// `o` on a note: shows it whole, or folds it back.
+    pub fn toggle_note(&mut self, note: u32) {
+        self.notes.toggle_fold(note, &self.highlighter);
+    }
+
     pub fn discussions(&self) -> &[Discussion] {
         self.remote
             .as_ref()
@@ -166,7 +175,8 @@ impl Shared {
     pub fn rebuild_notes(&mut self) {
         let discussions = self.remote.as_ref().map_or(&[][..], |r| &r.discussions);
         let mut notes = NoteIndex::build(&self.review.diff, &self.comments, discussions);
-        notes.set_width(self.notes.width());
+        notes.expanded = std::mem::take(&mut self.notes.expanded);
+        notes.set_width(self.notes.width(), &self.highlighter);
         notes.generation = self.notes.generation + 1;
         self.notes = notes;
     }
@@ -687,6 +697,7 @@ impl App {
                 self.switch(View::Diff);
             }
             Action::Comment(t) => self.open_editor(t, false),
+            Action::Thread(kind) => self.open_thread(kind, false),
             Action::ShowSymbol(s) => {
                 if self.sh.graph.is_some() {
                     self.graph.show_symbol(&self.sh, s);
@@ -942,15 +953,47 @@ impl App {
             },
             Popup::Comment(mut e) => match e.on_key(key) {
                 EditorOutcome::Continue => self.popup = Some(Popup::Comment(e)),
-                EditorOutcome::Cancel => {
-                    if e.from_panel {
+                EditorOutcome::Cancel => self.editor_closed(&e),
+                EditorOutcome::Save(text) => {
+                    self.save_comment(e.target, &text);
+                    self.editor_closed(&e);
+                }
+            },
+            Popup::Thread(mut t) => match t.on_key(key) {
+                ThreadOutcome::Continue => self.popup = Some(Popup::Thread(t)),
+                ThreadOutcome::Close => {
+                    if t.from_panel {
                         self.popup = Some(Popup::Review);
                     }
                 }
-                EditorOutcome::Save(text) => {
-                    self.save_comment(e.target, &text);
-                    if e.from_panel {
-                        self.popup = Some(Popup::Review);
+                ThreadOutcome::Write(target) => {
+                    self.open_editor(target, false);
+                    match &mut self.popup {
+                        Some(Popup::Comment(e)) => e.from_thread = Some(t.kind),
+                        _ => self.popup = Some(Popup::Thread(t)),
+                    }
+                }
+                ThreadOutcome::Next(forward) => {
+                    let order = self.sh.notes.ordered(&self.sh.review.diff);
+                    let cur = self
+                        .sh
+                        .notes
+                        .find(t.kind)
+                        .and_then(|i| order.iter().position(|&x| x == i));
+                    let next = match (cur, forward) {
+                        (_, _) if order.is_empty() => None,
+                        (None, _) => Some(0),
+                        (Some(i), true) => Some((i + 1) % order.len()),
+                        (Some(i), false) => Some((i + order.len() - 1) % order.len()),
+                    };
+                    match next {
+                        Some(i) => {
+                            let mut v =
+                                ThreadView::new(self.sh.notes.items[order[i] as usize].kind);
+                            v.from_panel = t.from_panel;
+                            self.popup = Some(Popup::Thread(v));
+                        }
+                        None => self.popup = Some(Popup::Thread(t)),
                     }
                 }
             },
@@ -966,6 +1009,39 @@ impl App {
     }
 
     // ----- comments ------------------------------------------------------
+
+    /// Shows the whole thread of a note; a reply drafted to a discussion
+    /// shows the discussion.
+    pub fn open_thread(&mut self, kind: NoteKind, from_panel: bool) {
+        let kind = match kind {
+            NoteKind::Draft(id) => match self.sh.comments.get(id).map(|d| &d.anchor) {
+                Some(Anchor::Reply { discussion, .. }) => self
+                    .sh
+                    .discussions()
+                    .iter()
+                    .position(|d| &d.id == discussion)
+                    .map_or(kind, NoteKind::Remote),
+                _ => kind,
+            },
+            k => k,
+        };
+        let mut v = ThreadView::new(kind);
+        v.from_panel = from_panel;
+        self.popup = Some(Popup::Thread(v));
+    }
+
+    /// Where to go back once the editor is closed.
+    fn editor_closed(&mut self, e: &Editor) {
+        if e.from_panel {
+            self.popup = Some(Popup::Review);
+        } else if let Some(kind) = e.from_thread {
+            // An emptied draft is gone: nothing to go back to.
+            let gone = matches!(kind, NoteKind::Draft(id) if self.sh.comments.get(id).is_none());
+            if !gone {
+                self.popup = Some(Popup::Thread(ThreadView::new(kind)));
+            }
+        }
+    }
 
     /// Fetches the instance version and the discussions of the merge request
     /// in the background (nothing for a local range).
@@ -1172,6 +1248,7 @@ impl App {
             PanelOutcome::AskPublish => self.prepare_publish(),
             PanelOutcome::Publish(plan) => self.start_publish(plan),
             PanelOutcome::Refresh => self.start_remote(),
+            PanelOutcome::Thread(kind) => self.open_thread(kind, true),
         }
     }
 
@@ -1721,6 +1798,70 @@ mod tests {
             panic!("no confirmation");
         };
         assert_eq!(plan.mode, comments::Mode::Direct);
+    }
+
+    #[test]
+    fn notes_fold_and_open_their_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        let mut r = remote(Some(1), "17.3.0");
+        r.discussions[0].notes[0].body =
+            "**Why** this?\n\n1. one\n2. two\n3. three\n4. four\n5. five".into();
+        app.set_remote(Some(r));
+        // Head, 4 lines, then the fold indicator.
+        let rows = comment_rows(&app);
+        assert_eq!(rows.len(), 6);
+        cursor_to(&mut app, rows[2]);
+        app.on_key(key('o'));
+        let rows = comment_rows(&app);
+        assert_eq!(rows.len(), 9, "whole: head, 7 lines, fold hint");
+        assert!(matches!(
+            app.diff.rows[app.diff.pos.cursor],
+            Row::Comment { part: 0, .. }
+        ));
+        // za folds it back.
+        app.on_key(key('z'));
+        app.on_key(key('a'));
+        assert_eq!(comment_rows(&app).len(), 6);
+
+        // Enter: the thread; c replies, then back to the thread.
+        crate::ui::tests::screen(&mut app, 100, 24);
+        app.on_key(code(KeyCode::Enter));
+        let Some(Popup::Thread(t)) = &app.popup else {
+            panic!("no thread");
+        };
+        assert_eq!(t.kind, NoteKind::Remote(0));
+        let screen = crate::ui::tests::screen(&mut app, 100, 30).join("\n");
+        assert!(screen.contains("thread · src/b.rs:1"), "{screen}");
+        assert!(screen.contains("5. five"), "{screen}");
+        assert!(screen.contains("▶"), "the code line: {screen}");
+        app.on_key(key('c'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no editor");
+        };
+        assert_eq!(e.title, "reply to @alice");
+        type_text(&mut app, "Done.");
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.popup, Some(Popup::Thread(_))));
+        let screen = crate::ui::tests::screen(&mut app, 100, 30).join("\n");
+        assert!(screen.contains("draft reply"), "{screen}");
+        // n wraps around the notes of the diff: the reply draft, then back.
+        app.on_key(key('n'));
+        app.on_key(code(KeyCode::Esc));
+        assert!(app.popup.is_none());
+        // From the Review panel, t: the thread, Esc back to the panel.
+        app.on_key(key('P'));
+        app.on_key(key('G'));
+        app.on_key(key('t'));
+        assert!(matches!(app.popup, Some(Popup::Thread(_))));
+        app.on_key(code(KeyCode::Esc));
+        assert!(matches!(app.popup, Some(Popup::Review)));
     }
 
     #[test]

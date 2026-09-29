@@ -61,6 +61,22 @@ impl Highlighter {
         path: &str,
         lines: impl Iterator<Item = &'a str> + Clone,
     ) -> Vec<Spans> {
+        self.highlight_with(self.syntax(path), lines)
+    }
+
+    /// Highlights a code block tagged `lang` (`java`, `ts`, `rust`, `yaml`...).
+    pub fn code<'a>(&self, lang: &str, lines: impl Iterator<Item = &'a str> + Clone) -> Vec<Spans> {
+        let syntax = (!lang.is_empty())
+            .then(|| self.syntaxes.find_syntax_by_token(lang))
+            .flatten();
+        self.highlight_with(syntax, lines)
+    }
+
+    fn highlight_with<'a>(
+        &self,
+        syntax: Option<&SyntaxReference>,
+        lines: impl Iterator<Item = &'a str> + Clone,
+    ) -> Vec<Spans> {
         let plain = || {
             lines
                 .clone()
@@ -68,7 +84,7 @@ impl Highlighter {
                 .collect()
         };
         // Pathological lines (minified code) are not worth highlighting.
-        let Some(syntax) = self.syntax(path) else {
+        let Some(syntax) = syntax else {
             return plain();
         };
         if lines.clone().any(|l| l.len() > 2000) {

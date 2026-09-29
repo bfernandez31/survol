@@ -19,6 +19,8 @@ struct Anchor {
     file: usize,
     hunk: Option<usize>,
     line: Option<usize>,
+    /// On a note under the line: the note and its line.
+    note: Option<(u32, u16)>,
 }
 
 pub struct DiffView {
@@ -115,11 +117,21 @@ impl DiffView {
 
     fn anchor(&self) -> Option<Anchor> {
         let file = *self.row_file.get(self.pos.cursor)?;
-        let (hunk, line) = match self.rows[self.pos.cursor].hunk_line() {
+        let row = self.rows[self.pos.cursor];
+        let (hunk, line) = match row.hunk_line() {
             Some((h, l)) => (Some(h), l),
             None => (None, None),
         };
-        Some(Anchor { file, hunk, line })
+        let note = match row {
+            Row::Comment { note, part, .. } => Some((note, part)),
+            _ => None,
+        };
+        Some(Anchor {
+            file,
+            hunk,
+            line,
+            note,
+        })
     }
 
     /// Rebuilds the rows, keeping the cursor on the same content.
@@ -136,6 +148,14 @@ impl DiffView {
     }
 
     fn locate(&self, a: Anchor) -> usize {
+        let row = self.locate_line(a);
+        match a.note {
+            Some(note) => super::note_row(&self.rows, row, note, |r| *r),
+            None => row,
+        }
+    }
+
+    fn locate_line(&self, a: Anchor) -> usize {
         let start = self.file_row[a.file];
         let end = self
             .file_row
@@ -196,6 +216,7 @@ impl DiffView {
             file,
             hunk: Some(hunk),
             line: None,
+            note: None,
         });
         self.focus = Focus::Content;
         self.goto_top(row);
@@ -209,6 +230,7 @@ impl DiffView {
             file,
             hunk: Some(hunk),
             line: Some(line),
+            note: None,
         });
         self.focus = Focus::Content;
         self.pos.cursor = row;
@@ -371,6 +393,25 @@ impl DiffView {
         self.collapse(sh, f, !self.collapsed[f]);
     }
 
+    /// `o` / `za`: the note under the cursor whole or folded, else the file.
+    fn toggle_here(&mut self, sh: &mut Shared) {
+        match self.rows.get(self.pos.cursor) {
+            Some(&Row::Comment { note, .. }) => self.toggle_note(sh, note),
+            _ => self.toggle_collapse(sh),
+        }
+    }
+
+    fn toggle_note(&mut self, sh: &mut Shared, note: u32) {
+        sh.toggle_note(note);
+        self.relayout(sh);
+        // Back on the head of the note.
+        let head = |r: &Row| matches!(*r, Row::Comment { note: n, part: 0, .. } if n == note);
+        if let Some(r) = self.rows.iter().position(head) {
+            self.pos.cursor = r;
+            self.clamp();
+        }
+    }
+
     fn set_all_collapsed(&mut self, sh: &Shared, collapsed: bool) {
         self.collapsed.iter_mut().for_each(|c| *c = collapsed);
         let f = self.current_file();
@@ -452,7 +493,7 @@ impl DiffView {
                     self.side_sel = 0;
                 }
                 ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
-                ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_collapse(sh),
+                ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_here(sh),
                 ('z', KeyCode::Char('M')) => self.set_all_collapsed(sh, true),
                 ('z', KeyCode::Char('R')) => self.set_all_collapsed(sh, false),
                 _ => {}
@@ -497,7 +538,7 @@ impl DiffView {
             KeyCode::Char('u') => self.next_unreviewed(sh),
             KeyCode::Char(' ') => self.toggle_hunk(sh),
             KeyCode::Char('r') | KeyCode::Char('v') => self.toggle_file(sh),
-            KeyCode::Char('o') => self.toggle_collapse(sh),
+            KeyCode::Char('o') => self.toggle_here(sh),
             KeyCode::Char('e') => self.open_in_editor(sh),
             KeyCode::Char('C') => return Action::Comment(CommentTarget::File(self.current_file())),
             KeyCode::Char('c') if self.focus == Focus::Content => return self.comment(sh),
@@ -516,30 +557,28 @@ impl DiffView {
             }
             KeyCode::Char('0') => self.hscroll = 0,
             _ => match self.focus {
-                Focus::Content => self.on_content_key(sh, key),
+                Focus::Content => return self.on_content_key(sh, key),
                 Focus::List => self.on_sidebar_key(sh, key),
             },
         }
         Action::None
     }
 
-    fn on_content_key(&mut self, sh: &mut Shared, key: KeyEvent) {
+    fn on_content_key(&mut self, sh: &mut Shared, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
-            KeyCode::Enter => {
-                if matches!(
-                    self.rows.get(self.pos.cursor),
-                    Some(Row::File(_) | Row::Note(_))
-                ) {
-                    self.toggle_collapse(sh);
-                } else {
-                    self.open_in_editor(sh);
+            KeyCode::Enter => match self.rows.get(self.pos.cursor) {
+                Some(Row::File(_) | Row::Note(_)) => self.toggle_collapse(sh),
+                Some(&Row::Comment { note, .. }) => {
+                    return Action::Thread(sh.notes.items[note as usize].kind);
                 }
-            }
+                _ => self.open_in_editor(sh),
+            },
             KeyCode::Esc if !self.filter.is_empty() => self.set_filter(sh, String::new()),
             _ => {}
         }
+        Action::None
     }
 
     fn on_sidebar_key(&mut self, sh: &Shared, key: KeyEvent) {

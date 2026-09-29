@@ -5,6 +5,7 @@ mod comments;
 mod diff;
 mod flows;
 mod graph;
+pub mod markdown;
 mod rows;
 mod stack;
 
@@ -17,10 +18,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use crate::app::{App, GraphStatus, GroupStatus, Popup, RemoteStatus, View};
 use crate::views::graph::Mode;
 
-const ADDED_BG: Color = Color::Rgb(22, 52, 34);
-const REMOVED_BG: Color = Color::Rgb(62, 24, 28);
-const CURSOR_BG: Color = Color::Rgb(60, 60, 80);
-const ACCENT: Color = Color::Cyan;
+pub(crate) const ADDED_BG: Color = Color::Rgb(22, 52, 34);
+pub(crate) const REMOVED_BG: Color = Color::Rgb(62, 24, 28);
+pub(crate) const CURSOR_BG: Color = Color::Rgb(60, 60, 80);
+pub(crate) const ACCENT: Color = Color::Cyan;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let [header, body, footer] = Split::vertical([
@@ -46,10 +47,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
     match &mut app.popup {
         Some(Popup::AskInput(i)) => ask::render_input(f, body, i, &model),
         Some(Popup::Pending(p)) => ask::render_pending(f, body, p),
-        Some(Popup::Answer(v)) => ask::render_answer(f, body, v),
+        Some(Popup::Answer(v)) => ask::render_answer(f, body, v, &app.sh.highlighter),
         Some(Popup::History(h)) => ask::render_history(f, body, h, &app.history),
         Some(Popup::Comment(e)) => comments::render_editor(f, body, e),
         Some(Popup::Review) => comments::render_panel(f, body, app),
+        Some(Popup::Thread(_)) => {
+            if let Some(Popup::Thread(mut t)) = app.popup.take() {
+                comments::render_thread(f, body, app, &mut t);
+                app.popup = Some(Popup::Thread(t));
+            }
+        }
         None => {}
     }
     if app.help {
@@ -244,6 +251,11 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("V then c", "select lines, comment the range"),
     ("C", "comment the whole file"),
+    ("o / za on a note", "show the whole note, fold it back"),
+    (
+        "Enter on a note",
+        "its thread: code, note, replies (c reply, n/N next)",
+    ),
     ("# Stack", ""),
     ("space", "toggle group / layer / hunk reviewed, go on"),
     ("u", "next unreviewed group"),
@@ -256,6 +268,7 @@ const HELP: &[(&str, &str)] = &[
     ("R", "regroup without cache (asks: LLM call)"),
     ("gs", "Graph view of the hunk's symbol"),
     ("c / V then c / C (content)", "comment line / range / file"),
+    ("o / za, Enter on a note", "whole note / fold; its thread"),
     ("# Graph", ""),
     (
         "m",

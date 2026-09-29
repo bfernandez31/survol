@@ -8,7 +8,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use survol_core::ask::Answer;
 
-use super::{ACCENT, CURSOR_BG, wrap};
+use super::{ACCENT, CURSOR_BG, markdown, wrap};
+use crate::highlight::Highlighter;
 use crate::views::ask::{AnswerView, AskInput, HistoryView, Pending};
 
 /// A centered rectangle of at most `w` × `h`.
@@ -103,95 +104,37 @@ pub fn render_pending(f: &mut Frame, area: Rect, p: &Pending) {
     );
 }
 
-/// Word-wrapped answer with its references styled; also the line of the
-/// selected reference.
+/// The answer rendered from markdown, its references styled; also the line
+/// of the selected reference.
 pub fn answer_lines(
     a: &Answer,
     selected: Option<usize>,
     width: usize,
+    hl: Option<&Highlighter>,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    let width = width.max(20);
-    let text = a.text.as_str();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut link_line = None;
-    let mut para_start = 0;
-    for para in text.split('\n') {
-        let indent = if para.trim_start().starts_with("- ") {
-            para.len() - para.trim_start().len() + 2
-        } else {
-            0
-        };
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let mut used = 0;
-        for (off, word) in words(para) {
-            let w = word.chars().count();
-            if used > 0 && used + 1 + w > width {
-                lines.push(Line::from(std::mem::take(&mut spans)));
-                spans.push(" ".repeat(indent).into());
-                used = indent;
-            } else if used > 0 {
-                spans.push(" ".into());
-                used += 1;
-            } else if off > 0 {
-                // Leading spaces of the paragraph.
-                spans.push(" ".repeat(off.min(8)).into());
-                used += off.min(8);
-            }
-            let start = para_start + off;
-            let end = start + word.len();
-            let mut pos = start;
-            for (i, r) in a.refs.iter().enumerate() {
-                if r.end <= start || r.start >= end {
-                    continue;
-                }
-                let (rs, re) = (r.start.max(start), r.end.min(end));
-                if rs > pos {
-                    spans.push(text[pos..rs].to_string().into());
-                }
-                let style = if !r.valid {
-                    Style::new()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::CROSSED_OUT)
-                } else if selected == Some(i) {
-                    link_line = Some(lines.len());
-                    Style::new().fg(Color::Black).bg(ACCENT).bold()
-                } else {
-                    Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED)
-                };
-                spans.push(Span::styled(text[rs..re].to_string(), style));
-                pos = re;
-            }
-            if pos < end {
-                spans.push(text[pos..end].to_string().into());
-            }
-            used += w;
-        }
-        lines.push(Line::from(spans));
-        para_start += para.len() + 1;
-    }
+    let marks: Vec<(std::ops::Range<usize>, Style)> = a
+        .refs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let style = if !r.valid {
+                Style::new()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::CROSSED_OUT)
+            } else if selected == Some(i) {
+                Style::new().fg(Color::Black).bg(ACCENT).bold()
+            } else {
+                Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED)
+            };
+            (r.start..r.end, style)
+        })
+        .collect();
+    let (lines, at) = markdown::render_marked(&a.text, width.max(20), Style::new(), hl, &marks);
+    let link_line = selected.and_then(|i| at.get(i).copied().flatten());
     (lines, link_line)
 }
 
-/// Words of `s` with their byte offset.
-fn words(s: &str) -> Vec<(usize, &str)> {
-    let mut out = Vec::new();
-    let mut start = None;
-    for (i, c) in s.char_indices() {
-        if c.is_whitespace() {
-            if let Some(b) = start.take() {
-                out.push((b, &s[b..i]));
-            }
-        } else if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if let Some(b) = start {
-        out.push((b, &s[b..]));
-    }
-    out
-}
-
-pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView) {
+pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView, hl: &Highlighter) {
     let rect = centered(
         area,
         (area.width * 9 / 10).clamp(40, 120),
@@ -236,7 +179,7 @@ pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView) {
     );
     f.render_widget(Paragraph::new(head), top);
 
-    let (lines, link_line) = answer_lines(&v.answer, v.link, width);
+    let (lines, link_line) = answer_lines(&v.answer, v.link, width, Some(hl));
     v.height = body.height as usize;
     v.total_lines = lines.len();
     if v.link_line != link_line {
@@ -318,7 +261,7 @@ mod tests {
 
     #[test]
     fn wraps_answers_and_styles_references() {
-        let text = "Saves the pet [src/Owner.java:12] then calls [Nope.java:3].\n- a bullet that wraps over the line width";
+        let text = "Saves the pet [src/Owner.java:12] then calls [Nope.java:3].\n\n- a **bullet** that wraps over the line width";
         let r = |s: &str, valid| {
             let start = text.find(s).unwrap();
             CodeRef {
@@ -345,7 +288,7 @@ mod tests {
             asked_at: 0,
             from_cache: false,
         };
-        let (lines, link) = answer_lines(&a, Some(0), 24);
+        let (lines, link) = answer_lines(&a, Some(0), 24, None);
         let plain: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -356,7 +299,8 @@ mod tests {
                 "Saves the pet",
                 "[src/Owner.java:12] then",
                 "calls [Nope.java:3].",
-                "- a bullet that wraps",
+                "",
+                "• a bullet that wraps",
                 "  over the line width",
             ]
         );
