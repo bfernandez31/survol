@@ -2,16 +2,26 @@
 
 *A bird's-eye view of large pull requests.*
 
-![survol: the end-to-end flow of a front-end route, from the Angular component down to the repositories](docs/screenshots/graph-flows.png)
+![survol: the end-to-end flow of an Angular screen, through the HTTP call, the Spring controller and service, down to the repositories and their tables](docs/screenshots/graph-flows.png)
 
-survol is a terminal UI for reviewing very large GitLab merge requests and GitHub pull
-requests (hundreds of files, often AI-generated). It helps you understand **how the whole change fits together**
-(what calls what, how it is wired, what untouched code it affects) and form an
-architectural opinion without reading every line. It is **not a bug finder**.
+survol is a terminal UI for reviewing very large pull requests (hundreds of files, often
+AI-generated). It helps you understand **how the whole change fits together** (what calls
+what, how it is wired, what untouched code it affects) and form an architectural opinion
+without reading every line. It is **not a bug finder**.
 
-All links between pieces of code come from static analysis (tree-sitter, refined by
-language servers). An LLM (the Claude Code CLI) is an optional thin layer: it names and
-explains groups of hunks and answers questions about computed data.
+- **GitHub and GitLab.** Open a GitHub pull request (github.com or GitHub Enterprise
+  Server) or a GitLab merge request (self-hosted) by number or URL, or review a local
+  range `base..head` with no forge at all. The forge is detected from the git remote.
+  Existing review threads show under their line; your comments are published as one
+  review.
+- **Three views of one change**: the whole diff as one stream (Diff), hunks grouped by
+  feature then layer (Stack), and the code graph around the changes, with the end-to-end
+  flows from each impacted entry point down to the database (Graph).
+- **Static analysis first.** Every link between pieces of code comes from tree-sitter,
+  refined by language servers, for Java, Kotlin, TypeScript and JavaScript, with Spring
+  and Angular rules (a front-end HTTP call is linked to the Spring endpoint it reaches).
+  An LLM (the Claude Code CLI) is an optional thin layer: it names and explains groups of
+  hunks and answers questions about computed data.
 
 See [HANDOFF.md](HANDOFF.md) (French) for the vision, the decisions and the roadmap.
 Steps 0 to 6 are implemented.
@@ -44,6 +54,13 @@ Steps 0 to 6 are implemented.
 survol has three views sharing one review state. `Tab` / `Shift-Tab` (or `1` `2` `3`)
 switches between them. "Reviewed" is keyed by hunk content: when new commits are pushed,
 only the hunks that actually changed come back as unreviewed.
+
+The screenshots come from two public projects: [spring-petclinic-angular](https://github.com/spring-petclinic/spring-petclinic-angular)
+and [spring-petclinic-rest](https://github.com/spring-petclinic/spring-petclinic-rest) put
+in one repository, with a demo branch (a visit details endpoint, an edit screen using it,
+a notification sent on each saved visit) reviewed as a local range; and the GitHub pull
+request [spring-projects/spring-petclinic#2362](https://github.com/spring-projects/spring-petclinic/pull/2362)
+with its review threads.
 
 The forge is detected from the git remote: github.com (or a GitHub Enterprise host listed
 in the config) is GitHub, anything else GitLab. The MR head is fetched from
@@ -79,11 +96,11 @@ In the list, `h` / `l` fold / unfold a directory, `zM` / `zR` fold / unfold them
 
 ### Stack view
 
-![Stack view: hunks grouped by capability then layer, with a functional summary (French output)](docs/screenshots/stack-view.png)
+![Stack view: four groups named by the LLM, the first one reviewed, the second open with its summary and its hunks by layer](docs/screenshots/stack-view.png)
 
 Hunks grouped by **functional capability**, then by **layer** (api, service, persistence,
-tests…), each group with a title and a 2–3 line functional summary. Here the summaries
-were generated in French (`--lang fr`).
+tests…), each group with a title and a 2–3 line functional summary. `--lang fr` (or
+`[llm] language`) writes them in another language.
 
 - Grouping runs in the background at startup and is cached. Every hunk belongs to exactly
   one group (checked in code; invalid LLM answers are retried, then fall back to grouping
@@ -109,7 +126,7 @@ Spring endpoints). Every edge has a **confidence** (1.0 certain, lower when ambi
 **Changed symbols**: changed symbols by module and file, with their callers and how many
 live in files the diff does not touch (impact on untouched code).
 
-![Graph view, changed symbols: each changed method with its caller count and a code preview](docs/screenshots/graph-changed-symbols.png)
+![Graph view, changed symbols: each changed method with its caller count; saveVisit has a caller in a file the diff does not touch](docs/screenshots/graph-changed-symbols.png)
 
 **Symbol view** (`Enter` on a symbol, or `/` to find any symbol by name): a tree *Called
 by / Calls / Tests*, then every other edge kind (`http calls`, `configures`, `uses`,
@@ -117,7 +134,7 @@ by / Calls / Tests*, then every other edge kind (`http calls`, `configures`, `us
 diff or intact. `l` / `h` expand / collapse (callers of callers…), `Enter` makes a node
 the new root, `Backspace` / `Ctrl-o` goes back. The right pane previews the code.
 
-![Symbol view: a Spring endpoint with its callees, tests, the Angular services calling it over HTTP and the OpenAPI spec configuring it](docs/screenshots/graph-symbol-view.png)
+![Symbol view: a service method with its callers (one intact, one in the diff, one modified), callees, tests, the interface it overrides and the listener of the event it publishes](docs/screenshots/graph-symbol-view.png)
 
 **Module map**: packages / directories with their dependencies in and out (`←` / `→`
 counts, `Δ` changed symbols, `changed/total files`). Only the changed modules are shown,
@@ -127,9 +144,9 @@ changed symbols, `x` writes the shown map as Mermaid to `.git/survol/exports/`, 
 to it and opens it in the browser (`open` on macOS, `xdg-open` elsewhere; only the mermaid
 script is loaded from a CDN, the diagram stays in the file). After an export, `S` adds the
 diagram to the overall comment of the review (the editor opens on it): GitLab and GitHub render
-Mermaid blocks, so everyone sees it in the merge request.
+Mermaid blocks, so everyone sees it in the merge / pull request.
 
-![Module map: modules with incoming / outgoing dependencies, and the detail of one module](docs/screenshots/graph-module-map.png)
+![Module map: the six changed modules first, then their neighbours, 44 unrelated modules hidden; the right pane details the dependencies of the service package](docs/screenshots/graph-module-map.png)
 
 **Flows** (`f`): the entry points (HTTP endpoints, front-end routes, listeners, scheduled
 jobs, runners) whose end-to-end flow reaches a changed symbol. `Enter` / `l` opens the flow:
@@ -138,12 +155,31 @@ tables) and external calls, through calls, interface implementations, front → 
 calls and events, each step with its layer, modified state and path confidence (see the
 screenshot at the top). `n` / `N` jump between changed steps.
 
+How to read a flow: top to bottom, one step per line; a step indented under another is
+called by it, steps at the same indentation are called one after the other.
+
+| Mark | Meaning |
+|---|---|
+| `●` | the entry point (route, endpoint, listener, job) |
+| `·` | a method of the entry's class (`ngOnInit`, `onSubmit`...) |
+| `→` | a call |
+| `⇢` | the implementation of the interface method above (`ClinicService` → `ClinicServiceImpl`) |
+| `⇒` | a front-end HTTP call reaching a back-end endpoint |
+| `↯` / `▹` | an event reaching its listener / a component displaying another |
+| `▤` | an entity (and its table) a repository works on |
+| `view` `ctrl` `svc` `repo` `entity` `ext` `config` `code` | the layer: front-end component, controller, service, repository, JPA entity, external client, configuration, anything else |
+| `[db]` `[external]` `[event]` | where the flow ends: the database, a call leaving the code base, an event |
+| `+3` | 3 calls left out: they reach neither a change nor a terminal |
+| `↑ above` / `↻ cycle` | already expanded higher in the flow / a recursive call |
+| `0.77` | path confidence: the product of the edge confidences from the entry (1.0 is not shown) |
+| `modified` | the diff changes this step |
+
 The base revision's graph is built in the background. When a flow differs, `b` cycles
 **after → before → merged**: added (`+`) and removed (`-`) steps, reroutes, new external
 calls, persistence accesses gone. `x` writes the flow (or its before / after) as Mermaid,
 `X` opens it in the browser, `S` adds it to the overall comment.
 
-![Flow before / after: an edit screen rerouted from the pet and owner endpoints to a new visit details endpoint](docs/screenshots/graph-flow-before-after.png)
+![Flow before / after: the edit screen used to call the visit, pet and owner endpoints (removed steps); it now calls the new visit details endpoint (added steps)](docs/screenshots/graph-flow-before-after.png)
 
 **Language servers** (optional): once the graph and the worktree are ready, survol starts
 the installed servers (jdtls, kotlin-language-server or kotlin-lsp,
@@ -154,6 +190,8 @@ place) or `LSP ✗` (the heuristic graph stays). Bounded by `[lsp] budget_secs`,
 head commit.
 
 ### Whole file
+
+![Whole file: ClinicServiceImpl at the head, the added lines highlighted, the removed one in place, the changes marked on the scrollbar](docs/screenshots/whole-file.png)
 
 `gf` in any view (on a diff line, a hunk, a group, a symbol, a flow step) opens the
 **whole file** at the head, full screen, at that line: the lines the diff adds are
@@ -166,7 +204,7 @@ thread, `e` opens the editor at the line, `Esc` closes.
 
 ### Questions to the LLM
 
-![An answer about a Spring endpoint, citing code as navigable [path:line] links (French output)](docs/screenshots/llm-answer.png)
+![An answer about an event listener, citing code as navigable [path:line] links and saying what the context does not show](docs/screenshots/llm-answer.png)
 
 `a` asks about the node under the cursor: a symbol (Graph), a group or the hunk under the
 cursor (Stack), a hunk (Diff). Pick a suggested question (`↑` / `↓` or its number) or
@@ -182,12 +220,12 @@ rendered as markdown (lists, emphasis, code blocks highlighted), links included.
 
 ### Comments and publishing
 
-![A draft comment shown under its line in the Diff view](docs/screenshots/diff-draft-comment.png)
+![GitHub pull request: Copilot review threads under their line, and a draft reply](docs/screenshots/github-threads.png)
 
 In the Diff and Stack views, `c` comments the line under the cursor (on a draft: edits it;
 on a GitLab discussion or GitHub review thread: replies to it), `V` then `c` a range of lines within one hunk, `C`
 the whole file. Drafts are local and follow their line when new commits arrive (a draft
-whose line is gone is marked *stale* and never published). For a merge request, the
+whose line is gone is marked *stale* and never published). For a merge or pull request, the
 existing discussions are fetched in the background and shown under their line, with author,
 date, resolved state and every reply.
 
@@ -198,7 +236,7 @@ note opens its **thread**: the code it is about, the note and all its replies (a
 reply drafts); `c` replies (or edits a draft), `n` / `N` goes to the next / previous
 thread of the diff.
 
-![Review panel: overall comment and drafts; on a local range, drafts stay local](docs/screenshots/review-panel.png)
+![A draft comment shown under its line in the Diff view](docs/screenshots/diff-draft-comment.png)
 
 `P` opens the **Review panel**: the overall comment (`S`), the drafts (`Enter` go, `e`
 edit, `d` delete), the discussions (`e` reply, `t` thread) and `p` publish. Publishing shows what will
@@ -206,6 +244,8 @@ be sent (`J` for the exact JSON requests) and waits for `y`. On GitLab it create
 notes, then publishes them all at once (`bulk_publish`); on GitHub it fills your pending
 review, then submits it once (`COMMENT`). Either way the review appears in one go. A local
 range (`base..head`) keeps its drafts local.
+
+![Publish confirmation on a GitHub pull request: one comment, sent as one pending review then one submission, with the requests listed](docs/screenshots/publish-confirm.png)
 
 ### Neovim integration
 
@@ -239,16 +279,18 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
 
 ## Quick start
 
-1. GitLab: configure your host in `~/.config/survol/config.toml` (see
+1. Connect your forge (skip it to review local ranges only).
+
+   GitHub (github.com): nothing to configure when `gh` is logged in (`gh auth login`) or
+   `GITHUB_TOKEN` is set. GitHub Enterprise: list its host (see [GitHub notes](#github-notes)).
+
+   GitLab: configure your host in `~/.config/survol/config.toml` (see
    [Configuration](#configuration)), or export `GITLAB_HOST`:
 
    ```toml
    [gitlab]
    host = "gitlab.corp.example"
    ```
-
-   GitHub (github.com): nothing to configure when `gh` is logged in (`gh auth login`) or
-   `GITHUB_TOKEN` is set. GitHub Enterprise: list its host (see [GitHub notes](#github-notes)).
 
 2. Check the setup (git, repository, detected forge, host / CA / token / API version, glab
    or gh, nvim, the LLM CLI and its account, the language servers):
@@ -666,7 +708,7 @@ and runs `$VISUAL` / `$EDITOR`.
 - **Detection**: a remote on `github.com` (or an SSH alias such as `github.com-work`) is
   GitHub; so is a host listed in `[github] hosts` (GitHub Enterprise Server). A pull
   request URL on the command line wins; `[forge] kind = "github"` (with `[forge] host`)
-  forces it. Anything else stays GitLab, as before.
+  forces it. Anything else is GitLab.
 - **API**: REST v3 (`api.github.com`, or `https://<host>/api/v3`) and GraphQL (review
   threads with their resolved state, the pending review). Token: `GITHUB_TOKEN`,
   `GH_TOKEN` (Enterprise: `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`), then
@@ -709,8 +751,9 @@ and runs `$VISUAL` / `$EDITOR`.
   aligned by id (a repeated step is not expanded again); the base graph is complete up to
   5,000 files, otherwise limited to the neighbourhood of the flows.
 - **Editor**: only the line (not the column) is passed from the views.
-- **GitHub**: publishing was tested against a fake server only (recorded API responses),
-  not against github.com; review threads beyond 100 comments are cut at 100; GitHub
+- **GitHub**: reading a pull request (diff, review threads, discussions) is checked
+  against github.com; publishing was tested against a fake server only (recorded API
+  responses), not against github.com; review threads beyond 100 comments are cut at 100; GitHub
   Enterprise Server versions without file-level comments (`subjectType`) are not detected.
 - Grouping and publishing still need validation on a large real GitLab MR.
 
