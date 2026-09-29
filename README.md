@@ -22,6 +22,7 @@ Steps 0 to 6 are implemented.
   - [Diff view](#diff-view)
   - [Stack view](#stack-view)
   - [Graph view](#graph-view)
+  - [Whole file](#whole-file)
   - [Questions to the LLM](#questions-to-the-llm)
   - [Comments and publishing](#comments-and-publishing)
   - [Neovim](#neovim-integration)
@@ -124,6 +125,17 @@ methods: confirmed edges go to confidence 1, wrong guesses are removed, missed c
 added. The header shows `⟳ LSP: refining 12/40`, then `LSP ✓n` (the graph is swapped in
 place) or `LSP ✗` (the heuristic graph stays). Bounded by `[lsp] budget_secs`, cached per
 head commit.
+
+### Whole file
+
+`gf` in any view (on a diff line, a hunk, a group, a symbol, a flow step) opens the
+**whole file** at the head, full screen, at that line: the lines the diff adds are
+highlighted, the removed ones shown in place, the notes under their line. The scrollbar
+on the right marks the changes (green / red) and the threads. `n` / `N` jump from change
+to change, `]c` / `[c` from thread to thread, `d` hides / shows the removed lines, `s`
+shows the file side by side (base / head), `c` (or `V` then `c`) comments a line of the
+diff (lines outside the hunks cannot be commented yet), `Enter` on a note opens its
+thread, `e` opens the editor at the line, `Esc` closes.
 
 ### Questions to the LLM
 
@@ -233,7 +245,7 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
    | `Tab` / `1` `2` `3` | Diff / Stack / Graph |
    | `j` `k`, `n` `N`, `J` `K` | move, next hunk, next file / group |
    | `space`, `u` | mark reviewed and go on, next unreviewed |
-   | `gs`, `gd`, `e` | Graph view of the symbol, back to the Diff, open in editor |
+   | `gs`, `gd`, `gf`, `e` | Graph view of the symbol, back to the Diff, whole file, open in editor |
    | `m`, `f` | Graph mode, flows |
    | `a`, `A` | ask the LLM, previous answers |
    | `c`, `V` `c`, `C`, `P` | comment line / range / file, Review panel |
@@ -346,6 +358,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `gg` / `G` | top / bottom |
 | `h` / `l`, `0` | scroll content horizontally, reset |
 | `s` | unified ↔ split |
+| `gf` | whole file at the head, changes in place (see Popups) |
 | `e` | open in editor (parent Neovim if any) |
 | `a` | ask the LLM about the node / group / hunk |
 | `A` | last answer, then the review's questions |
@@ -417,6 +430,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | Question input | type, or `↑` / `↓` (`Tab`, `Ctrl-n` / `Ctrl-p`) or `1`–`9` to pick a suggestion; `Ctrl-u` clear; `Enter` ask; `Esc` cancel |
 | Answer | `Tab` / `n`, `Shift-Tab` / `N` next / previous link; `Enter` go (Graph, else Diff); `d` Diff; `e` editor; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `A` history; `Esc` / `q` close |
 | Comment editor | `Ctrl-s` or `Alt-Enter` save; `Enter` new line; `Tab` indent; `Ctrl-u` clear the line; `Esc` cancel (twice if the text changed) |
+| Whole file (`gf`) | `n` / `N` next / previous change; `]c` / `[c` next / previous thread; `d` hide / show removed lines; `s` side by side; `c`, `V` then `c` comment a diff line / range; `o` / `za` fold a note; `Enter` on a note: thread, else editor; `e` editor; `h` / `l`, `gg` / `G`, `Ctrl-d` / `Ctrl-u` move; `Esc` / `q` close |
 | Thread | `c` reply (edit on a draft); `n` / `N` next / previous thread; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `Esc` / `q` close |
 | Review panel | `Enter` go / edit summary; `e` edit (reply on a discussion); `t` thread; `d` delete; `S` summary; `p` publish; `r` refresh; `Esc` / `P` close |
 | Publish confirmation | `y` publish; `n` cancel; `J` exact JSON requests; `j` / `k` scroll |

@@ -493,6 +493,10 @@ impl DiffView {
                     self.side_sel = 0;
                 }
                 ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
+                ('g', KeyCode::Char('f')) => {
+                    let (hunk, line) = self.anchor().map_or((None, None), |a| (a.hunk, a.line));
+                    return sh.whole_file(self.current_file(), hunk, line);
+                }
                 ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_here(sh),
                 ('z', KeyCode::Char('M')) => self.set_all_collapsed(sh, true),
                 ('z', KeyCode::Char('R')) => self.set_all_collapsed(sh, false),

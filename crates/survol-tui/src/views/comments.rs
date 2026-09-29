@@ -460,6 +460,8 @@ pub struct ThreadView {
     pub total: usize,
     /// Back to the Review panel when closed.
     pub from_panel: bool,
+    /// Back to the whole-file view when closed.
+    pub from_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +482,7 @@ impl ThreadView {
             height: 10,
             total: 0,
             from_panel: false,
+            from_file: false,
         }
     }
 
@@ -534,6 +537,8 @@ pub struct Editor {
     pub from_panel: bool,
     /// Back to this thread when done.
     pub from_thread: Option<NoteKind>,
+    /// Back to the whole-file view when done.
+    pub from_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,6 +559,7 @@ impl Editor {
             confirm_discard: false,
             from_panel: false,
             from_thread: None,
+            from_file: false,
         }
     }
 

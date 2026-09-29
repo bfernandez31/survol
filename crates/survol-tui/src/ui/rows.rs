@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use survol_core::model::{Diff, DiffLine, FileStatus, LineKind};
+use survol_core::model::{Diff, FileStatus, LineKind};
 use unicode_width::UnicodeWidthChar;
 
 use super::{ACCENT, ADDED_BG, CURSOR_BG, REMOVED_BG};
@@ -38,7 +38,7 @@ pub struct RowOpts {
     pub selected: bool,
 }
 
-const SELECT_BG: Color = Color::Rgb(110, 90, 20);
+pub(super) const SELECT_BG: Color = Color::Rgb(110, 90, 20);
 
 /// Lays the notes out at the width of a diff pane of `width` columns.
 pub fn fit_notes(sh: &mut Shared, width: usize) {
@@ -157,7 +157,7 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
             );
             let mut spans = vec![Span::styled(gutter, cursor_style(Style::new().dim()))];
             spans.extend(code_spans(
-                l,
+                l.kind,
                 &hl[line],
                 width.saturating_sub(12),
                 hscroll,
@@ -182,7 +182,7 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
                         let gutter =
                             format!("{:>5} ", n.map(|n| n.to_string()).unwrap_or_default());
                         spans.push(Span::styled(gutter, cursor_style(Style::new().dim())));
-                        spans.extend(code_spans(l, &hl[i], text_w, hscroll, reviewed, true));
+                        spans.extend(code_spans(l.kind, &hl[i], text_w, hscroll, reviewed, true));
                     }
                     None => spans.push(Span::styled(
                         " ".repeat(w),
@@ -218,15 +218,15 @@ pub fn render_row(sh: &mut Shared, row: Row, o: RowOpts) -> Line<'static> {
 }
 
 /// Sign column plus highlighted, horizontally scrolled and padded code.
-fn code_spans(
-    line: &DiffLine,
+pub(super) fn code_spans(
+    kind: LineKind,
     hl: &Spans,
     width: usize,
     hscroll: usize,
     reviewed: bool,
     pad: bool,
 ) -> Vec<Span<'static>> {
-    let (sign, bg) = match line.kind {
+    let (sign, bg) = match kind {
         LineKind::Added => ("+", Some(ADDED_BG)),
         LineKind::Removed => ("-", Some(REMOVED_BG)),
         LineKind::Context => (" ", None),
@@ -242,7 +242,7 @@ fn code_spans(
             s
         }
     };
-    let sign_style = match line.kind {
+    let sign_style = match kind {
         LineKind::Added => Style::new().fg(Color::Green),
         LineKind::Removed => Style::new().fg(Color::Red),
         LineKind::Context => Style::new(),

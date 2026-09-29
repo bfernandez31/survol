@@ -28,6 +28,7 @@ use crate::views::comments::{
     ReviewPanel, ThreadOutcome, ThreadView, panel_rows,
 };
 use crate::views::diff::DiffView;
+use crate::views::fileview::{FileOutcome, FileView};
 use crate::views::graph::GraphView;
 use crate::views::stack::StackView;
 
@@ -52,7 +53,7 @@ impl View {
 }
 
 /// What a view asks the application to do after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
     /// Show this hunk in the Diff view.
@@ -72,6 +73,11 @@ pub enum Action {
     Comment(CommentTarget),
     /// Show the whole thread of a note.
     Thread(NoteKind),
+    /// Show the whole file `path`, at head line `line`.
+    WholeFile {
+        path: String,
+        line: u32,
+    },
 }
 
 /// A modal window over the views.
@@ -87,6 +93,8 @@ pub enum Popup {
     Review,
     /// The whole thread of a note.
     Thread(ThreadView),
+    /// The whole file (`gf`).
+    File(FileView),
 }
 
 /// The merge request's side of the review.
@@ -217,18 +225,10 @@ impl Shared {
         }
     }
 
-    /// File and line to open for a position, on the new side.
-    fn editor_target(
-        &self,
-        file: usize,
-        hunk: Option<usize>,
-        line: Option<usize>,
-    ) -> Result<(PathBuf, u32), &'static str> {
+    /// Head line of a position: the line (the next one with a head number
+    /// for a removed line), else the start of the hunk, else 1.
+    pub fn head_line(&self, hunk: Option<usize>, line: Option<usize>) -> u32 {
         let d = &self.review.diff;
-        let f = &d.files[file];
-        if f.status == FileStatus::Deleted {
-            return Err("file deleted in this review");
-        }
         let line = match (hunk, line) {
             (Some(h), Some(l)) => {
                 let hunk = &d.hunks[h];
@@ -241,7 +241,32 @@ impl Shared {
             (Some(h), None) => d.hunks[h].new_range.start,
             _ => 1,
         };
-        Ok((self.review.worktree.join(&f.path), line.max(1)))
+        line.max(1)
+    }
+
+    /// File and line to open for a position, on the new side.
+    fn editor_target(
+        &self,
+        file: usize,
+        hunk: Option<usize>,
+        line: Option<usize>,
+    ) -> Result<(PathBuf, u32), &'static str> {
+        let f = &self.review.diff.files[file];
+        if f.status == FileStatus::Deleted {
+            return Err("file deleted in this review");
+        }
+        Ok((
+            self.review.worktree.join(&f.path),
+            self.head_line(hunk, line),
+        ))
+    }
+
+    /// `gf`: the whole-file view of `file` at a position.
+    pub fn whole_file(&self, file: usize, hunk: Option<usize>, line: Option<usize>) -> Action {
+        Action::WholeFile {
+            path: self.review.diff.files[file].path.clone(),
+            line: self.head_line(hunk, line),
+        }
     }
 
     /// Opens `file` at the hunk / line in the editor (parent Neovim if any).
@@ -346,6 +371,8 @@ pub struct App {
 
     /// The Review panel (`P`), kept between openings.
     pub panel: ReviewPanel,
+    /// The whole-file view, while a comment or a thread opened from it shows.
+    file_back: Option<FileView>,
     pub remote_status: RemoteStatus,
     remote_rx: Option<mpsc::Receiver<Result<Option<RemoteReview>, String>>>,
     /// Progress of a publication running in the background.
@@ -384,6 +411,7 @@ impl App {
             history,
             last_answer: None,
             panel: ReviewPanel::default(),
+            file_back: None,
             remote_status: RemoteStatus::Local,
             remote_rx: None,
             publishing: None,
@@ -698,6 +726,10 @@ impl App {
             }
             Action::Comment(t) => self.open_editor(t, false),
             Action::Thread(kind) => self.open_thread(kind, false),
+            Action::WholeFile { path, line } => match FileView::open(&mut self.sh, &path, line) {
+                Ok(v) => self.popup = Some(Popup::File(v)),
+                Err(e) => self.sh.notify(e),
+            },
             Action::ShowSymbol(s) => {
                 if self.sh.graph.is_some() {
                     self.graph.show_symbol(&self.sh, s);
@@ -959,17 +991,47 @@ impl App {
                     self.editor_closed(&e);
                 }
             },
+            Popup::File(mut v) => match v.on_key(&mut self.sh, key) {
+                FileOutcome::Continue => self.popup = Some(Popup::File(v)),
+                FileOutcome::Close => {}
+                FileOutcome::Edit(line) => {
+                    self.sh.open_path(&v.path, line);
+                    self.popup = Some(Popup::File(v));
+                }
+                FileOutcome::Comment(target) => {
+                    self.open_editor(target, false);
+                    match &mut self.popup {
+                        Some(Popup::Comment(e)) => {
+                            e.from_file = true;
+                            self.file_back = Some(v);
+                        }
+                        _ => self.popup = Some(Popup::File(v)),
+                    }
+                }
+                FileOutcome::Thread(kind) => {
+                    self.open_thread(kind, false);
+                    if let Some(Popup::Thread(t)) = &mut self.popup {
+                        t.from_file = true;
+                    }
+                    self.file_back = Some(v);
+                }
+            },
             Popup::Thread(mut t) => match t.on_key(key) {
                 ThreadOutcome::Continue => self.popup = Some(Popup::Thread(t)),
                 ThreadOutcome::Close => {
                     if t.from_panel {
                         self.popup = Some(Popup::Review);
+                    } else if t.from_file {
+                        self.back_to_file();
                     }
                 }
                 ThreadOutcome::Write(target) => {
                     self.open_editor(target, false);
                     match &mut self.popup {
-                        Some(Popup::Comment(e)) => e.from_thread = Some(t.kind),
+                        Some(Popup::Comment(e)) => {
+                            e.from_thread = Some(t.kind);
+                            e.from_file = t.from_file;
+                        }
                         _ => self.popup = Some(Popup::Thread(t)),
                     }
                 }
@@ -1034,12 +1096,26 @@ impl App {
     fn editor_closed(&mut self, e: &Editor) {
         if e.from_panel {
             self.popup = Some(Popup::Review);
-        } else if let Some(kind) = e.from_thread {
+            return;
+        }
+        if let Some(kind) = e.from_thread {
             // An emptied draft is gone: nothing to go back to.
             let gone = matches!(kind, NoteKind::Draft(id) if self.sh.comments.get(id).is_none());
             if !gone {
-                self.popup = Some(Popup::Thread(ThreadView::new(kind)));
+                let mut t = ThreadView::new(kind);
+                t.from_file = self.file_back.is_some();
+                self.popup = Some(Popup::Thread(t));
+                return;
             }
+        }
+        self.back_to_file();
+    }
+
+    /// Shows again the whole-file view left for a comment or a thread.
+    fn back_to_file(&mut self) {
+        if let Some(mut v) = self.file_back.take() {
+            v.relayout(&self.sh);
+            self.popup = Some(Popup::File(v));
         }
     }
 
@@ -1862,6 +1938,67 @@ mod tests {
         assert!(matches!(app.popup, Some(Popup::Thread(_))));
         app.on_key(code(KeyCode::Esc));
         assert!(matches!(app.popup, Some(Popup::Review)));
+    }
+
+    #[test]
+    fn whole_file_view_comments_and_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, grouping) = fixture(dir.path());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let head: String = (1..=12)
+            .map(|i| match i {
+                1 => "b\n".to_string(),
+                10 => "d\n".to_string(),
+                i => format!("line {i}\n"),
+            })
+            .collect();
+        std::fs::write(dir.path().join("src/a.rs"), head).unwrap();
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.stack.set_grouping(&app.sh, grouping);
+        // gf on the added line of the second hunk.
+        cursor_to(&mut app, Row::Line { hunk: 1, line: 1 });
+        app.on_key(key('g'));
+        app.on_key(key('f'));
+        let Some(Popup::File(v)) = &app.popup else {
+            panic!("no file view: {:?}", app.sh.message());
+        };
+        assert_eq!(v.cursor_line(), 10);
+        assert_eq!(v.counts(), (2, 0));
+        let screen = crate::ui::tests::screen(&mut app, 110, 30).join("\n");
+        assert!(
+            screen.contains("src/a.rs · whole file · 12 lines · 2 change(s)"),
+            "{screen}"
+        );
+        assert!(screen.contains("line 5"), "unchanged lines too: {screen}");
+        assert!(screen.contains("-c"), "removed lines in place: {screen}");
+        // c: a draft on that line, then back to the file view with it.
+        app.on_key(key('c'));
+        type_text(&mut app, "Why d?");
+        app.on_key(ctrl('s'));
+        let Some(Popup::File(v)) = &app.popup else {
+            panic!("not back to the file");
+        };
+        assert_eq!(v.counts(), (2, 1));
+        // ]c... already on it: [c goes back up to it, Enter shows its thread.
+        app.on_key(key('G'));
+        app.on_key(key('['));
+        app.on_key(key('c'));
+        app.on_key(code(KeyCode::Enter));
+        assert!(matches!(app.popup, Some(Popup::Thread(_))));
+        app.on_key(code(KeyCode::Esc));
+        assert!(matches!(app.popup, Some(Popup::File(_))));
+        app.on_key(code(KeyCode::Esc));
+        assert!(app.popup.is_none());
+        // From the Stack view too.
+        app.on_key(key('2'));
+        app.on_key(key('g'));
+        app.on_key(key('f'));
+        assert!(matches!(app.popup, Some(Popup::File(_))));
     }
 
     #[test]

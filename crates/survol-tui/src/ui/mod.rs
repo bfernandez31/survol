@@ -3,6 +3,7 @@
 mod ask;
 mod comments;
 mod diff;
+mod fileview;
 mod flows;
 mod graph;
 pub mod markdown;
@@ -51,6 +52,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Some(Popup::History(h)) => ask::render_history(f, body, h, &app.history),
         Some(Popup::Comment(e)) => comments::render_editor(f, body, e),
         Some(Popup::Review) => comments::render_panel(f, body, app),
+        Some(Popup::File(_)) => {
+            if let Some(Popup::File(mut v)) = app.popup.take() {
+                fileview::render(f, body, app, &mut v);
+                app.popup = Some(Popup::File(v));
+            }
+        }
         Some(Popup::Thread(_)) => {
             if let Some(Popup::Thread(mut t)) = app.popup.take() {
                 comments::render_thread(f, body, app, &mut t);
@@ -192,14 +199,14 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(
             match app.view {
                 View::Diff => {
-                    " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  e edit  / filter  ? help"
+                    " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  gf file  e edit  / filter  ? help"
                 }
                 View::Stack => {
-                    " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  c comment  V range  P review  a ask  gs graph  R regroup  ? help"
+                    " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  c comment  V range  P review  a ask  gs graph  gf file  R regroup  ? help"
                 }
                 View::Graph => match app.graph.mode {
                     Mode::Symbol => {
-                        " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  / find  m mode  a ask  A answers  ? help"
+                        " j/k move  l/h expand/collapse  Enter focus node  ⌫/C-o back  n/N section  e edit  gd diff  gf file  / find  m mode  a ask  A answers  ? help"
                     }
                     Mode::Flows => {
                         " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x Mermaid  e edit  gd diff  h back  m mode  ? help"
@@ -208,7 +215,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                         " j/k move  Enter/l changed symbols  Enter on symbol: graph  e edit  gd diff  x Mermaid export  / find  m mode  ? help"
                     }
                     _ => {
-                        " j/k move  Enter symbol graph  J/K module  e edit  gd diff  a ask  / find symbol  m mode  C-l preview  ? help"
+                        " j/k move  Enter symbol graph  J/K module  e edit  gd diff  gf file  a ask  / find symbol  m mode  C-l preview  ? help"
                     }
                 },
             }
@@ -230,6 +237,10 @@ const HELP: &[(&str, &str)] = &[
     ("gg / G", "top / bottom"),
     ("h / l, 0", "scroll content horizontally, reset"),
     ("s", "unified ↔ split"),
+    (
+        "gf",
+        "whole file: changes in place (n/N, ]c/[c, d, s, c, e)",
+    ),
     ("e", "open in editor (parent nvim if any)"),
     ("a", "ask the LLM about the node / group / hunk"),
     ("A", "last answer, then the review's questions"),

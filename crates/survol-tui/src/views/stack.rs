@@ -768,6 +768,20 @@ impl StackView {
             })
     }
 
+    /// `gf`: the whole file of the content line (or of the node).
+    fn whole_file(&self, sh: &Shared) -> Action {
+        if self.focus == Focus::Content
+            && let Some((h, line)) = self.cursor_hunk()
+        {
+            return sh.whole_file(sh.review.diff.hunks[h].file, Some(h), line);
+        }
+        match self.jump_target() {
+            Action::ShowHunk(h) => sh.whole_file(sh.review.diff.hunks[h].file, Some(h), None),
+            Action::ShowFile(f) => sh.whole_file(f, None, None),
+            _ => Action::None,
+        }
+    }
+
     fn open_in_editor(&self, sh: &mut Shared) {
         if let Action::ShowHunk(h) = self.jump_target() {
             let line = match (self.focus, self.cursor_hunk()) {
@@ -805,6 +819,7 @@ impl StackView {
                 },
                 ('g', KeyCode::Char('d')) => return self.jump_target(),
                 ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
+                ('g', KeyCode::Char('f')) => return self.whole_file(sh),
                 ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_here(sh),
                 ('z', KeyCode::Char('M')) => self.set_all_folded(sh, true),
                 ('z', KeyCode::Char('R')) => self.set_all_folded(sh, false),
