@@ -4,8 +4,8 @@
 
 ![survol: the end-to-end flow of a front-end route, from the Angular component down to the repositories](docs/screenshots/graph-flows.png)
 
-survol is a terminal UI for reviewing very large GitLab merge requests (hundreds of files,
-often AI-generated). It helps you understand **how the whole change fits together**
+survol is a terminal UI for reviewing very large GitLab merge requests and GitHub pull
+requests (hundreds of files, often AI-generated). It helps you understand **how the whole change fits together**
 (what calls what, how it is wired, what untouched code it affects) and form an
 architectural opinion without reading every line. It is **not a bug finder**.
 
@@ -34,6 +34,7 @@ Steps 0 to 6 are implemented.
 - [Neovim plugin](#neovim-plugin)
 - [Privacy and safety](#privacy-and-safety)
 - [GitLab notes](#gitlab-notes)
+- [GitHub notes](#github-notes)
 - [Limitations](#limitations)
 - [Development](#development)
 - [License](#license)
@@ -44,8 +45,10 @@ survol has three views sharing one review state. `Tab` / `Shift-Tab` (or `1` `2`
 switches between them. "Reviewed" is keyed by hunk content: when new commits are pushed,
 only the hunks that actually changed come back as unreviewed.
 
-The MR head is fetched from `refs/merge-requests/<iid>/head` and checked out in a dedicated
-worktree under `.git/survol/worktrees/`, so your working branch is never touched. The Diff
+The forge is detected from the git remote: github.com (or a GitHub Enterprise host listed
+in the config) is GitHub, anything else GitLab. The MR head is fetched from
+`refs/merge-requests/<iid>/head` (a PR's from `refs/pull/<n>/head`) and checked out in a
+dedicated worktree under `.git/survol/worktrees/`, so your working branch is never touched. The Diff
 view is usable at once; the worktree, the grouping and the graph are built in the background.
 
 ### Diff view
@@ -121,7 +124,7 @@ counts, `Δ` changed symbols). `Enter` lists a module's changed symbols, `x` wri
 map as Mermaid to `.git/survol/exports/`, `X` also writes a self-contained HTML page next
 to it and opens it in the browser (`open` on macOS, `xdg-open` elsewhere; only the mermaid
 script is loaded from a CDN, the diagram stays in the file). After an export, `S` adds the
-diagram to the overall comment of the review (the editor opens on it): GitLab renders
+diagram to the overall comment of the review (the editor opens on it): GitLab and GitHub render
 Mermaid blocks, so everyone sees it in the merge request.
 
 ![Module map: modules with incoming / outgoing dependencies, and the detail of one module](docs/screenshots/graph-module-map.png)
@@ -180,7 +183,7 @@ rendered as markdown (lists, emphasis, code blocks highlighted), links included.
 ![A draft comment shown under its line in the Diff view](docs/screenshots/diff-draft-comment.png)
 
 In the Diff and Stack views, `c` comments the line under the cursor (on a draft: edits it;
-on a GitLab discussion: replies to it), `V` then `c` a range of lines within one hunk, `C`
+on a GitLab discussion or GitHub review thread: replies to it), `V` then `c` a range of lines within one hunk, `C`
 the whole file. Drafts are local and follow their line when new commits arrive (a draft
 whose line is gone is marked *stale* and never published). For a merge request, the
 existing discussions are fetched in the background and shown under their line, with author,
@@ -197,8 +200,9 @@ thread of the diff.
 
 `P` opens the **Review panel**: the overall comment (`S`), the drafts (`Enter` go, `e`
 edit, `d` delete), the discussions (`e` reply, `t` thread) and `p` publish. Publishing shows what will
-be sent (`J` for the exact JSON requests) and waits for `y`. It creates GitLab draft notes,
-then publishes them all at once (`bulk_publish`), so the review appears in one go. A local
+be sent (`J` for the exact JSON requests) and waits for `y`. On GitLab it creates draft
+notes, then publishes them all at once (`bulk_publish`); on GitHub it fills your pending
+review, then submits it once (`COMMENT`). Either way the review appears in one go. A local
 range (`base..head`) keeps its drafts local.
 
 ### Neovim integration
@@ -214,8 +218,9 @@ keymaps; `:SurvolBack` shows the same TUI where you left it. See [Neovim plugin]
 | Tool | Needed for | Notes |
 |---|---|---|
 | Rust toolchain | building | Pinned by `rust-toolchain.toml` (1.98.1, installed by rustup on first build); MSRV 1.90, edition 2024 |
-| `git` | everything | survol shells out to the `git` binary (your credentials, SSH, `refs/merge-requests/*`) |
-| `glab` | optional | GitLab token source (`glab auth login --hostname <host>`); or set `GITLAB_TOKEN` |
+| `git` | everything | survol shells out to the `git` binary (your credentials, SSH, `refs/merge-requests/*`, `refs/pull/*`) |
+| `glab` | optional, GitLab | GitLab token source (`glab auth login --hostname <host>`); or set `GITLAB_TOKEN` |
+| `gh` | optional, GitHub | GitHub token source (`gh auth login`); or set `GITHUB_TOKEN` / `GH_TOKEN` |
 | Claude Code CLI (`claude`) | optional | Grouping and questions; logged in. Without it, use `--no-llm` |
 | Neovim ≥ 0.10 | optional | The plugin; otherwise files open in `$VISUAL` / `$EDITOR` |
 | `jdtls` | optional, Java | `brew install jdtls` |
@@ -232,7 +237,7 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
 
 ## Quick start
 
-1. Configure your GitLab host in `~/.config/survol/config.toml` (see
+1. GitLab: configure your host in `~/.config/survol/config.toml` (see
    [Configuration](#configuration)), or export `GITLAB_HOST`:
 
    ```toml
@@ -240,8 +245,11 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
    host = "gitlab.corp.example"
    ```
 
-2. Check the setup (git, repository, GitLab host / CA / token / API version, glab, nvim,
-   the LLM CLI and its account, the language servers):
+   GitHub (github.com): nothing to configure when `gh` is logged in (`gh auth login`) or
+   `GITHUB_TOKEN` is set. GitHub Enterprise: list its host (see [GitHub notes](#github-notes)).
+
+2. Check the setup (git, repository, detected forge, host / CA / token / API version, glab
+   or gh, nvim, the LLM CLI and its account, the language servers):
 
    ```sh
    survol-cli doctor
@@ -250,10 +258,11 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
 3. Open a review from the repository:
 
    ```sh
-   survol                 # MR of the current branch
-   survol 123             # MR !123 of this repo's project (also `!123`)
+   survol                 # MR / PR of the current branch
+   survol 123             # MR !123 / PR #123 of this repo's project (also `!123`, `'#123'`)
    survol https://gitlab.corp.example/group/app/-/merge_requests/123
-   survol main..feat      # local range, diffed from the merge base (no GitLab needed)
+   survol https://github.com/owner/repo/pull/123
+   survol main..feat      # local range, diffed from the merge base (no forge needed)
    survol --no-llm 123    # never call the LLM: the Stack view groups by directory
    survol --lang fr 123   # LLM titles, summaries and answers in French
    survol --no-lsp 123    # heuristic graph only: start no language server
@@ -283,12 +292,23 @@ configuration and the files it was read from.
 ### Full reference
 
 ```toml
+[forge]                            # default: detected from the git remote (github.com or a
+# kind = "github"                  # [github] hosts entry: GitHub; anything else: GitLab)
+# host = "github.corp.example"     # the host when the remote does not say it (an SSH alias)
+
 [gitlab]
 host = "gitlab.corp.example"      # required for merge requests (or GITLAB_HOST); https:// optional
 # ca_cert = "/path/to/corp-ca.pem"  # extra PEM trusted on top of the system store (or SURVOL_CA_CERT)
 
+[github]                           # github.com needs nothing
+# hosts = ["github.corp.example"]  # GitHub Enterprise Server hosts: their remotes are GitHub
+# token = "ghp_..."                # after GITHUB_TOKEN / GH_TOKEN, before `gh auth token`;
+#                                  # printed redacted by `survol-cli config`
+# ca_cert = "/path/to/corp-ca.pem" # extra PEM for an Enterprise Server behind a corporate CA
+
 [git]
-remote = "origin"                  # remote to fetch refs/merge-requests/* from
+remote = "origin"                  # remote to detect the forge from and to fetch
+                                   # refs/merge-requests/* or refs/pull/* from
 
 [review]
 mechanical_globs = []              # extra globs for the mechanical group, on top of the built-in
@@ -336,6 +356,8 @@ Every `[lsp.<language>]` section takes the same four keys: `enabled`, `command`,
 | `GITLAB_HOST` | Overrides `[gitlab] host` |
 | `GITLAB_TOKEN` | GitLab token. Otherwise `glab config get token --host <host>` is used |
 | `SURVOL_CA_CERT` | Overrides `[gitlab] ca_cert` |
+| `GITHUB_TOKEN`, `GH_TOKEN` | github.com token, in this order. Then `[github] token`, then `gh auth token --hostname github.com` |
+| `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` | GitHub Enterprise Server token (as for gh). Then `[github] token`, then `gh auth token --hostname <host>` |
 | `SURVOL_LLM_LOG=<dir>` | Keeps every prompt and raw LLM answer in `<dir>` (debugging cost / latency) |
 | `XDG_CONFIG_HOME` | Location of the user config (`$XDG_CONFIG_HOME/survol/config.toml`) |
 | `NVIM` | Set by Neovim's terminal: `e` opens files in that parent Neovim |
@@ -468,8 +490,8 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 
 ```
 survol [OPTIONS] [TARGET]
-  TARGET        MR number (123, !123), MR URL, or local range base..head.
-                Empty: the MR of the current branch
+  TARGET        MR / PR number (123, !123, #123), MR / PR URL, or local range
+                base..head. Empty: the MR / PR of the current branch
   -C, --repo    repository to work in (default: current directory)
   --no-llm      never call the LLM (same as [llm] enabled = false)
   --lang LANG   language of LLM-written text (overrides [llm] language)
@@ -483,16 +505,16 @@ The engine as JSON commands, for scripts, tests and debugging. Every command tak
 
 | Command | What it does | Options |
 |---|---|---|
-| `doctor` | Checks git, GitLab access, nvim, the LLM CLI, the language servers | `--json` |
+| `doctor` | Checks git, the detected forge and its access (host, token source, API), nvim, the LLM CLI, the language servers | `--json` |
 | `config` | Prints the effective configuration and where it is read from | |
-| `fetch` | Fetches a merge request and checks it out in its worktree | |
+| `fetch` | Fetches a merge / pull request and checks it out in its worktree | |
 | `diff` | Parsed diff (files, hunks) as JSON | |
 | `group` | Stack grouping as JSON | `--no-cache`, `--no-llm`, `--lang` |
 | `graph` | Changed symbols with callers, callees, tests as JSON | `--symbol NAME`, `--modules`, `--mermaid`, `--no-cache`, `--lsp` (refine and print edge counts by confidence before / after on stderr) |
 | `flows` | Impacted entry points and their end-to-end flows, with before / after | `--entry NAME`, `--mermaid`, `--no-base`, `--no-cache` |
 | `ask` | Asks a question about a symbol, a group or a hunk | `--symbol NAME`, `--group N` (1 = first), `--hunk ID`, `--no-cache`, `--prompt` (print the prompt, no LLM call), `--lang` |
-| `comments` | Local drafts (and where they land) and the MR's discussions | |
-| `publish` | Publishes the drafts to the MR | `--dry-run` (print the exact requests), `--yes` (required to send) |
+| `comments` | Local drafts (and where they land) and the MR / PR's discussions | |
+| `publish` | Publishes the drafts to the MR / PR | `--dry-run` (print the exact requests), `--yes` (required to send) |
 
 Examples (with [jq](https://jqlang.org)):
 
@@ -564,15 +586,22 @@ and runs `$VISUAL` / `$EDITOR`.
 - **Which account**: `[llm] config_dir` sets `CLAUDE_CONFIG_DIR` for the CLI. Put it in the
   project's `.survol/config.toml` to route work code to a work account without touching
   your default one; `survol-cli doctor` shows the account in use.
-- **No telemetry.** survol itself only talks to your GitLab host (API, `git fetch`); the LLM CLI does its own network calls when enabled.
+- **No telemetry.** survol itself only talks to your forge: the GitLab host, or GitHub
+  (`api.github.com`, or your Enterprise Server) for API calls, and your git remote for
+  `git fetch`; the LLM CLI does its own network calls when enabled.
+- **Tokens** are read from the environment, the config, `glab` or `gh`, sent only to the
+  forge's API as a bearer header, and never printed (`doctor` shows where a token comes
+  from, `survol-cli config` prints `[github] token` redacted, HTTP errors carry no header).
 - **Mermaid pages** (`X`): the HTML file loads the mermaid script from `cdn.jsdelivr.net`
   in your browser; the diagram itself stays in the local file. `x` writes the Markdown
   only.
-- **GitLab writes need confirmation**: `y` in the TUI after the full list of requests,
+- **Forge writes need confirmation**: `y` in the TUI after the full list of requests,
   `--yes` on the command line. `publish --dry-run` prints the exact requests and sends
   nothing. Local ranges are never published.
 - **Warning**: `bulk_publish` publishes *all* your pending draft notes on the MR, including
-  drafts you started in the browser. The confirmation shows how many are already there.
+  drafts you started in the browser; on GitHub, submitting publishes your whole pending
+  review, comments started in the browser included. The confirmation shows how many are
+  already there.
 - Stale drafts (their line is gone) are never sent. An interrupted publication resumes
   without duplicates.
 
@@ -593,6 +622,35 @@ and runs `$VISUAL` / `$EDITOR`.
   positions, especially multi-line ranges (`line_range`) and file comments. Positions were
   tested against a fake GitLab server, not yet against a production instance.
 
+## GitHub notes
+
+- **Detection**: a remote on `github.com` (or an SSH alias such as `github.com-work`) is
+  GitHub; so is a host listed in `[github] hosts` (GitHub Enterprise Server). A pull
+  request URL on the command line wins; `[forge] kind = "github"` (with `[forge] host`)
+  forces it. Anything else stays GitLab, as before.
+- **API**: REST v3 (`api.github.com`, or `https://<host>/api/v3`) and GraphQL (review
+  threads with their resolved state, the pending review). Token: `GITHUB_TOKEN`,
+  `GH_TOKEN` (Enterprise: `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`), then
+  `[github] token`, then `gh auth token --hostname <host>`. A classic token needs the
+  `repo` scope for private repositories; a fine-grained one, *Pull requests: read and
+  write* (read is enough to review without publishing).
+- **Diff**: the PR head comes from `refs/pull/<n>/head` (fork PRs included), the base is
+  the merge base of the base branch and the head, as GitHub diffs it.
+- **Discussions**: review threads (resolved or not, every reply, on their line; outdated
+  ones under their file), plus the PR conversation comments and the bodies of submitted
+  reviews, as general notes.
+- **Publishing**: one review. survol reuses your pending review, or creates one on the
+  reviewed head (`POST .../pulls/<n>/reviews` without `event`), adds each draft to it by
+  GraphQL (`addPullRequestReviewThread`: `line` / `side`, `startLine` / `startSide` for a
+  range, `subjectType: FILE` for a file; `addPullRequestReviewThreadReply` for a reply to a
+  thread), writes the overall comment as the review body, then submits it once with the
+  `COMMENT` event. Draft notes and file comments are always available (no version gating).
+- **Mapping**: an added or unchanged line is on the `RIGHT` side (new number), a removed
+  line on the `LEFT` (old number). GitHub has no range going from an added line to a
+  removed one: such a range becomes a comment on its last line.
+- GitHub cannot thread a reply to a conversation comment or a review body: survol adds it
+  to the review body, mentioning the author (`@alice ...`).
+
 ## Limitations
 
 - **Languages**: Java, Kotlin, TypeScript/TSX, JavaScript. Other files appear in the Diff
@@ -612,7 +670,9 @@ and runs `$VISUAL` / `$EDITOR`.
   aligned by id (a repeated step is not expanded again); the base graph is complete up to
   5,000 files, otherwise limited to the neighbourhood of the flows.
 - **Editor**: only the line (not the column) is passed from the views.
-- **GitHub** is not supported (the forge abstraction is ready for it).
+- **GitHub**: publishing was tested against a fake server only (recorded API responses),
+  not against github.com; review threads beyond 100 comments are cut at 100; GitHub
+  Enterprise Server versions without file-level comments (`subjectType`) are not detected.
 - Grouping and publishing still need validation on a large real GitLab MR.
 
 ## Development
