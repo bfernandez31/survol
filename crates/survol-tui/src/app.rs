@@ -1241,8 +1241,10 @@ impl App {
                 )
             }
             CommentTarget::File(f) => (
-                format!("comment on the file {}", d.files[f].display_path()),
-                Vec::new(),
+                format!("comment on the whole file {}", d.files[f].display_path()),
+                // No code to quote: say what the comment covers, so that it
+                // does not look like a line comment.
+                vec![file_summary(d, f)],
                 String::new(),
             ),
             CommentTarget::Draft(id) => {
@@ -1518,11 +1520,49 @@ impl App {
     }
 }
 
+/// `whole file · modified · +12 -3 · 2 hunks`: the context of a file comment.
+fn file_summary(d: &survol_core::model::Diff, f: usize) -> String {
+    let file = &d.files[f];
+    let (added, removed) = d
+        .file_hunks(f)
+        .fold((0, 0), |(a, r), h| (a + h.added(), r + h.removed()));
+    let n = file.hunk_ids.len();
+    let status = format!("{:?}", file.status).to_lowercase();
+    format!(
+        "whole file · {status} · +{added} -{removed} · {n} hunk{}",
+        if n == 1 { "" } else { "s" }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::views::Row;
     use crate::views::stack::tests::{fixture, key};
+
+    #[test]
+    fn file_comment_editor_says_it_covers_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.on_key(key('C'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no comment editor");
+        };
+        assert_eq!(e.target, CommentTarget::File(0));
+        assert!(e.title.starts_with("comment on the whole file "));
+        assert_eq!(e.context.len(), 1);
+        assert!(
+            e.context[0].starts_with("whole file · "),
+            "{}",
+            e.context[0]
+        );
+    }
 
     #[test]
     fn ctrl_r_quits_to_reload() {
