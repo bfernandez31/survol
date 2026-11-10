@@ -226,6 +226,26 @@ test("job exit closes the float and forgets the job", function()
   eq(survol._state(), {})
 end)
 
+test("toggle_key: mapped in the float unless it starts with leader or space", function()
+  eq(survol.terminal_safe("<C-g>"), true)
+  eq(survol.terminal_safe("<leader>sv"), false)
+  eq(survol.terminal_safe("<LocalLeader>s"), false)
+  eq(survol.terminal_safe("<Space>s"), false)
+  eq(survol.terminal_safe(" s"), false)
+  local cfg = survol.config.toggle_key
+  local function float_map(key)
+    survol.config.toggle_key = key
+    survol.open()
+    local found = vim.fn.maparg(key, "t", false, true)
+    local local_map = type(found) == "table" and found.buffer == 1
+    survol.close()
+    return local_map
+  end
+  eq(float_map("<C-g>"), true, "<C-g>")
+  eq(float_map("<leader>x"), false, "<leader>x")
+  survol.config.toggle_key = cfg
+end)
+
 test("completion", function()
   eq(survol.complete("--n", "Survol --n"), { "--no-llm", "--no-lsp" })
   assert(vim.tbl_contains(survol.complete("f", "Survol --lang f"), "fr"))

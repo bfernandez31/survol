@@ -10,7 +10,7 @@ use survol_core::model::{FileStatus, Hunk, LineKind};
 
 use super::comments::{CommentTarget, NoteIndex, NoteKind, row_target};
 use super::graph::{Source, load_source};
-use super::{Row, Scroll};
+use super::{Layout, Row, Scroll};
 use crate::app::Shared;
 
 /// A line of code of the file: at the head, or removed from the base.
@@ -263,7 +263,8 @@ impl FileView {
             },
             hscroll: 0,
             show_removed: true,
-            split: false,
+            // In the layout chosen with `s` in the views.
+            split: sh.layout == Layout::Split,
             visual: None,
             notes_gen: 0,
             pending: None,
@@ -399,6 +400,10 @@ impl FileView {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pos.height / 2).max(1) as isize;
         let page = self.pos.height.max(1) as isize;
+        if super::stray_ctrl(&key, &['d', 'u', 'f', 'b']) {
+            self.pending = None;
+            return FileOutcome::Continue;
+        }
         if let Some(p) = self.pending.take() {
             match (p, key.code) {
                 ('g', KeyCode::Char('g')) => self.pos.goto_top(0, self.rows.len()),

@@ -689,6 +689,26 @@ impl StackView {
         }
     }
 
+    /// `gd` / `Enter`: the Diff view at the line under the cursor (content),
+    /// else at the node's first hunk.
+    fn diff_target(&self) -> Action {
+        if self.focus == Focus::Content
+            && let Some((hunk, Some(line))) = self.cursor_hunk()
+        {
+            return Action::ShowLine { hunk, line };
+        }
+        self.jump_target()
+    }
+
+    /// The one file of the selected node (`C` in the tree).
+    fn node_file(&self, sh: &Shared) -> Option<usize> {
+        let (hunks, files) = node_items(self.grouping.as_ref()?, self.selected()?);
+        let d = &sh.review.diff;
+        let mut all = hunks.iter().map(|&h| d.hunks[h].file).chain(files);
+        let first = all.next()?;
+        all.all(|f| f == first).then_some(first)
+    }
+
     /// `gs`: the Graph view of the symbol changed by the hunk under the
     /// cursor (content) or the first hunk of the node (tree).
     fn show_symbol(&self, sh: &mut Shared) -> Action {
@@ -823,6 +843,10 @@ impl StackView {
             sh.notify("cancelled");
             return Action::None;
         }
+        if super::stray_ctrl(&key, &['d', 'u', 'f', 'b', 'h', 'l']) {
+            self.pending = None;
+            return Action::None;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(p) = self.pending.take() {
             match (p, key.code) {
@@ -830,7 +854,7 @@ impl StackView {
                     Focus::List => self.select(sh, 0),
                     Focus::Content => self.pos.goto_top(0, self.rows.len()),
                 },
-                ('g', KeyCode::Char('d')) => return self.jump_target(),
+                ('g', KeyCode::Char('d')) => return self.diff_target(),
                 ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
                 ('g', KeyCode::Char('f')) => return self.whole_file(sh),
                 ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_here(sh),
@@ -888,6 +912,20 @@ impl StackView {
                 return Action::Thread(sh.notes.items[note as usize].kind);
             }
             KeyCode::Char('0') => self.hscroll = 0,
+            KeyCode::Char('c' | 'V') if self.focus == Focus::List => {
+                let k = if key.code == KeyCode::Char('c') {
+                    'c'
+                } else {
+                    'V'
+                };
+                sh.notify(format!(
+                    "{k}: put the cursor on a diff line (Ctrl-l: content pane; C comments the file)"
+                ));
+            }
+            KeyCode::Char('C') if self.focus == Focus::List => match self.node_file(sh) {
+                Some(f) => return Action::Comment(CommentTarget::File(f)),
+                None => sh.notify("C: select a hunk or a group of one file (this one has several)"),
+            },
             KeyCode::Char('c') if self.focus == Focus::Content => return self.comment(sh),
             KeyCode::Char('C') if self.focus == Focus::Content => match self.cursor_file(sh) {
                 Some(f) => return Action::Comment(CommentTarget::File(f)),
@@ -954,7 +992,7 @@ impl StackView {
             KeyCode::Char('N') | KeyCode::Char('{') => self.next_content_hunk(false),
             KeyCode::Char('h') | KeyCode::Left => self.hscroll = self.hscroll.saturating_sub(8),
             KeyCode::Char('l') | KeyCode::Right => self.hscroll += 8,
-            KeyCode::Enter => return self.jump_target(),
+            KeyCode::Enter => return self.diff_target(),
             KeyCode::Esc => self.focus = Focus::List,
             _ => {}
         }
@@ -1258,5 +1296,36 @@ pub(crate) mod tests {
         v.on_key(&mut sh, key('F'), true);
         assert_eq!(v.on_key(&mut sh, key('y'), true), Action::FoldRenames);
         assert_eq!(v.on_key(&mut sh, key('F'), false), Action::FoldRenames);
+    }
+
+    #[test]
+    fn gd_in_the_content_shows_the_line_in_the_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sh, mut v) = setup(dir.path());
+        v.focus = Focus::Content;
+        v.pos.cursor = v
+            .rows
+            .iter()
+            .position(|r| *r == StackRow::Diff(Row::Line { hunk: 1, line: 1 }))
+            .unwrap();
+        v.on_key(&mut sh, key('g'), true);
+        assert_eq!(
+            v.on_key(&mut sh, key('d'), true),
+            Action::ShowLine { hunk: 1, line: 1 }
+        );
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            v.on_key(&mut sh, enter, true),
+            Action::ShowLine { hunk: 1, line: 1 }
+        );
+        // On the hunk header: its hunk.
+        v.next_content_hunk(false);
+        v.on_key(&mut sh, key('g'), true);
+        assert_eq!(v.on_key(&mut sh, key('d'), true), Action::ShowHunk(1));
+        // Ctrl-letters are not the letters: Ctrl-e, Ctrl-o do nothing here.
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let folded = v.folded.clone();
+        assert_eq!(v.on_key(&mut sh, ctrl('o'), true), Action::None);
+        assert_eq!(v.folded, folded);
     }
 }
