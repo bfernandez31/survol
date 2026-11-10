@@ -80,6 +80,7 @@ fn params(max: usize) -> Params {
         instructions: None,
         language: "English".into(),
         cwd: ".".into(),
+        renames: Renames::default(),
     }
 }
 
@@ -420,7 +421,10 @@ fn cache_is_reused_on_reopen() {
     assert_eq!(llm.calls(), 0);
     assert!(second.from_cache);
     assert_eq!(second.groups, first.groups);
-    assert_eq!(messages, ["groups loaded from cache"]);
+    assert_eq!(
+        messages,
+        ["looking for renames", "groups loaded from cache"]
+    );
 
     // `--no-cache` recomputes; a different model misses the cache.
     let llm = Fake::scripted(&[answer]);
@@ -548,4 +552,105 @@ fn offline_texts_follow_the_language() {
         titles,
         ["Changes at the repository root", "Changes in src/"]
     );
+}
+
+/// A class renamed and moved: its declaration, its users' imports and
+/// calls go to their own group; the user whose behaviour also changes and
+/// the call switched to a method that already existed stay with the LLM.
+#[test]
+fn hunks_following_a_rename_get_their_own_group() {
+    use crate::config::Config;
+    use crate::git::testutil::*;
+    use crate::review::{self, Target};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let g = repo(tmp.path());
+    let filler = "//\n".repeat(8);
+    let user = |import: &str, body: &str| format!("{import}\n{filler}{body}\n");
+    commit(
+        &g,
+        &[
+            (
+                "src/old/Billing.java",
+                "package old;\nclass Billing {\n  void pay() {}\n  void refund() {}\n}\n",
+            ),
+            (
+                "src/A.java",
+                &user("import old.Billing;", "new Billing().pay();"),
+            ),
+            (
+                "src/B.java",
+                &user("import old.Billing;", "new Billing().pay(1);"),
+            ),
+            ("src/C.java", &user("import other.Thing;", "billing.pay();")),
+        ],
+        "base",
+    );
+    std::fs::remove_file(tmp.path().join("src/old/Billing.java")).unwrap();
+    commit(
+        &g,
+        &[
+            (
+                "src/pay/Invoicing.java",
+                "package pay;\nclass Invoicing {\n  void pay() {}\n  void refund() {}\n}\n",
+            ),
+            (
+                "src/A.java",
+                &user("import pay.Invoicing;", "new Invoicing().pay();"),
+            ),
+            (
+                "src/B.java",
+                &user("import pay.Invoicing;", "new Invoicing().pay(2);"),
+            ),
+            (
+                "src/C.java",
+                &user("import other.Thing;", "billing.refund();"),
+            ),
+        ],
+        "head",
+    );
+    let r = review::open(
+        &g,
+        &Config::default(),
+        &Target::parse(Some("HEAD~1..HEAD")).unwrap(),
+        |_| {},
+    )
+    .unwrap();
+    let mut cfg = Config::default();
+    cfg.llm.enabled = false;
+    let llm = Fake::scripted(&[]);
+
+    let folded = review::group(&r, &cfg, &llm, |_| {}, true).unwrap();
+    assert_invariants(&folded, &r.diff);
+    let follows = folded.groups.iter().find(|g| g.mechanical).unwrap();
+    assert_eq!(follows.title, "Renames, moves and imports");
+    assert!(
+        follows.summary.contains("Billing → Invoicing ×2"),
+        "{}",
+        follows.summary
+    );
+    let files = |hunks: &[usize]| -> Vec<&str> {
+        hunks
+            .iter()
+            .map(|&h| r.diff.files[r.diff.hunks[h].file].path.as_str())
+            .collect()
+    };
+    let layer = |name: &str| {
+        let l = follows.layers.iter().find(|l| l.name == name).unwrap();
+        files(&l.hunk_ids)
+    };
+    assert_eq!(layer("imports"), ["src/A.java", "src/B.java"]);
+    assert_eq!(layer("renames"), ["src/A.java", "src/pay/Invoicing.java"]);
+    let rest: Vec<usize> = folded
+        .groups
+        .iter()
+        .filter(|g| !g.mechanical)
+        .flat_map(|g| g.hunk_ids.clone())
+        .collect();
+    assert_eq!(files(&rest), ["src/B.java", "src/C.java"]);
+
+    cfg.review.fold_renames = false;
+    let unfolded = review::group(&r, &cfg, &llm, |_| {}, true).unwrap();
+    assert_invariants(&unfolded, &r.diff);
+    assert!(unfolded.groups.iter().all(|g| !g.mechanical));
 }

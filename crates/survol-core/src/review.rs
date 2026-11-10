@@ -1,6 +1,9 @@
 //! Opening a review: resolve the target, fetch, diff, and locate the worktree.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::forge::{
@@ -12,7 +15,8 @@ use crate::graph::{self, Graph};
 use crate::group::{self, Grouping};
 use crate::index::{self, Index};
 use crate::llm::LlmProvider;
-use crate::model::{Diff, FileStatus, MergeRequest};
+use crate::model::{Diff, FileStatus, MergeRequest, Side};
+use crate::renames::{self, Renames};
 use crate::{Error, Result, ask, comments, diff, lsp, mechanical};
 
 /// What to review.
@@ -171,12 +175,23 @@ pub fn group(
         instructions: read_instructions(review.repo.dir())?,
         language: cfg.llm.language(),
         cwd,
+        renames: if cfg.review.fold_renames {
+            progress("looking for renames");
+            renames(review, cfg)?
+        } else {
+            Renames::default()
+        },
     };
     if !cfg.llm.enabled {
         progress("LLM disabled: grouping by directory");
         return Ok(group::build_offline(&review.diff, &params));
     }
-    let path = group::cache_path(&review.repo.survol_dir()?, &review.head_sha);
+    let survol = review.repo.survol_dir()?;
+    let path = if cfg.review.fold_renames {
+        group::cache_path(&survol, &review.head_sha)
+    } else {
+        group::unfolded_cache_path(&survol, &review.head_sha)
+    };
     if use_cache && let Some(g) = group::load_cache(&path, &group::cache_key(&review.diff, &params))
     {
         progress("groups loaded from cache");
@@ -187,6 +202,67 @@ pub fn group(
         group::save_cache(&path, &g)?;
     }
     Ok(g)
+}
+
+/// Version of [`renames::detect`]: part of the cache key of [`renames`].
+const RENAMES_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct CachedRenames {
+    key: String,
+    renames: Renames,
+}
+
+/// The hunks of the review that only follow a rename or a move. Looks the
+/// candidate names up in the trees of the base and the head (`git grep`),
+/// so it is cached under `.git/survol/cache/<head_sha>/renames.json`.
+pub fn renames(review: &Review, cfg: &Config) -> Result<Renames> {
+    let path = review
+        .repo
+        .survol_dir()?
+        .join("cache")
+        .join(&review.head_sha)
+        .join("renames.json");
+    let key = format!(
+        "{RENAMES_VERSION}\0{}\0{:?}",
+        review.base_sha, cfg.review.mechanical_globs
+    );
+    if let Some(c) = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<CachedRenames>(&b).ok())
+        .filter(|c| c.key == key)
+    {
+        return Ok(c.renames);
+    }
+    let renames = renames::detect(&review.diff, |side, names| {
+        let rev = match side {
+            Side::Old => &review.base_sha,
+            Side::New => &review.head_sha,
+        };
+        let mut found = HashSet::new();
+        let patterns: Vec<&str> = names.iter().map(String::as_str).collect();
+        review.repo.grep_lines(rev, &patterns, |line| {
+            for word in renames::words(line) {
+                if let Ok(w) = std::str::from_utf8(word)
+                    && names.contains(w)
+                    && !found.contains(w)
+                {
+                    found.insert(w.to_string());
+                }
+            }
+            found.len() < names.len()
+        })?;
+        Ok::<_, Error>(found)
+    })?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let cached = CachedRenames { key, renames };
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&cached).map_err(std::io::Error::other)?,
+    )?;
+    Ok(cached.renames)
 }
 
 /// Builds the code graph of the review: tree-sitter index of the head (and

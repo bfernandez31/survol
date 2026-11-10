@@ -65,6 +65,10 @@ enum Cmd {
         /// `français`, `en`...). Overrides `[llm] language`.
         #[arg(long, value_name = "LANG")]
         lang: Option<String>,
+        /// Group the hunks that only follow a rename or a move like the
+        /// others (same as `[review] fold_renames = false`).
+        #[arg(long)]
+        no_fold_renames: bool,
     },
     /// Code graph (tree-sitter): changed symbols with their callers, callees
     /// and tests, as JSON.
@@ -237,8 +241,10 @@ fn run() -> Result<ExitCode> {
             no_cache,
             no_llm,
             lang,
+            no_fold_renames,
         } => {
             let mut cfg = cfg;
+            cfg.review.fold_renames &= !no_fold_renames;
             cfg.llm.enabled &= !no_llm;
             cfg.llm.override_language(lang.as_deref());
             let repo = repo.context("not inside a git repository")?;

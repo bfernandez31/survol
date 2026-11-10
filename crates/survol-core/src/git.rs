@@ -147,6 +147,59 @@ impl Git {
         ])
     }
 
+    /// Calls `on_line` with every text line of the tree of `rev` containing
+    /// one of `patterns` (fixed strings), until it returns `false`.
+    pub fn grep_lines(
+        &self,
+        rev: &str,
+        patterns: &[&str],
+        mut on_line: impl FnMut(&[u8]) -> bool,
+    ) -> Result<()> {
+        use std::io::{BufRead, Write};
+        use std::process::Stdio;
+
+        let args = ["grep", "--no-color", "-I", "-h", "-F", "-f", "-", rev];
+        let mut child = self
+            .command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("piped");
+        let mut stdout = std::io::BufReader::new(child.stdout.take().expect("piped"));
+        let input = patterns.join("\n");
+        let stopped = std::thread::scope(|s| {
+            // git reads every pattern before it prints anything, but do not
+            // depend on it.
+            s.spawn(move || {
+                let _ = stdin.write_all(input.as_bytes());
+            });
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match stdout.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break false,
+                    Ok(_) if !on_line(&line) => break true,
+                    Ok(_) => {}
+                }
+            }
+        });
+        if stopped {
+            let _ = child.kill();
+        }
+        // 1: no line matched.
+        let status = child.wait()?;
+        if stopped || matches!(status.code(), Some(0 | 1)) {
+            Ok(())
+        } else {
+            Err(GitError::Failed {
+                args: args.join(" "),
+                stderr: format!("exit status {status}"),
+            })
+        }
+    }
+
     /// Creates, or moves, a detached worktree at `path` on `sha`.
     pub fn ensure_worktree(&self, path: &Path, sha: &str) -> Result<()> {
         let p = path.to_string_lossy();

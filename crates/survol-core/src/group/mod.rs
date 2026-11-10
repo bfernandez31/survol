@@ -1,7 +1,8 @@
 //! Stack view engine: hunks grouped by functional capability, then by
 //! technical layer.
 //!
-//! Mechanical changes are set aside without LLM. The other hunks are
+//! Mechanical changes are set aside without LLM, and so are the hunks that
+//! only follow a rename or a move ([`crate::renames`]). The other hunks are
 //! compressed into a prompt (chunked by module when too big, then merged),
 //! and the answer is validated in code: every hunk lands in exactly one group.
 //! Invalid answers get one retry, then fall back to grouping by directory.
@@ -23,7 +24,8 @@ pub use order::{layer_rank, order_groups, order_groups_with_graph};
 
 use crate::llm::{LlmProvider, LlmRequest};
 use crate::mechanical::{self, Kind};
-use crate::model::Diff;
+use crate::model::{Diff, Hunk};
+use crate::renames::{self, Renames};
 use crate::review_state::ReviewState;
 use fallback::Locale;
 
@@ -57,7 +59,8 @@ pub struct Group {
     /// Files without hunks (pure renames, binaries), only in the mechanical group.
     #[serde(default)]
     pub file_ids: Vec<usize>,
-    /// The "mechanical / noise" group, detected without LLM.
+    /// A group detected without LLM: the "mechanical / noise" one, or the
+    /// hunks that only follow a rename or a move.
     pub mechanical: bool,
 }
 
@@ -158,6 +161,22 @@ pub struct Params {
     pub language: String,
     /// Where the LLM runs from.
     pub cwd: PathBuf,
+    /// Hunks that only follow a rename or a move: they get their own group.
+    /// Empty: they are grouped like any other hunk.
+    pub renames: Renames,
+}
+
+/// Why a hunk is set aside without LLM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Aside {
+    Mechanical(Kind),
+    Follows(renames::Kind),
+}
+
+fn aside(diff: &Diff, hunk: &Hunk, renames: &Renames) -> Option<Aside> {
+    mechanical::hunk_kind(diff, hunk)
+        .map(Aside::Mechanical)
+        .or_else(|| renames.hunks.get(&hunk.id).copied().map(Aside::Follows))
 }
 
 /// Groups of one chunk and how they were obtained.
@@ -201,10 +220,12 @@ fn build_with(
     progress: &mut dyn FnMut(&str),
 ) -> Grouping {
     let mut mech: BTreeMap<Kind, Vec<usize>> = BTreeMap::new();
+    let mut follows: BTreeMap<renames::Kind, Vec<usize>> = BTreeMap::new();
     let mut rest = Vec::new();
     for h in &diff.hunks {
-        match mechanical::hunk_kind(diff, h) {
-            Some(k) => mech.entry(k).or_default().push(h.id),
+        match aside(diff, h, &params.renames) {
+            Some(Aside::Mechanical(k)) => mech.entry(k).or_default().push(h.id),
+            Some(Aside::Follows(k)) => follows.entry(k).or_default().push(h.id),
             None => rest.push(h.id),
         }
     }
@@ -246,13 +267,17 @@ fn build_with(
             }
         })
         .collect();
-    if !mech.is_empty() || !files.is_empty() {
-        groups.push(mechanical_group(
+    let locale = Locale::of(&params.language);
+    if !follows.is_empty() {
+        groups.push(renames_group(
             groups.len(),
-            mech,
-            files,
-            Locale::of(&params.language),
+            follows,
+            &params.renames,
+            locale,
         ));
+    }
+    if !mech.is_empty() || !files.is_empty() {
+        groups.push(mechanical_group(groups.len(), mech, files, locale));
     }
     order_groups(&mut groups);
 
@@ -333,6 +358,86 @@ fn mechanical_group(
         order: 0,
         hunk_ids,
         file_ids: files,
+        mechanical: true,
+    }
+}
+
+/// Renames named in the summary of [`renames_group`].
+const NAMED_RENAMES: usize = 8;
+
+/// The hunks that only follow a rename or a move, by kind.
+fn renames_group(
+    id: usize,
+    follows: BTreeMap<renames::Kind, Vec<usize>>,
+    renames: &Renames,
+    locale: Locale,
+) -> Group {
+    let fr = locale == Locale::Fr;
+    let count = |k| follows.get(&k).map_or(0, Vec::len);
+    let mut parts = Vec::new();
+    let imports = count(renames::Kind::Imports);
+    if imports > 0 {
+        parts.push(if fr {
+            format!("{imports} hunk(s) ne touchant que des lignes d'import ou de package")
+        } else {
+            format!("{imports} hunk(s) changing only import or package lines")
+        });
+    }
+    let renamed = count(renames::Kind::Renamed);
+    if renamed > 0 {
+        let mut names: Vec<String> = renames
+            .renames
+            .iter()
+            .take(NAMED_RENAMES)
+            .map(|r| format!("{} → {} ×{}", r.old, r.new, r.hunks))
+            .collect();
+        let more = renames.renames.len().saturating_sub(NAMED_RENAMES);
+        if more > 0 {
+            names.push(if fr {
+                format!("{more} autre(s)")
+            } else {
+                format!("{more} more")
+            });
+        }
+        let names = names.join(", ");
+        parts.push(if fr {
+            format!("{renamed} hunk(s) identique(s) une fois les noms renommés remplacés ({names})")
+        } else {
+            format!("{renamed} hunk(s) identical once the renamed names are replaced ({names})")
+        });
+    }
+    let layers: Vec<Layer> = follows
+        .into_iter()
+        .map(|(k, hunk_ids)| Layer {
+            name: k.layer().to_string(),
+            hunk_ids,
+        })
+        .collect();
+    let mut hunk_ids: Vec<usize> = layers.iter().flat_map(|l| l.hunk_ids.clone()).collect();
+    hunk_ids.sort_unstable();
+    Group {
+        id,
+        title: if fr {
+            "Renommages, déplacements et imports"
+        } else {
+            "Renames, moves and imports"
+        }
+        .into(),
+        summary: format!(
+            "{}. {}",
+            capitalize(&parts.join(", ")),
+            if fr {
+                "Détecté sans LLM : un nom est renommé quand l'ancien a disparu de tout le dépôt \
+                 et que le nouveau n'existait pas avant."
+            } else {
+                "Detected without LLM: a name is renamed when the old one is gone from the whole \
+                 repository and the new one did not exist before."
+            }
+        ),
+        layers,
+        order: 0,
+        hunk_ids,
+        file_ids: Vec::new(),
         mechanical: true,
     }
 }
@@ -599,7 +704,7 @@ pub fn cache_key(diff: &Diff, params: &Params) -> String {
     );
     h.update(params.instructions.as_deref().unwrap_or("").as_bytes());
     for hunk in &diff.hunks {
-        let kind = mechanical::hunk_kind(diff, hunk);
+        let kind = aside(diff, hunk, &params.renames);
         h.update(format!("\0{}{kind:?}", hunk.content_hash).as_bytes());
     }
     for f in mechanical::hunkless_files(diff) {
@@ -611,6 +716,12 @@ pub fn cache_key(diff: &Diff, params: &Params) -> String {
 /// `.git/survol/cache/<head_sha>/groups.json`
 pub fn cache_path(survol_dir: &Path, head_sha: &str) -> PathBuf {
     survol_dir.join("cache").join(head_sha).join("groups.json")
+}
+
+/// Cache of the grouping made with `[review] fold_renames = false`, next to
+/// [`cache_path`]: switching back and forth costs one LLM call each, once.
+pub fn unfolded_cache_path(survol_dir: &Path, head_sha: &str) -> PathBuf {
+    cache_path(survol_dir, head_sha).with_file_name("groups-unfolded.json")
 }
 
 /// The cached grouping, if there is one for `key`.
