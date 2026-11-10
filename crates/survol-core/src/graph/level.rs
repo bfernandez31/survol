@@ -5,10 +5,15 @@
 //! other modules around the files of a module; the other files of the module
 //! and the other modules around the symbols of a file. Only the outside nodes
 //! linked to an inside one are kept.
+//!
+//! What uses a supertype also uses its implementations, through it: the
+//! callers of an interface method are linked to the methods implementing it,
+//! the users of an interface to the classes implementing it. These links
+//! "via an interface" are counted apart from the direct ones.
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::{EdgeKind, Graph, SymIdx, SymbolKind};
+use super::{Edge, EdgeKind, Graph, Role, SymIdx, SymbolKind};
 
 /// What a level shows the inside of.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -41,6 +46,8 @@ pub struct LevelNode {
     pub removed: bool,
     /// Files of a module, symbols of a file.
     pub size: usize,
+    /// Test code: a test file, a symbol of one, a module of test files only.
+    pub test: bool,
 }
 
 impl LevelNode {
@@ -54,16 +61,73 @@ pub struct LevelEdge {
     /// Indexes into [`Level::nodes`]: `from` depends on `to`.
     pub from: usize,
     pub to: usize,
-    /// Symbol-level edges folded into this one.
+    /// Direct symbol-level edges folded into this one.
     pub count: usize,
     pub kinds: BTreeMap<EdgeKind, usize>,
+    /// Links through an interface folded into this one, by kind of the
+    /// link to the interface.
+    pub via: BTreeMap<EdgeKind, usize>,
+}
+
+impl LevelEdge {
+    /// Links through an interface.
+    pub fn via_count(&self) -> usize {
+        self.via.values().sum()
+    }
+
+    /// Direct links and links through an interface.
+    pub fn total(&self) -> usize {
+        self.count + self.via_count()
+    }
+}
+
+/// A symbol-level link: `from` depends on `to`, directly or through an
+/// interface (`via`: what `from` depends on directly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Link {
+    from: SymIdx,
+    to: SymIdx,
+    kind: EdgeKind,
+    via: Option<SymIdx>,
+}
+
+/// The dependencies of the graph, then the links through an interface: what
+/// depends on an interface (or on a method of one) also depends on the
+/// classes implementing it (the methods implementing it), one step down. A
+/// superclass is not an interface: what uses it does not use its subclasses.
+fn links(g: &Graph) -> impl Iterator<Item = Link> + '_ {
+    let deps = g.edges().iter().filter(|e| e.kind.is_dependency());
+    let direct = deps.clone().map(|e| Link {
+        from: e.from,
+        to: e.to,
+        kind: e.kind,
+        via: None,
+    });
+    let subtyping = |k: EdgeKind| matches!(k, EdgeKind::Overrides | EdgeKind::Inherits);
+    let interface = move |s: SymIdx| g.symbol(s).kind == SymbolKind::Interface;
+    let implements = move |e: &Edge| match e.kind {
+        EdgeKind::Inherits => interface(e.to),
+        EdgeKind::Overrides => g.symbol(e.to).container.is_some_and(interface),
+        _ => false,
+    };
+    let via = deps.filter(move |o| implements(o)).flat_map(move |o| {
+        g.edges_to(o.to)
+            .filter(move |e| e.kind.is_dependency() && !subtyping(e.kind) && e.from != o.from)
+            .map(move |e| Link {
+                from: e.from,
+                to: o.from,
+                kind: e.kind,
+                via: Some(o.to),
+            })
+    });
+    direct.chain(via)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Level {
-    /// Changed inside nodes first (the most changed, members before types,
-    /// then the most linked), then the other inside nodes, then the outside
-    /// ones, the most linked first.
+    /// Changed inside nodes first (code before tests, the most changed,
+    /// members before types, then the most linked), then the other inside
+    /// nodes, then the outside ones, the most linked first.
     pub nodes: Vec<LevelNode>,
     /// Heaviest first.
     pub edges: Vec<LevelEdge>,
@@ -89,12 +153,13 @@ pub fn level(g: &Graph, scope: &Scope) -> Level {
         })
     };
 
-    // Per module: files, changed files, changed symbols.
-    let mut modules: HashMap<&str, [usize; 3]> = HashMap::new();
+    // Per module: files, changed files, changed symbols, test files.
+    let mut modules: HashMap<&str, [usize; 4]> = HashMap::new();
     for f in g.files() {
         let m = modules.entry(f.module.as_str()).or_default();
         m[0] += 1;
         m[1] += usize::from(f.changed);
+        m[3] += usize::from(f.test);
     }
     for s in g.changed_symbols() {
         if let Some(m) = g.module_of(s).and_then(|m| modules.get_mut(m)) {
@@ -133,7 +198,7 @@ pub fn level(g: &Graph, scope: &Scope) -> Level {
         }
     }
     let mut edges: BTreeMap<(usize, usize), LevelEdge> = BTreeMap::new();
-    for e in g.edges().iter().filter(|e| e.kind.is_dependency()) {
+    for e in links(g) {
         // Inside a file, its imports say nothing the other edges do not.
         if matches!(scope, Scope::File(_)) && g.symbol(e.from).kind == SymbolKind::File {
             continue;
@@ -144,24 +209,37 @@ pub fn level(g: &Graph, scope: &Scope) -> Level {
         if a == b || (a_out && b_out) {
             continue;
         }
+        // The interface and its implementation in one node: the direct link
+        // already says it.
+        if e.via
+            .is_some_and(|i| key_of(i).is_some_and(|(k, _)| k == b))
+        {
+            continue;
+        }
         let (a, b) = (node(a, a_out, &mut nodes), node(b, b_out, &mut nodes));
         let edge = edges.entry((a, b)).or_insert_with(|| LevelEdge {
             from: a,
             to: b,
             count: 0,
             kinds: BTreeMap::new(),
+            via: BTreeMap::new(),
         });
-        edge.count += 1;
-        *edge.kinds.entry(e.kind).or_default() += 1;
+        if e.via.is_some() {
+            *edge.via.entry(e.kind).or_default() += 1;
+        } else {
+            edge.count += 1;
+            *edge.kinds.entry(e.kind).or_default() += 1;
+        }
     }
 
-    // Changed inside nodes first, the most changed first, then the heaviest.
-    // A type is changed when one of its members is: the members first.
+    // Changed inside nodes first, test code after the rest, the most changed
+    // first, then the heaviest. A type is changed when one of its members
+    // is: the members first.
     let changed = |n: &LevelNode| n.changed() && !n.outside;
     let mut weight = vec![0usize; nodes.len()];
     for e in edges.values() {
-        weight[e.from] += e.count;
-        weight[e.to] += e.count;
+        weight[e.from] += e.total();
+        weight[e.to] += e.total();
     }
     let mut order: Vec<usize> = (0..nodes.len()).collect();
     order.sort_by_key(|&i| {
@@ -171,6 +249,7 @@ pub fn level(g: &Graph, scope: &Scope) -> Level {
         (
             !changed(n),
             n.outside,
+            n.test,
             std::cmp::Reverse(changes),
             is_type,
             std::cmp::Reverse(weight[i]),
@@ -192,8 +271,8 @@ pub fn level(g: &Graph, scope: &Scope) -> Level {
         })
         .collect();
     edges.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
+        b.total()
+            .cmp(&a.total())
             .then((a.from, a.to).cmp(&(b.from, b.to)))
     });
     Level { nodes, edges }
@@ -201,15 +280,16 @@ pub fn level(g: &Graph, scope: &Scope) -> Level {
 
 fn describe(
     g: &Graph,
-    modules: &HashMap<&str, [usize; 3]>,
+    modules: &HashMap<&str, [usize; 4]>,
     of: NodeRef,
     outside: bool,
 ) -> LevelNode {
-    let (label, changes, removed, size) = match &of {
+    let (label, changes, removed, size, test) = match &of {
         NodeRef::Module(m) => {
-            let [files, changed_files, symbols] =
+            let [files, changed_files, symbols, tests] =
                 modules.get(m.as_str()).copied().unwrap_or_default();
-            (m.clone(), symbols.max(changed_files), false, files)
+            let test = files > 0 && tests == files;
+            (m.clone(), symbols.max(changed_files), false, files, test)
         }
         NodeRef::File(path) => {
             let symbols = g.symbols_in_file(path);
@@ -223,15 +303,18 @@ fn describe(
                 changed.max(usize::from(g.is_file_changed(path))),
                 false,
                 symbols.len().saturating_sub(1),
+                g.file(path).is_some_and(|f| f.test),
             )
         }
         NodeRef::Symbol(s) => {
             let sym = g.symbol(*s);
+            let test = sym.has_role(Role::Test) || g.file(&sym.file).is_some_and(|f| f.test);
             (
                 g.display_name(*s),
                 usize::from(sym.changed || sym.removed),
                 sym.removed,
                 0,
+                test,
             )
         }
     };
@@ -242,6 +325,7 @@ fn describe(
         changes,
         removed,
         size,
+        test,
     }
 }
 
@@ -283,7 +367,7 @@ fn contains(g: &Graph, of: &NodeRef, s: SymIdx) -> bool {
 /// such node is linked.
 pub fn follow(g: &Graph, from: &NodeRef, to: &NodeRef) -> Option<NodeRef> {
     let mut counts: BTreeMap<NodeRef, usize> = BTreeMap::new();
-    for e in g.edges().iter().filter(|e| e.kind.is_dependency()) {
+    for e in links(g) {
         let there = if contains(g, from, e.from) && contains(g, to, e.to) {
             e.to
         } else if contains(g, from, e.to) && contains(g, to, e.from) {

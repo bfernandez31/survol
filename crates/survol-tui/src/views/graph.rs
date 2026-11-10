@@ -1119,6 +1119,18 @@ impl GraphView {
         }
     }
 
+    /// `x` / `X` in the map: the middle box and its columns.
+    fn export_map(&mut self, sh: &mut Shared, open: bool) {
+        let Some(d) = self.map.diagram() else {
+            return;
+        };
+        let head = survol_core::review::short(&sh.review.head_sha);
+        let text = format!("# {}\n\n```mermaid\n{}```\n", d.title, d.mermaid);
+        if export::export(sh, &format!("map-{head}"), &text, &d, open) {
+            self.last_export = Some(d);
+        }
+    }
+
     /// `S` after an export: the diagram into the overall comment.
     fn add_to_summary(&self, sh: &mut Shared) -> Action {
         match &self.last_export {
@@ -1221,6 +1233,9 @@ impl GraphView {
                 if let Some(d) = self.flows.export(sh, c == 'X') {
                     self.last_export = Some(d);
                 }
+            }
+            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Map => {
+                self.export_map(sh, c == 'X')
             }
             KeyCode::Char(c @ ('x' | 'X')) => self.export_mermaid(sh, c == 'X'),
             KeyCode::Char('S') => return self.add_to_summary(sh),
@@ -1831,6 +1846,50 @@ mod tests {
         // Nothing before the root: the view's own back.
         v.on_key(&mut sh, code(KeyCode::Backspace));
         assert_eq!(v.mode, Mode::Changed);
+    }
+
+    #[test]
+    fn map_keeps_its_place_and_history_over_a_reload_and_exports_mermaid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        let (mut sh, mut v) = setup(tmp.path());
+        v.on_key(&mut sh, key('M'));
+        v.map.ensure(sh.graph.as_ref().unwrap());
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        let center = |v: &GraphView| v.map.center_node().unwrap().label.clone();
+        assert_eq!(center(&v), "OwnerService.java");
+        // To the repository, then select what uses it.
+        v.on_key(&mut sh, key('l'));
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(center(&v), "OwnerRepository.java");
+        v.on_key(&mut sh, key('h'));
+
+        // `x`: the middle box and its columns in Mermaid.
+        v.on_key(&mut sh, key('x'));
+        let md = tmp.path().join(".git/survol/exports/map-head.md");
+        let text = std::fs::read_to_string(&md).unwrap_or_else(|_| panic!("{:?}", sh.message()));
+        assert!(text.contains("OwnerRepository.java"), "{text}");
+        assert!(text.contains("-->|"), "{text}");
+
+        // A new view, as after `Ctrl-r`: the same place, selection, history.
+        let memo = v.map.memo().unwrap();
+        let (_, mut fresh) = setup(tmp.path());
+        fresh.map.restore(memo);
+        fresh.mode = Mode::Map;
+        fresh.on_graph_ready(&sh);
+        assert_eq!(fresh.map.scope(), v.map.scope());
+        assert_eq!(center(&fresh), "OwnerRepository.java");
+        assert_eq!(fresh.map.column, Column::Left);
+        assert_eq!(
+            fresh.map.selected_node().unwrap().label,
+            "OwnerService.java"
+        );
+        fresh.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(center(&fresh), "OwnerService.java");
     }
 
     #[test]

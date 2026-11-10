@@ -187,21 +187,34 @@ used by (1)                                                                     
 
 - One level at a time: the modules, then the files of a module, then the symbols of a file;
   the title is the path from the root and the box in the middle. A level opens on its most
-  changed box; `n` / `N` put the next / previous changed box in the middle.
+  changed box, test code aside (test files and directories, `*Test*`, `*.spec.ts`...: a
+  changed test only comes after the changed code); `n` / `N` put the next / previous
+  changed box in the middle, in that order.
 - `h` / `l` go from column to column, `j` / `k` from box to box in a column (a column taller
   than the screen scrolls, `↑ +N` / `↓ +N` say how many boxes are out of sight). `Enter` on
   a side box puts it in the middle; `Enter` on the middle box goes down a level (a module
   shows its files, a file its symbols, a symbol opens its tree). `Backspace` / `u` /
-  `Ctrl-o` go back to the previous box in the middle, then up a level.
+  `Ctrl-o` go back to the previous box in the middle (the last 100 of a level), then up a
+  level. `Ctrl-r` reopens the review on the same box, history included, when it is still
+  there. `x` / `X` export the middle box and its columns as a Mermaid diagram (`S` adds it
+  to the overall comment).
 - What lies outside the level shows in the columns too, as dashed boxes: around the files
   of a module, the other modules; around the symbols of a file, the other files of its
   module and the other modules. `Enter` on one follows the link there, at the same depth:
   from a file, to the file of the other module it is the most linked with.
+- What uses an interface uses the classes implementing it: the callers of an interface
+  method are shown among the users of the methods implementing it, the users of an
+  interface among those of its implementations, even without a language server. These
+  links "via an interface" are told apart: a dashed arrow labelled `via` (`via call 2`)
+  when there is no direct link, `+via` after the direct ones (`inj 7 +via`); the right
+  pane counts them apart. A superclass is not an interface: what uses it is not linked to
+  its subclasses.
 - A box the review changes has its name in the text colour and, on its bottom border, the
   number of changed symbols inside (`M` / `D` for a modified / removed symbol); the others
-  are greyed. Columns list the changed boxes first, then the most linked. Each arrow says
-  its main kind of link and how many links it folds (`calls+ 44`: mostly calls, other
-  kinds too; only `×32` when the lane is too narrow);
+  are greyed. Columns list the boxes of the level first, then those outside it; in each
+  group the changed boxes first, then the most linked. Each arrow says its main kind of
+  link and how many links it folds (`calls+ 44`: mostly calls, other kinds too), shortened
+  when the lane is narrow (`call 44`, `inj 6`, `ext`);
   the right pane details the selected box and its links with the middle one by kind.
 
 **Flows** (`f`): the entry points (HTTP endpoints, front-end routes, listeners, scheduled
@@ -597,7 +610,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | Key | Action |
 |---|---|
 | `m` | mode: changed symbols / search / module map / map / flows / symbol |
-| `M` | map: one box between what uses it and what it uses; `h` / `l` column, `j` / `k` box, `Enter` to the middle / down a level, `Backspace` / `u` back, `n` / `N` changed boxes |
+| `M` | map: one box between what uses it and what it uses; `h` / `l` column, `j` / `k` box, `Enter` to the middle / down a level, `Backspace` / `u` back, `n` / `N` changed boxes, `x` / `X` Mermaid |
 | `Enter` | symbol: focus it (new root); section / module: fold |
 | `l` / `h` | expand / collapse (callers of callers…), parent |
 | `Backspace` / `Ctrl-o` | back to the previous symbol or list |

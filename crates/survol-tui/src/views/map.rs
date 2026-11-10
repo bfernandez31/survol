@@ -7,11 +7,18 @@
 //! files, a file its symbols, a symbol opens its tree). A neighbour outside
 //! the level (another module, another file) is followed there.
 
+use std::collections::BTreeMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::graph::level::{self, Level, LevelEdge, LevelNode, NodeRef, Scope};
-use survol_core::graph::{Graph, SymIdx};
+use survol_core::graph::{EdgeKind, Graph, SymIdx};
 
 use super::Scroll;
+use super::export::Diagram;
+
+/// Middle boxes remembered at one level, and places entered: past it, the
+/// oldest are forgotten.
+const MAX_HISTORY: usize = 100;
 
 /// What a key asks the Graph view to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,10 +70,21 @@ impl Place {
     }
 }
 
+/// Where the map is, carried over a reload (`Ctrl-r`): the places entered
+/// with their history, and the selected box.
+#[derive(Debug, Clone)]
+pub struct Memo {
+    places: Vec<Place>,
+    selected: Option<(Column, NodeRef)>,
+}
+
 #[derive(Default)]
 pub struct MapState {
     /// The places entered, the shown one last; empty until first shown.
     places: Vec<Place>,
+    /// Restored from a [`Memo`]: the level is still to be built, with this
+    /// box selected.
+    pending: Option<Option<(Column, NodeRef)>>,
     pub level: Level,
     /// The short name of each node, and the path it lives in (see [`Name`]).
     pub names: Vec<Name>,
@@ -90,12 +108,29 @@ impl MapState {
         self.places.last().map_or(&Scope::Root, |p| &p.scope)
     }
 
-    /// Builds the map when it is first shown.
+    /// Builds the map when it is first shown, or restored.
     pub fn ensure(&mut self, g: &Graph) {
         if self.places.is_empty() {
-            self.places.push(Place::new(Scope::Root, None));
+            self.push(Place::new(Scope::Root, None));
             self.show(g);
+        } else if self.pending.is_some() {
+            self.refresh(g);
         }
+    }
+
+    /// Where the map is, `None` before it is first shown.
+    pub fn memo(&self) -> Option<Memo> {
+        let selected = self.selected_node().map(|n| (self.column, n.of.clone()));
+        (!self.places.is_empty()).then(|| Memo {
+            places: self.places.clone(),
+            selected,
+        })
+    }
+
+    /// Back where `memo` was, once the graph is there.
+    pub fn restore(&mut self, memo: Memo) {
+        self.places = memo.places;
+        self.pending = Some(memo.selected);
     }
 
     /// The graph changed: the same place, rebuilt, the same box selected
@@ -104,16 +139,20 @@ impl MapState {
         if self.places.is_empty() {
             return;
         }
-        let (column, selected) = (self.column, self.selected_node().map(|n| n.of.clone()));
+        let selected = match self.pending.take() {
+            Some(selected) => selected,
+            None => self.selected_node().map(|n| (self.column, n.of.clone())),
+        };
         self.show(g);
+        let Some((column, of)) = selected else {
+            return;
+        };
         let side = match column {
             Column::Left => &self.left,
             Column::Right => &self.right,
             Column::Center => return,
         };
-        let at = side
-            .iter()
-            .position(|n| Some(&self.level.nodes[n.node].of) == selected.as_ref());
+        let at = side.iter().position(|n| self.level.nodes[n.node].of == of);
         if let Some(i) = at {
             self.column = column;
             self.pos_mut(column).cursor = i;
@@ -134,6 +173,8 @@ impl MapState {
             // The first box: the most changed one.
             (!self.level.nodes.is_empty()).then_some(0)
         });
+        // The graph may have changed: forget the boxes no longer there.
+        place.history.retain(|h| at(h).is_some());
         place.center = center.map(|i| self.level.nodes[i].of.clone());
         self.set_center(center);
     }
@@ -160,8 +201,69 @@ impl MapState {
             && let Some(old) = place.center.replace(of)
         {
             place.history.push(old);
+            if place.history.len() > MAX_HISTORY {
+                place.history.remove(0);
+            }
         }
         self.set_center(Some(node));
+    }
+
+    /// Enters `place`, forgetting the oldest places past the maximum.
+    fn push(&mut self, place: Place) {
+        self.places.push(place);
+        if self.places.len() > MAX_HISTORY {
+            self.places.remove(0);
+        }
+    }
+
+    /// The middle box and its columns as a Mermaid flowchart (`x` / `X`).
+    pub fn diagram(&self) -> Option<Diagram> {
+        let center = self.center?;
+        let label = |i: usize| {
+            let badge = &self.badges[i];
+            let name = self.names[i].name.replace('"', "#quot;");
+            match badge.as_str() {
+                "" => name,
+                b => format!("{name} · {b}"),
+            }
+        };
+        let mut out = String::from("flowchart LR\n");
+        out.push_str(&format!("  c[\"{}\"]\n", label(center)));
+        let mut outside: Vec<String> = Vec::new();
+        let mut changed: Vec<String> = vec!["c".into()];
+        for (prefix, side) in [("l", &self.left), ("r", &self.right)] {
+            for (k, n) in side.iter().enumerate() {
+                let id = format!("{prefix}{k}");
+                let node = &self.level.nodes[n.node];
+                out.push_str(&format!("  {id}[\"{}\"]\n", label(n.node)));
+                if node.outside {
+                    outside.push(id.clone());
+                } else if node.changed() {
+                    changed.push(id.clone());
+                }
+                let e = self.edge(*n);
+                let arrow = if e.count == 0 { "-.->" } else { "-->" };
+                let text = link_labels(e).into_iter().next().unwrap_or_default();
+                let (a, b) = if prefix == "l" {
+                    (id.as_str(), "c")
+                } else {
+                    ("c", id.as_str())
+                };
+                out.push_str(&format!("  {a} {arrow}|\"{text}\"| {b}\n"));
+            }
+        }
+        out.push_str("  classDef changed font-weight:bold\n");
+        out.push_str("  classDef outside stroke-dasharray:4 4,color:#888\n");
+        out.push_str(&format!("  class {} changed\n", changed.join(",")));
+        if !outside.is_empty() {
+            out.push_str(&format!("  class {} outside\n", outside.join(",")));
+        }
+        let mut path = self.breadcrumb();
+        path.push(self.names[center].name.clone());
+        Some(Diagram {
+            title: format!("Map: {}", path.join(" › ")),
+            mermaid: out,
+        })
     }
 
     pub fn center_node(&self) -> Option<&LevelNode> {
@@ -251,7 +353,7 @@ impl MapState {
                 }
             }
         };
-        self.places.push(place);
+        self.push(place);
         self.show(g);
         Outcome::None
     }
@@ -358,8 +460,9 @@ fn changed_nodes(level: &Level) -> impl Iterator<Item = usize> + '_ {
     (0..level.nodes.len()).filter(|&i| level.nodes[i].changed() && !level.nodes[i].outside)
 }
 
-/// The columns around box `center`: what uses it, what it uses. Changed
-/// boxes first, then the most linked, then by name.
+/// The columns around box `center`: what uses it, what it uses. The boxes of
+/// the level first, then those outside it; in each group the changed boxes
+/// first, then the most linked, then by name.
 fn columns(level: &Level, center: usize) -> (Vec<Neighbour>, Vec<Neighbour>) {
     let side = |incoming: bool| {
         let mut out: Vec<Neighbour> = level
@@ -377,10 +480,10 @@ fn columns(level: &Level, center: usize) -> (Vec<Neighbour>, Vec<Neighbour>) {
             .collect();
         out.sort_by_key(|n| {
             let node = &level.nodes[n.node];
-            let changed = node.changed() && !node.outside;
             (
-                !changed,
-                std::cmp::Reverse(level.edges[n.edge].count),
+                node.outside,
+                !node.changed(),
+                std::cmp::Reverse(level.edges[n.edge].total()),
                 node.label.clone(),
             )
         });
@@ -403,6 +506,67 @@ fn next_changed(level: &Level, center: Option<usize>, forward: bool) -> Option<u
         (None, false) => n - 1,
     };
     Some(changed[i])
+}
+
+/// The full name of a kind of link, and a short one.
+fn kind_names(k: EdgeKind) -> (&'static str, &'static str) {
+    match k {
+        EdgeKind::Calls => ("calls", "call"),
+        EdgeKind::Imports => ("imports", "imp"),
+        EdgeKind::Inherits => ("extends", "ext"),
+        EdgeKind::Overrides => ("overrides", "ovr"),
+        EdgeKind::Uses => ("uses", "use"),
+        EdgeKind::Tests => ("tests", "test"),
+        EdgeKind::Injects => ("injects", "inj"),
+        EdgeKind::HttpCalls => ("http", "http"),
+        EdgeKind::Configures => ("config", "cfg"),
+        EdgeKind::Routes => ("routes", "route"),
+        EdgeKind::Publishes => ("events", "evt"),
+    }
+}
+
+/// The labels of a link, the longest first: its main kind (`+` when there
+/// are others) and how many links it folds; `via` for links through an
+/// interface. Each keeps at least a short name of the kind.
+pub fn link_labels(e: &LevelEdge) -> Vec<String> {
+    // Labels of one set of links, the longest first.
+    let of = |kinds: &BTreeMap<EdgeKind, usize>| -> Vec<String> {
+        let Some((k, _)) = kinds.iter().max_by_key(|(_, n)| **n) else {
+            return Vec::new();
+        };
+        let (full, short) = kind_names(*k);
+        let count: usize = kinds.values().sum();
+        let more = if kinds.len() > 1 { "+" } else { "" };
+        let n = if count > 1 {
+            format!(" {count}")
+        } else {
+            String::new()
+        };
+        let mut out = vec![
+            format!("{full}{more}{n}"),
+            format!("{short}{more}{n}"),
+            format!("{short}{n}"),
+            short.to_string(),
+        ];
+        out.dedup();
+        out
+    };
+    let direct = of(&e.kinds);
+    let via = of(&e.via);
+    if direct.is_empty() {
+        return via
+            .iter()
+            .map(|l| format!("via {l}"))
+            .chain(["via".into()])
+            .collect();
+    }
+    if via.is_empty() {
+        return direct;
+    }
+    // `+via` dropped before the number of links.
+    let with_count = direct.iter().filter(|l| l.contains(' '));
+    let both = with_count.map(|l| format!("{l} +via"));
+    both.chain(direct.iter().cloned()).collect()
 }
 
 /// How a node is named on the map.
@@ -472,10 +636,6 @@ fn badge(node: &LevelNode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use survol_core::graph::EdgeKind;
-
     use super::*;
 
     fn module(name: &str) -> LevelNode {
@@ -486,6 +646,7 @@ mod tests {
             changes: 0,
             removed: false,
             size: 1,
+            test: false,
         }
     }
 
@@ -495,6 +656,7 @@ mod tests {
             to,
             count,
             kinds: BTreeMap::from([(EdgeKind::Calls, count)]),
+            via: BTreeMap::new(),
         }
     }
 
@@ -513,7 +675,7 @@ mod tests {
             edge(2, 0, 1),
             edge(3, 0, 5),
             edge(0, 4, 2),
-            edge(0, 5, 1),
+            edge(0, 5, 7),
             // Between neighbours: not in the columns.
             edge(1, 3, 9),
         ];
@@ -532,7 +694,7 @@ mod tests {
         let (left, right) = columns(&level, 0);
         // b is changed; a and c have as many links, by name.
         assert_eq!(labels(&level, &left), ["b", "a", "c"]);
-        // e is changed but outside the level: it does not count as changed.
+        // e is changed, with fewer links, but outside the level: after d.
         assert_eq!(labels(&level, &right), ["d", "e"]);
         assert_eq!(level.edges[right[0].edge].count, 2);
 
@@ -585,6 +747,78 @@ mod tests {
         assert_eq!(name(&map), "center");
         let place = map.places.last().unwrap();
         assert_eq!(place.history.len(), 2);
+    }
+
+    #[test]
+    fn link_labels_keep_a_short_kind_and_tell_links_through_an_interface() {
+        let mut e = edge(0, 1, 1);
+        assert_eq!(link_labels(&e), ["calls", "call"]);
+        e.kinds.insert(EdgeKind::Injects, 43);
+        e.count = 44;
+        assert_eq!(link_labels(&e), ["injects+ 44", "inj+ 44", "inj 44", "inj"]);
+        // Only through an interface.
+        let mut via = edge(0, 1, 0);
+        via.kinds.clear();
+        via.via.insert(EdgeKind::Calls, 3);
+        assert_eq!(
+            link_labels(&via),
+            ["via calls 3", "via call 3", "via call", "via"]
+        );
+        // Both: `+via` dropped before the number of links.
+        e.via.insert(EdgeKind::Calls, 2);
+        assert_eq!(
+            link_labels(&e),
+            [
+                "injects+ 44 +via",
+                "inj+ 44 +via",
+                "inj 44 +via",
+                "injects+ 44",
+                "inj+ 44",
+                "inj 44",
+                "inj"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_history_of_a_level_is_bounded() {
+        let mut map = MapState {
+            level: star(),
+            ..MapState::default()
+        };
+        map.places.push(Place::new(Scope::Root, None));
+        map.set_center(Some(0));
+        map.places[0].center = Some(map.level.nodes[0].of.clone());
+        for k in 0..MAX_HISTORY + 20 {
+            map.recenter(1 + k % 2);
+        }
+        let history = &map.places[0].history;
+        assert_eq!(history.len(), MAX_HISTORY);
+        // The newest kept: the box before the middle one.
+        assert_eq!(*history.last().unwrap(), map.level.nodes[1].of);
+    }
+
+    #[test]
+    fn the_diagram_draws_the_middle_box_and_its_columns() {
+        let level = star();
+        let mut map = MapState {
+            names: names(&level.nodes),
+            badges: level.nodes.iter().map(badge).collect(),
+            level,
+            ..MapState::default()
+        };
+        map.set_center(Some(0));
+        let d = map.diagram().unwrap();
+        assert_eq!(d.title, "Map: map › center");
+        let m = &d.mermaid;
+        assert!(m.starts_with("flowchart LR\n  c[\"center · 2\"]\n"), "{m}");
+        // Users point to the middle box, the middle box to what it uses.
+        assert!(
+            m.contains("  l0[\"b · 1\"]\n  l0 -->|\"calls\"| c\n"),
+            "{m}"
+        );
+        assert!(m.contains("  c -->|\"calls 2\"| r0\n"), "{m}");
+        assert!(m.contains("class r1 outside"), "{m}");
     }
 
     #[test]

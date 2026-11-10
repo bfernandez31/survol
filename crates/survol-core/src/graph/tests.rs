@@ -423,3 +423,143 @@ fn test_paths() {
         assert!(!is_test_path(p), "{p}");
     }
 }
+
+#[test]
+fn level_links_the_users_of_an_interface_to_its_implementations() {
+    use super::level::{NodeRef, Scope, level};
+
+    let g = graph(&[
+        (
+            "src/main/java/app/Repo.java",
+            "package app;\npublic interface Repo {\n    String find(int id);\n}\n",
+        ),
+        (
+            "src/main/java/app/JdbcRepo.java",
+            "package app;\npublic class JdbcRepo implements Repo {\n    \
+             @Override\n    public String find(int id) { return \"\"; }\n}\n",
+        ),
+        (
+            "src/main/java/app/Service.java",
+            "package app;\npublic class Service {\n    private final Repo repo;\n    \
+             Service(Repo repo) { this.repo = repo; }\n    \
+             String run() { return repo.find(1); }\n}\n",
+        ),
+        (
+            "src/test/java/app/ServiceTest.java",
+            "package app;\nclass ServiceTest {\n    Service service;\n    \
+             void runs() { service.run(); }\n}\n",
+        ),
+    ]);
+    let files = level(&g, &Scope::Module("app".into()));
+    let at = |name: &str| {
+        files
+            .nodes
+            .iter()
+            .position(|n| n.label == name)
+            .unwrap_or_else(|| panic!("{name}: {:?}", files.nodes))
+    };
+    let edge = |from: &str, to: &str| {
+        files
+            .edges
+            .iter()
+            .find(|e| (e.from, e.to) == (at(from), at(to)))
+            .cloned()
+    };
+    // Direct: the service uses the interface.
+    let direct = edge("Service.java", "Repo.java").unwrap();
+    assert!(direct.count > 0 && direct.via.is_empty(), "{direct:?}");
+    // Through it: the service uses the implementation, and only that way.
+    let via = edge("Service.java", "JdbcRepo.java").unwrap();
+    assert_eq!(via.count, 0, "{via:?}");
+    assert!(via.via.contains_key(&EdgeKind::Calls), "{via:?}");
+    // The implementation is not a user of itself through the interface.
+    assert!(edge("JdbcRepo.java", "JdbcRepo.java").is_none());
+
+    // Test files are told apart.
+    assert!(files.nodes[at("ServiceTest.java")].test);
+    assert!(!files.nodes[at("Service.java")].test);
+
+    // Around the implementing method: the caller of the interface method.
+    let path = "src/main/java/app/JdbcRepo.java";
+    let symbols = level(&g, &Scope::File(path.into()));
+    let find = symbols
+        .nodes
+        .iter()
+        .position(|n| n.of == NodeRef::Symbol(sym(&g, "JdbcRepo.find")))
+        .unwrap();
+    let callers: Vec<&str> = symbols
+        .edges
+        .iter()
+        .filter(|e| e.to == find && e.via_count() > 0)
+        .map(|e| symbols.nodes[e.from].label.as_str())
+        .collect();
+    assert_eq!(callers, ["Service.java"]);
+}
+
+#[test]
+fn level_starts_on_changed_code_before_changed_tests() {
+    use super::level::{Scope, level};
+
+    let service = "package app;\npublic class Service {\n    \
+                   String run() { return \"a\"; }\n}\n";
+    let test = "package app;\nclass ServiceTest {\n    Service service;\n    \
+                void runs() { service.run(); }\n}\n";
+    let s = "src/main/java/app/Service.java";
+    let t = "src/test/java/app/ServiceTest.java";
+    let raw = format!(
+        "diff --git a/{s} b/{s}\n--- a/{s}\n+++ b/{s}\n@@ -3,1 +3,1 @@\n\
+         -    String run() {{ return \"\"; }}\n+    String run() {{ return \"a\"; }}\n\
+         diff --git a/{t} b/{t}\n--- a/{t}\n+++ b/{t}\n@@ -3,2 +3,2 @@\n\
+         -    Service s;\n-    void run() {{ s.run(); }}\n\
+         +    Service service;\n+    void runs() {{ service.run(); }}\n"
+    );
+    let diff = crate::diff::parse(raw.as_bytes()).unwrap();
+    let g = build(
+        &index(&[(s, service), (t, test)], &[]),
+        &diff,
+        &default_rules(),
+    );
+    let files = level(&g, &Scope::Module("app".into()));
+    let changed: Vec<(&str, usize, bool)> = files
+        .nodes
+        .iter()
+        .filter(|n| n.changed())
+        .map(|n| (n.label.as_str(), n.changes, n.test))
+        .collect();
+    // The test changes more, the code comes first.
+    assert_eq!(
+        changed,
+        [("Service.java", 1, false), ("ServiceTest.java", 2, true)]
+    );
+}
+
+#[test]
+fn level_does_not_link_the_users_of_a_superclass_to_its_subclasses() {
+    use super::level::{Scope, level};
+
+    let g = graph(&[
+        (
+            "src/main/java/app/Pet.java",
+            "package app;\npublic class Pet {\n    public String name() { return \"\"; }\n}\n",
+        ),
+        (
+            "src/main/java/app/Cat.java",
+            "package app;\npublic class Cat extends Pet {\n    \
+             @Override\n    public String name() { return \"cat\"; }\n}\n",
+        ),
+        (
+            "src/main/java/app/Shop.java",
+            "package app;\npublic class Shop {\n    String sell(Pet pet) { return pet.name(); }\n}\n",
+        ),
+    ]);
+    let files = level(&g, &Scope::Module("app".into()));
+    let at = |name: &str| files.nodes.iter().position(|n| n.label == name).unwrap();
+    assert!(
+        files
+            .edges
+            .iter()
+            .all(|e| (e.from, e.to) != (at("Shop.java"), at("Cat.java"))),
+        "{:?}",
+        files.edges
+    );
+}

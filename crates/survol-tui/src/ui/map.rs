@@ -2,7 +2,7 @@
 //! it uses on the right, arrows only from the left column to the middle and
 //! from the middle to the right column; the selected box on the right pane.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -10,7 +10,7 @@ use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use survol_core::graph::level::{LevelEdge, LevelNode, NodeRef, Scope};
+use survol_core::graph::level::{LevelNode, NodeRef, Scope};
 use survol_core::graph::{EdgeKind, Graph};
 use unicode_width::UnicodeWidthChar;
 
@@ -20,7 +20,7 @@ use crate::app::App;
 use crate::theme::theme;
 use crate::views::Scroll;
 use crate::views::graph::{kind_label, kind_name};
-use crate::views::map::{Column, MapState, Neighbour};
+use crate::views::map::{Column, MapState, Neighbour, link_labels};
 
 /// Width of the details pane, when there is room for it.
 const DETAILS: u16 = 42;
@@ -209,34 +209,22 @@ fn glyph(m: u8) -> char {
     }
 }
 
-/// The label of a link: its kind (`+` when there are others), and how many.
-fn link_label(e: &LevelEdge) -> String {
-    let main = e.kinds.iter().max_by_key(|(_, n)| **n).map(|(k, _)| *k);
-    let mut out = main.map_or(String::new(), short_kind);
-    if e.kinds.len() > 1 {
-        out.push('+');
-    }
-    if e.count > 1 {
-        out.push_str(&format!(" {}", e.count));
-    }
-    out
-}
-
-fn short_kind(k: EdgeKind) -> String {
-    match k {
-        EdgeKind::Calls => "calls",
-        EdgeKind::Imports => "imports",
-        EdgeKind::Inherits => "extends",
-        EdgeKind::Overrides => "overrides",
-        EdgeKind::Uses => "uses",
-        EdgeKind::Tests => "tests",
-        EdgeKind::Injects => "injects",
-        EdgeKind::HttpCalls => "http",
-        EdgeKind::Configures => "config",
-        EdgeKind::Routes => "routes",
-        EdgeKind::Publishes => "events",
-    }
-    .to_string()
+/// The top row of the middle box: centred (`base`), unless its arrow row
+/// (the row below the top) meets a box of a column holding others above or
+/// below it, where the lines would cross; then a row or two off, within
+/// `lo..=hi`. `columns`: the arrow rows of the boxes of each column.
+fn centre_top(base: u16, lo: u16, hi: u16, columns: &[Vec<u16>]) -> u16 {
+    let crossed = |top: u16| {
+        columns
+            .iter()
+            .any(|rows| rows.len() > 1 && rows.contains(&(top + 1)))
+    };
+    [0i32, 1, -1, 2, -2]
+        .iter()
+        .filter_map(|d| u16::try_from(base as i32 + d).ok())
+        .filter(|&top| (lo..=hi).contains(&top))
+        .find(|&top| !crossed(top))
+        .unwrap_or(base)
 }
 
 fn draw(buf: &mut Buffer, area: Rect, g: &Graph, map: &mut MapState) {
@@ -247,7 +235,7 @@ fn draw(buf: &mut Buffer, area: Rect, g: &Graph, map: &mut MapState) {
     let mut cv = Canvas { buf, area };
     // Columns, and the lanes the arrows take between them.
     // The middle box a little wider than the others.
-    let gap = if area.width >= 110 { 18 } else { 12 };
+    let gap = if area.width >= 110 { 18 } else { 14 };
     let side = (area.width - 2 * gap) * 3 / 10;
     let width = area.width - 2 * gap - 2 * side;
     let (lx, cx) = (area.x, area.x + side + gap);
@@ -286,12 +274,20 @@ fn draw(buf: &mut Buffer, area: Rect, g: &Graph, map: &mut MapState) {
     }
     lines.push((describe(g, node), Style::new().fg(t.meta)));
     let ch = lines.len() as u16 + 2;
-    let cy = top + height.saturating_sub(ch) / 2;
-    let row = cy + 1;
-
-    // The lines: every one, then the selected one over them, bold.
     let (left, la, lb) = window(&mut map.left_pos, left_n, height);
     let (right, ra, rb) = window(&mut map.right_pos, right_n, height);
+    let arrow_rows =
+        |shown: &[(usize, u16)]| -> Vec<u16> { shown.iter().map(|&(_, y)| top + y + 1).collect() };
+    let cy = centre_top(
+        top + height.saturating_sub(ch) / 2,
+        top,
+        (top + height).saturating_sub(ch),
+        &[arrow_rows(&left), arrow_rows(&right)],
+    );
+    let row = cy + 1;
+
+    // The lines: every one, then the selected one over them, bold. The
+    // links only through an interface dashed.
     let mut wires: Vec<(Wire, Neighbour, bool)> = Vec::new();
     for &(i, y) in &left {
         let (from, turn) = (top + y + 1, cx - 3);
@@ -306,15 +302,20 @@ fn draw(buf: &mut Buffer, area: Rect, g: &Graph, map: &mut MapState) {
         let (to, turn) = (top + y + 1, cx + width + 2);
         let w = Wire {
             cells: wire(cx + width, row, turn, rx - 1, to),
-            label: (turn + 2, to, rx - 2),
+            label: (turn + 1, to, rx - 2),
             head: (rx - 1, to),
         };
         wires.push((w, map.right[i], false));
     }
     let mut masks: BTreeMap<(u16, u16), u8> = BTreeMap::new();
-    for (w, _, _) in &wires {
+    let mut solid: BTreeSet<(u16, u16)> = BTreeSet::new();
+    for (w, n, _) in &wires {
+        let direct = map.edge(*n).count > 0;
         for &(x, y, m) in &w.cells {
             *masks.entry((x, y)).or_default() |= m;
+            if direct {
+                solid.insert((x, y));
+            }
         }
     }
     let selected = map.selected_neighbour();
@@ -330,18 +331,22 @@ fn draw(buf: &mut Buffer, area: Rect, g: &Graph, map: &mut MapState) {
             Style::new().fg(colour(*incoming))
         };
         for &(x, y, _) in &w.cells {
-            cv.put(x, y, glyph(masks[&(x, y)]), style);
+            let c = match glyph(masks[&(x, y)]) {
+                '─' if !solid.contains(&(x, y)) => '┄',
+                '│' if !solid.contains(&(x, y)) => '┆',
+                c => c,
+            };
+            cv.put(x, y, c, style);
         }
         cv.put(w.head.0, w.head.1, '▶', style);
-        // The kind and the number of links, else only the number.
-        let e = &map.level.edges[n.edge];
+        // The longest label that fits.
         let (x, y, end) = w.label;
         let room = end.saturating_sub(x) as usize;
-        let mut label = format!(" {} ", link_label(e));
-        if label.chars().count() > room {
-            label = format!(" ×{} ", e.count);
-        }
-        if label.chars().count() <= room {
+        let label = link_labels(map.edge(*n))
+            .into_iter()
+            .map(|l| format!(" {l} "))
+            .find(|l| l.chars().count() <= room);
+        if let Some(label) = label {
             let style = if hot { style } else { Style::new().fg(t.meta) };
             cv.write(x, y, end, &label, style);
         }
@@ -486,12 +491,18 @@ fn render_details(f: &mut Frame, area: Rect, g: &Graph, map: &MapState) {
                 format!(
                     " {} ×{}",
                     truncate_right(&title, room.saturating_sub(6)),
-                    e.count
+                    e.total()
                 )
                 .fg(colour)
                 .bold(),
             ));
             kinds(&e.kinds, &mut lines);
+            if !e.via.is_empty() {
+                lines.push(Line::from(
+                    format!(" via an interface ×{}", e.via_count()).fg(colour),
+                ));
+                kinds(&e.via, &mut lines);
+            }
         }
         None => {
             // The links of each side, by kind.
@@ -500,20 +511,28 @@ fn render_details(f: &mut Frame, area: Rect, g: &Graph, map: &MapState) {
                 ("uses", &map.right, t.accent),
             ] {
                 let mut by_kind: BTreeMap<EdgeKind, usize> = BTreeMap::new();
-                let mut count = 0;
+                let mut via: BTreeMap<EdgeKind, usize> = BTreeMap::new();
                 for &n in side {
                     let e = map.edge(n);
-                    count += e.count;
                     for (k, c) in &e.kinds {
                         *by_kind.entry(*k).or_default() += c;
                     }
+                    for (k, c) in &e.via {
+                        *via.entry(*k).or_default() += c;
+                    }
                 }
+                let count: usize = by_kind.values().sum();
                 lines.push(Line::from(
                     format!(" {title}: {} box(es), {count} link(s)", side.len())
                         .fg(colour)
                         .bold(),
                 ));
                 kinds(&by_kind, &mut lines);
+                if !via.is_empty() {
+                    let n: usize = via.values().sum();
+                    lines.push(Line::from(format!("  via an interface ×{n}").fg(colour)));
+                    kinds(&via, &mut lines);
+                }
             }
         }
     }
@@ -587,16 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn a_link_label_names_its_main_kind() {
-        let mut e = LevelEdge {
-            from: 0,
-            to: 1,
-            count: 1,
-            kinds: BTreeMap::from([(EdgeKind::Calls, 1)]),
-        };
-        assert_eq!(link_label(&e), "calls");
-        e.kinds.insert(EdgeKind::Imports, 2);
-        e.count = 3;
-        assert_eq!(link_label(&e), "imports+ 3");
+    fn the_middle_box_moves_off_a_crossing() {
+        // Arrow rows of the left column at 10, 13, 16: centred at top 12
+        // (arrow row 13) the lines would cross; one row down they do not.
+        let left = vec![10, 13, 16];
+        assert_eq!(centre_top(12, 0, 40, &[left.clone(), vec![]]), 13);
+        // A lone box in line with it: a straight line, no move.
+        assert_eq!(centre_top(12, 0, 40, &[vec![13], vec![]]), 12);
+        // Both columns: the first row free in both.
+        assert_eq!(centre_top(12, 0, 40, &[left, vec![14, 17]]), 11);
+        // Within bounds.
+        assert_eq!(centre_top(12, 12, 12, &[vec![10, 13], vec![]]), 12);
     }
 }
