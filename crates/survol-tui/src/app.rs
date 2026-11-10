@@ -29,8 +29,16 @@ use crate::views::comments::{
 };
 use crate::views::diff::{self, DiffView};
 use crate::views::fileview::{FileOutcome, FileView};
-use crate::views::graph::GraphView;
+use crate::views::graph::{GraphView, Mode};
+use crate::views::map::Memo;
 use crate::views::stack::StackView;
+
+/// What `Ctrl-r` carries to the reopened review: the view, and the place of
+/// the map when the Graph view showed it.
+pub struct Resume {
+    pub view: View,
+    pub map: Option<Memo>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -732,6 +740,26 @@ impl App {
     }
 
     // ----- views --------------------------------------------------------
+
+    /// What to reopen the review in (`Ctrl-r`).
+    pub fn resume(&self) -> Resume {
+        let map = (self.graph.mode == Mode::Map)
+            .then(|| self.graph.map.memo())
+            .flatten();
+        Resume {
+            view: self.view,
+            map,
+        }
+    }
+
+    /// Back where [`Self::resume`] was.
+    pub fn restore(&mut self, resume: Resume) {
+        self.switch(resume.view);
+        if let Some(memo) = resume.map {
+            self.graph.map.restore(memo);
+            self.graph.mode = Mode::Map;
+        }
+    }
 
     pub fn switch(&mut self, view: View) {
         self.view = view;

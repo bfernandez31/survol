@@ -78,23 +78,23 @@ fn main() -> Result<()> {
 
     // `Ctrl-r` reopens the review (a new snapshot of the working tree, new
     // commits of the merge request) in the view it was in.
-    let mut view = None;
+    let mut resume = None;
     loop {
-        match session(&repo, &cfg, &target, view)? {
-            Some(v) => view = Some(v),
+        match session(&repo, &cfg, &target, resume)? {
+            Some(r) => resume = Some(r),
             None => return Ok(()),
         }
     }
 }
 
-/// Opens the review and runs the UI. Returns the view to reopen the review
-/// in, or `None` to quit.
+/// Opens the review and runs the UI. Returns where to reopen the review, or
+/// `None` to quit.
 fn session(
     repo: &Git,
     cfg: &Config,
     target: &Target,
-    view: Option<app::View>,
-) -> Result<Option<app::View>> {
+    resume: Option<app::Resume>,
+) -> Result<Option<app::Resume>> {
     let review = review::open(repo, cfg, target, |m| eprintln!("· {m}"))?;
     if review.diff.files.is_empty() {
         println!("{}: no changes", review.title());
@@ -115,8 +115,8 @@ fn session(
     }
 
     let mut app = App::new(review, state, state_path, cfg.clone());
-    if let Some(v) = view {
-        app.switch(v);
+    if let Some(r) = resume {
+        app.restore(r);
     }
     app.start_grouping(true);
     app.start_remote();
@@ -127,7 +127,7 @@ fn session(
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
     ratatui::restore();
     result?;
-    Ok(app.reload.then_some(app.view))
+    Ok(app.reload.then(|| app.resume()))
 }
 
 fn run(

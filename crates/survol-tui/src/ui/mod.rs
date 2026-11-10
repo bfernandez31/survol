@@ -6,6 +6,7 @@ mod diff;
 mod fileview;
 mod flows;
 mod graph;
+mod map;
 pub mod markdown;
 mod rows;
 mod stack;
@@ -332,6 +333,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 Mode::Flows => {
                     " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x/X Mermaid  S to comment  e edit  gd diff  h back  m mode  ? help"
                 }
+                Mode::Map => {
+                    " h/l column  j/k move  Enter to the middle / down a level  ⌫/u back  n/N changed  x/X Mermaid  e edit  gd diff  m mode  ? help"
+                }
                 Mode::Modules => {
                     " j/k move  Enter/l changed symbols  Enter on symbol: graph  t all/impacted  e edit  gd diff  x/X Mermaid  S to comment  / find  m mode  ? help"
                 }
@@ -438,7 +442,31 @@ const HELP: &[(&str, &str)] = &[
     ("# Graph", ""),
     (
         "m",
-        "mode: changed symbols / search / module map / flows / symbol",
+        "mode: changed symbols / search / module map / map / flows / symbol",
+    ),
+    (
+        "M",
+        "map: one box, what uses it on the left, what it uses on the right",
+    ),
+    (
+        "map: h / l, j / k",
+        "column on the left / right, next / previous box of the column",
+    ),
+    (
+        "map: Enter",
+        "side box: to the middle; middle box: down a level (module → files → symbols)",
+    ),
+    (
+        "map: Backspace / u / Ctrl-o",
+        "previous middle box, else back up a level",
+    ),
+    (
+        "map: n / N",
+        "next / previous changed box of the level to the middle",
+    ),
+    (
+        "map: x / X",
+        "the middle box and its columns as Mermaid / in the browser",
     ),
     (
         "f",

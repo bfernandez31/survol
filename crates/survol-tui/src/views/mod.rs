@@ -8,6 +8,7 @@ pub mod export;
 pub mod fileview;
 pub mod flows;
 pub mod graph;
+pub mod map;
 pub mod stack;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

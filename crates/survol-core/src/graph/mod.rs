@@ -12,6 +12,7 @@
 //! [`Role`]s and tags. See [`rules`].
 
 mod build;
+pub mod level;
 mod modules;
 mod resolve;
 pub mod rules;

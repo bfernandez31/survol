@@ -1,4 +1,4 @@
-//! Graph view: the code graph around the changes. Three modes:
+//! Graph view: the code graph around the changes. Its modes:
 //!
 //! - **changed symbols**: what the diff changes, by module and file, with the
 //!   number of callers (and how many live in files the diff does not touch);
@@ -6,6 +6,9 @@
 //!   then any other edge kind), each node expandable to walk the graph
 //!   further in the same direction, with a back stack;
 //! - **module map**: packages / directories with their dependencies;
+//! - **map**: one box of the graph in the middle, what uses it on the left,
+//!   what it uses on the right, one level at a time (modules, the files of a
+//!   module, the symbols of a file; see [`super::map`]);
 //! - **flows**: the entry points whose end-to-end flow reaches a change, and
 //!   that flow as a tree, before / after (see [`super::flows`]).
 //!
@@ -16,11 +19,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use survol_core::graph::level::NodeRef;
 use survol_core::graph::{EdgeKind, Graph, Link, ModuleMap, Role, SymIdx, SymbolKind};
 use survol_core::model::{Diff, LineKind};
 
 use super::export::{self, Diagram};
 use super::flows::{EntryRow, FlowsState};
+use super::map::{MapState, Outcome};
 use super::{Focus, Scroll};
 use crate::app::{Action, Shared};
 use crate::highlight::Spans;
@@ -32,6 +37,8 @@ pub enum Mode {
     /// Results of a `/` search.
     Found,
     Modules,
+    /// One box in the middle, what uses it and what it uses around it.
+    Map,
     /// End-to-end flows from the impacted entry points.
     Flows,
     Symbol,
@@ -43,6 +50,7 @@ impl Mode {
             Mode::Changed => "changed symbols",
             Mode::Found => "search",
             Mode::Modules => "module map",
+            Mode::Map => "map",
             Mode::Flows => "flows",
             Mode::Symbol => "symbol",
         }
@@ -455,6 +463,8 @@ pub struct GraphView {
     /// Modules left out of the map (not impacted, `all_modules` off).
     pub hidden_modules: usize,
 
+    pub map: MapState,
+
     pub flows: FlowsState,
 
     pub symbol: Option<SymbolState>,
@@ -492,6 +502,7 @@ impl GraphView {
         self.modules = Some(map);
         self.open_modules.clear();
         self.rebuild_modules(g);
+        self.map.refresh(g);
         if let Some(st) = &self.symbol {
             self.tree = flatten(g, st);
         }
@@ -611,6 +622,7 @@ impl GraphView {
             Mode::Changed,
             Mode::Found,
             Mode::Modules,
+            Mode::Map,
             Mode::Flows,
             Mode::Symbol,
         ];
@@ -635,6 +647,7 @@ impl GraphView {
             Mode::Changed => &mut self.list_pos,
             Mode::Found => &mut self.found_pos,
             Mode::Modules => &mut self.mod_pos,
+            Mode::Map => &mut self.map.pos,
             Mode::Flows => &mut self.flows.pos,
             Mode::Symbol => match &mut self.symbol {
                 Some(st) => &mut st.pos,
@@ -648,6 +661,7 @@ impl GraphView {
             Mode::Changed => self.list_pos,
             Mode::Found => self.found_pos,
             Mode::Modules => self.mod_pos,
+            Mode::Map => self.map.pos,
             Mode::Flows => self.flows.pos,
             Mode::Symbol => self.symbol.as_ref().map_or(self.list_pos, |st| st.pos),
         }
@@ -658,6 +672,7 @@ impl GraphView {
             Mode::Changed => self.list.len(),
             Mode::Found => self.found.len(),
             Mode::Modules => self.mod_rows.len(),
+            Mode::Map => 0,
             Mode::Flows => self.flows.rows.len(),
             Mode::Symbol => self.tree.len(),
         }
@@ -695,6 +710,7 @@ impl GraphView {
             Mode::Changed => matches!(self.list[i], ListRow::Module(_)),
             Mode::Found => matches!(self.found[i], ListRow::Module(_)),
             Mode::Modules => matches!(self.mod_rows[i], ModRow::Module(_)),
+            Mode::Map => false,
             Mode::Flows => matches!(self.flows.rows[i], EntryRow::Kind(_)),
             Mode::Symbol => matches!(self.tree[i], TreeRow::Section { .. }),
         };
@@ -853,6 +869,11 @@ impl GraphView {
                 ModRow::Symbol { sym, .. } => Some(Target::of_symbol(g, *sym)),
                 ModRow::Module(_) => None,
             },
+            Mode::Map => match &self.map.selected_node()?.of {
+                NodeRef::Symbol(s) => Some(Target::of_symbol(g, *s)),
+                NodeRef::File(path) => g.by_id(path).map(|s| Target::of_symbol(g, s)),
+                NodeRef::Module(_) => None,
+            },
             Mode::Flows => {
                 let step = self.flows.target_step(self.focus == Focus::Content)?;
                 let s = FlowsState::head_symbol(g, step)?;
@@ -908,6 +929,8 @@ impl GraphView {
                 }
                 None => None,
             },
+            // Handled by the map itself.
+            Mode::Map => None,
             Mode::Symbol => match self.tree.get(c) {
                 Some(TreeRow::Node { link, .. }) => Some(link.symbol),
                 Some(TreeRow::Section { .. }) => {
@@ -1096,6 +1119,18 @@ impl GraphView {
         }
     }
 
+    /// `x` / `X` in the map: the middle box and its columns.
+    fn export_map(&mut self, sh: &mut Shared, open: bool) {
+        let Some(d) = self.map.diagram() else {
+            return;
+        };
+        let head = survol_core::review::short(&sh.review.head_sha);
+        let text = format!("# {}\n\n```mermaid\n{}```\n", d.title, d.mermaid);
+        if export::export(sh, &format!("map-{head}"), &text, &d, open) {
+            self.last_export = Some(d);
+        }
+    }
+
     /// `S` after an export: the diagram into the overall comment.
     fn add_to_summary(&self, sh: &mut Shared) -> Action {
         match &self.last_export {
@@ -1153,6 +1188,16 @@ impl GraphView {
         let Some(g) = &sh.graph else {
             return Action::None;
         };
+        if self.mode == Mode::Map {
+            match self.map.on_key(g, key) {
+                Outcome::Symbol(s) => {
+                    self.show_symbol(sh, s);
+                    return Action::None;
+                }
+                Outcome::None => return Action::None,
+                Outcome::Ignored => {}
+            }
+        }
         match key.code {
             KeyCode::Char('g') | KeyCode::Char('z') if !ctrl => {
                 if let KeyCode::Char(c) = key.code {
@@ -1173,6 +1218,7 @@ impl GraphView {
                 }
             }
             KeyCode::Char('m') => self.cycle_mode(),
+            KeyCode::Char('M') => self.mode = Mode::Map,
             KeyCode::Char('f') if !ctrl => {
                 if self.mode != Mode::Flows {
                     self.mode = Mode::Flows;
@@ -1192,12 +1238,15 @@ impl GraphView {
                     self.last_export = Some(d);
                 }
             }
+            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Map => {
+                self.export_map(sh, c == 'X')
+            }
             KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Modules => {
                 self.export_mermaid(sh, c == 'X')
             }
-            KeyCode::Char('x' | 'X') => {
-                sh.notify("nothing to export here: x exports the module map (m) or a flow (f)")
-            }
+            KeyCode::Char('x' | 'X') => sh.notify(
+                "nothing to export here: x exports the module map (m), the map (M) or a flow (f)",
+            ),
             KeyCode::Char('S') => return self.add_to_summary(sh),
             KeyCode::Char('o') => self.toggle_fold(g),
             KeyCode::Char('0') => self.hscroll = 0,
@@ -1406,6 +1455,7 @@ mod tests {
     use super::*;
     use crate::views::Row;
     use crate::views::diff::DiffView;
+    use crate::views::map::Column;
 
     const SERVICE: &str = "package app.owner;\n\
         public class OwnerService {\n\
@@ -1637,6 +1687,8 @@ mod tests {
         v.on_key(&mut sh, key('m'));
         assert_eq!(v.mode, Mode::Modules);
         v.on_key(&mut sh, key('m'));
+        assert_eq!(v.mode, Mode::Map);
+        v.on_key(&mut sh, key('m'));
         assert_eq!(v.mode, Mode::Flows);
         v.on_key(&mut sh, key('m'));
         assert_eq!(v.mode, Mode::Symbol);
@@ -1725,6 +1777,134 @@ mod tests {
         };
         assert_eq!(path, PATH);
         assert_eq!(Some(line), sh.review.diff.hunks[0].lines[1].new_line);
+    }
+
+    #[test]
+    fn map_centres_a_box_between_its_users_and_what_it_uses() {
+        use survol_core::graph::level::Scope;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut sh, mut v) = setup(tmp.path());
+        v.on_key(&mut sh, key('M'));
+        assert_eq!(v.mode, Mode::Map);
+        v.map.ensure(sh.graph.as_ref().unwrap());
+        assert_eq!(*v.map.scope(), Scope::Root);
+        let center = |v: &GraphView| v.map.center_node().unwrap().label.clone();
+        let side = |v: &GraphView, left: bool| -> Vec<(String, bool)> {
+            let column = if left { &v.map.left } else { &v.map.right };
+            let nodes = &v.map.level.nodes;
+            column
+                .iter()
+                .map(|n| (nodes[n.node].label.clone(), nodes[n.node].outside))
+                .collect()
+        };
+        // The changed module in the middle, the web module using it.
+        let module = center(&v);
+        assert!(module.ends_with("owner"), "{module}");
+        assert!(side(&v, true).iter().any(|(l, _)| l.ends_with("web")));
+
+        // Down to its files: the changed one in the middle, the module
+        // using it outside the level, the repository it uses.
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(*v.map.scope(), Scope::Module(module.clone()));
+        assert_eq!(center(&v), "OwnerService.java");
+        assert!(
+            side(&v, true)
+                .iter()
+                .any(|(l, out)| *out && l.ends_with("web"))
+        );
+        assert!(side(&v, false).contains(&("OwnerRepository.java".into(), false)));
+
+        // A neighbour to the middle, and back.
+        v.on_key(&mut sh, key('l'));
+        assert_eq!(v.map.column, Column::Right);
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(center(&v), "OwnerRepository.java");
+        assert_eq!(side(&v, true), [("OwnerService.java".into(), false)]);
+        v.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(center(&v), "OwnerService.java");
+
+        // Down to its symbols: the changed method; the controller calling it
+        // is followed to its own file.
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(*v.map.scope(), Scope::File(PATH.into()));
+        assert_eq!(center(&v), "OwnerService.find");
+        v.on_key(&mut sh, key('h'));
+        let users = side(&v, true);
+        let at = users.iter().position(|(l, _)| l.ends_with("web")).unwrap();
+        for _ in 0..at {
+            v.on_key(&mut sh, key('j'));
+        }
+        let web = v.map.selected_node().unwrap().clone();
+        assert!(web.outside && web.label.ends_with("web"), "{web:?}");
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        let controller = "src/main/java/app/web/OwnerController.java";
+        assert_eq!(*v.map.scope(), Scope::File(controller.into()));
+        assert_eq!(center(&v), "OwnerController.show");
+        v.on_key(
+            &mut sh,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(center(&v), "OwnerService.find");
+
+        // A symbol opens its tree; back returns to the map, then goes up.
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(v.mode, Mode::Symbol);
+        v.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(v.mode, Mode::Map);
+        v.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(*v.map.scope(), Scope::Module(module.clone()));
+        assert_eq!(center(&v), "OwnerService.java");
+        v.on_key(&mut sh, key('u'));
+        assert_eq!(*v.map.scope(), Scope::Root);
+        assert_eq!(center(&v), module);
+        // Nothing before the root: the view's own back.
+        v.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(v.mode, Mode::Changed);
+    }
+
+    #[test]
+    fn map_keeps_its_place_and_history_over_a_reload_and_exports_mermaid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        let (mut sh, mut v) = setup(tmp.path());
+        v.on_key(&mut sh, key('M'));
+        v.map.ensure(sh.graph.as_ref().unwrap());
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        let center = |v: &GraphView| v.map.center_node().unwrap().label.clone();
+        assert_eq!(center(&v), "OwnerService.java");
+        // To the repository, then select what uses it.
+        v.on_key(&mut sh, key('l'));
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(center(&v), "OwnerRepository.java");
+        v.on_key(&mut sh, key('h'));
+
+        // `x`: the middle box and its columns in Mermaid.
+        v.on_key(&mut sh, key('x'));
+        let md = tmp.path().join(".git/survol/exports/map-head.md");
+        let text = std::fs::read_to_string(&md).unwrap_or_else(|_| panic!("{:?}", sh.message()));
+        assert!(text.contains("OwnerRepository.java"), "{text}");
+        assert!(text.contains("-->|"), "{text}");
+
+        // A new view, as after `Ctrl-r`: the same place, selection, history.
+        let memo = v.map.memo().unwrap();
+        let (_, mut fresh) = setup(tmp.path());
+        fresh.map.restore(memo);
+        fresh.mode = Mode::Map;
+        fresh.on_graph_ready(&sh);
+        assert_eq!(fresh.map.scope(), v.map.scope());
+        assert_eq!(center(&fresh), "OwnerRepository.java");
+        assert_eq!(fresh.map.column, Column::Left);
+        assert_eq!(
+            fresh.map.selected_node().unwrap().label,
+            "OwnerService.java"
+        );
+        fresh.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(center(&fresh), "OwnerService.java");
     }
 
     #[test]
