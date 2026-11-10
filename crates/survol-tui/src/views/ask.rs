@@ -68,7 +68,7 @@ impl AskInput {
             KeyCode::Char('n') if ctrl => self.pick(true),
             KeyCode::Char('p') if ctrl => self.pick(false),
             KeyCode::Char('u') if ctrl => self.text.clear(),
-            KeyCode::Char(c @ '1'..='9') if self.text.is_empty() => {
+            KeyCode::Char(c @ '1'..='9') if !ctrl && self.text.is_empty() => {
                 let i = c as usize - '1' as usize;
                 if let Some(s) = self.suggestions().get(i) {
                     return InputOutcome::Submit(s.to_string());
@@ -171,6 +171,9 @@ impl AnswerView {
     pub fn on_key(&mut self, key: KeyEvent) -> AnswerOutcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.height / 2).max(1) as isize;
+        if super::stray_ctrl(&key, &['d', 'u']) {
+            return AnswerOutcome::Continue;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return AnswerOutcome::Close,
             KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
@@ -213,6 +216,9 @@ pub enum HistoryOutcome {
 
 impl HistoryView {
     pub fn on_key(&mut self, key: KeyEvent, len: usize) -> HistoryOutcome {
+        if super::stray_ctrl(&key, &[]) {
+            return HistoryOutcome::Continue;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('A') => return HistoryOutcome::Close,
             KeyCode::Char('j') | KeyCode::Down => {
@@ -326,5 +332,16 @@ mod tests {
         h.on_key(key(KeyCode::Char('j')), 3);
         assert_eq!(h.on_key(key(KeyCode::Enter), 3), HistoryOutcome::Open(1));
         assert_eq!(h.on_key(key(KeyCode::Enter), 0), HistoryOutcome::Continue);
+    }
+
+    #[test]
+    fn ctrl_letters_do_not_follow_nor_close() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut v = AnswerView::new(answer(vec![cref(1, true)]));
+        assert_eq!(v.on_key(ctrl('e')), AnswerOutcome::Continue);
+        assert_eq!(v.on_key(ctrl('q')), AnswerOutcome::Continue);
+        assert_eq!(v.on_key(ctrl('a')), AnswerOutcome::Continue);
+        let mut h = HistoryView::default();
+        assert_eq!(h.on_key(ctrl('q'), 2), HistoryOutcome::Continue);
     }
 }

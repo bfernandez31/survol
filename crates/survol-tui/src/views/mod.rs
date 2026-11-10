@@ -11,9 +11,17 @@ pub mod graph;
 pub mod map;
 pub mod stack;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::model::{DiffLine, LineKind};
 
 use self::comments::NoteIndex;
+
+/// A letter typed with Ctrl that the context does not bind (`bound`): it
+/// must not do what the letter alone does (`Ctrl-v` is not `v`).
+pub fn stray_ctrl(key: &KeyEvent, bound: &[char]) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(c) if !bound.contains(&c.to_ascii_lowercase()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {

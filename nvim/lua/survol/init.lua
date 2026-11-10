@@ -21,7 +21,9 @@ local defaults = {
   -- opened from; "hide" is an alias), "tab", "split" or "vsplit".
   open_mode = "edit",
   -- Optional key toggling the float (normal mode, and terminal mode inside
-  -- the float), e.g. "<leader>sv". No default.
+  -- the float), e.g. "<C-g>". No default. A key starting with <leader>,
+  -- <localleader> or a space is only mapped in normal mode: inside the float
+  -- it would hold back every space (marks a hunk reviewed) for 'timeoutlen'.
   toggle_key = nil,
 }
 
@@ -29,6 +31,13 @@ M.config = vim.deepcopy(defaults)
 
 -- The running survol: { buf, job, win, key, prev_win }.
 local state = {}
+
+-- Whether `key` can be mapped in the float's terminal mode without holding
+-- back a key survol uses (space, mostly, as leader).
+function M.terminal_safe(key)
+  local k = key:lower()
+  return not (k:find("^<leader>") or k:find("^<localleader>") or k:find("^<space>") or k:find("^ "))
+end
 
 local function job_alive()
   return state.job ~= nil and vim.fn.jobwait({ state.job }, 0)[1] == -1
@@ -175,8 +184,9 @@ function M.open(target)
     return
   end
   state.job = job
-  if M.config.toggle_key then
-    vim.keymap.set("t", M.config.toggle_key, M.hide, { buffer = buf, desc = "Hide survol" })
+  local tk = M.config.toggle_key
+  if tk and M.terminal_safe(tk) then
+    vim.keymap.set("t", tk, M.hide, { buffer = buf, desc = "Hide survol" })
   end
   vim.cmd.startinsert()
 end

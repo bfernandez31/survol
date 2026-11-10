@@ -1162,6 +1162,10 @@ impl GraphView {
             self.on_query_key(sh, key);
             return Action::None;
         }
+        if super::stray_ctrl(&key, &['d', 'u', 'f', 'b', 'h', 'l', 'o']) {
+            self.pending = None;
+            return Action::None;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(p) = self.pending.take() {
             match (p, key.code) {
@@ -1215,14 +1219,14 @@ impl GraphView {
             }
             KeyCode::Char('m') => self.cycle_mode(),
             KeyCode::Char('M') => self.mode = Mode::Map,
-            KeyCode::Char('f') => {
+            KeyCode::Char('f') if !ctrl => {
                 if self.mode != Mode::Flows {
                     self.mode = Mode::Flows;
                     self.focus = Focus::List;
                     self.preview_offset = 0;
                 }
             }
-            KeyCode::Char('b') if self.mode == Mode::Flows => self.flows.cycle_side(sh),
+            KeyCode::Char('b') if !ctrl && self.mode == Mode::Flows => self.flows.cycle_side(sh),
             KeyCode::Char('t') if self.mode == Mode::Modules => self.toggle_all_modules(g),
             KeyCode::Char('/') => {
                 self.query_editing = true;
@@ -1237,7 +1241,12 @@ impl GraphView {
             KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Map => {
                 self.export_map(sh, c == 'X')
             }
-            KeyCode::Char(c @ ('x' | 'X')) => self.export_mermaid(sh, c == 'X'),
+            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Modules => {
+                self.export_mermaid(sh, c == 'X')
+            }
+            KeyCode::Char('x' | 'X') => sh.notify(
+                "nothing to export here: x exports the module map (m), the map (M) or a flow (f)",
+            ),
             KeyCode::Char('S') => return self.add_to_summary(sh),
             KeyCode::Char('o') => self.toggle_fold(g),
             KeyCode::Char('0') => self.hscroll = 0,
@@ -1261,6 +1270,8 @@ impl GraphView {
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
             KeyCode::Char('d') if ctrl => self.move_by(half),
             KeyCode::Char('u') if ctrl => self.move_by(-half),
+            KeyCode::Char('f') if ctrl => self.move_by(half * 2),
+            KeyCode::Char('b') if ctrl => self.move_by(-half * 2),
             KeyCode::PageDown => self.move_by(half * 2),
             KeyCode::PageUp => self.move_by(-half * 2),
             KeyCode::Char('G') | KeyCode::End => self.select(usize::MAX),
@@ -1319,6 +1330,8 @@ impl GraphView {
             KeyCode::Char('k') | KeyCode::Up => self.flows.move_step(-1),
             KeyCode::Char('d') if ctrl => self.flows.move_step(half),
             KeyCode::Char('u') if ctrl => self.flows.move_step(-half),
+            KeyCode::Char('f') if ctrl => self.flows.move_step(half * 2),
+            KeyCode::Char('b') if ctrl => self.flows.move_step(-half * 2),
             KeyCode::PageDown => self.flows.move_step(half * 2),
             KeyCode::PageUp => self.flows.move_step(-half * 2),
             KeyCode::Char('G') | KeyCode::End => self.flows.select_step(usize::MAX),
@@ -1339,6 +1352,8 @@ impl GraphView {
             KeyCode::Char('k') | KeyCode::Up => self.preview_offset -= 1,
             KeyCode::Char('d') if ctrl => self.preview_offset += 10,
             KeyCode::Char('u') if ctrl => self.preview_offset -= 10,
+            KeyCode::Char('f') if ctrl => self.preview_offset += 20,
+            KeyCode::Char('b') if ctrl => self.preview_offset -= 20,
             KeyCode::Char('h') | KeyCode::Left => self.hscroll = self.hscroll.saturating_sub(8),
             KeyCode::Char('l') | KeyCode::Right => self.hscroll += 8,
             KeyCode::Enter => self.open_in_editor(sh),
@@ -2041,5 +2056,69 @@ mod tests {
         // `m` cycles through the flows too.
         v.on_key(&mut sh, key('m'));
         assert_eq!(v.mode, Mode::Symbol);
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_f_pages_and_x_only_exports_what_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sh, mut v) = setup(dir.path());
+        // Ctrl-f / Ctrl-b page; f is the flows.
+        v.on_key(&mut sh, ctrl('f'));
+        assert_eq!(v.mode, Mode::Changed);
+        // x on the changed symbols: no module map behind the user's back.
+        v.on_key(&mut sh, key('x'));
+        assert!(sh.message().unwrap().starts_with("nothing to export here"));
+        assert!(v.last_export.is_none());
+        v.on_key(&mut sh, key('f'));
+        assert_eq!(v.mode, Mode::Flows);
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        v.on_key(&mut sh, ctrl('b'));
+        assert!(!sh.message().unwrap().contains("before / after"));
+        // Ctrl-x / Ctrl-t / Ctrl-m-like letters do nothing.
+        v.on_key(&mut sh, ctrl('x'));
+        assert!(v.last_export.is_none());
+    }
+
+    #[test]
+    fn ctrl_o_leaves_the_graph_for_the_view_a_jump_came_from() {
+        use crate::app::{App, View};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sh, _) = setup(dir.path());
+        let g = sh.graph.take().unwrap();
+        let mut app = App::new(
+            sh.review.clone(),
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            survol_core::config::Config::default(),
+        );
+        app.set_graph(g);
+        // Diff, on the changed line of find: gs.
+        let line = Row::Line { hunk: 0, line: 1 };
+        app.diff.pos.cursor = app.diff.rows.iter().position(|r| *r == line).unwrap();
+        app.on_key(key('g'));
+        app.on_key(key('s'));
+        assert_eq!(app.view, View::Graph);
+        let find = sym(&app.sh, "OwnerService.find");
+        assert_eq!(app.graph.symbol.as_ref().unwrap().root, find);
+        // Into a caller: Backspace goes back inside the Graph first...
+        select_node(&app.sh, &mut app.graph, "OwnerController.show");
+        app.on_key(code(KeyCode::Enter));
+        assert_ne!(app.graph.symbol.as_ref().unwrap().root, find);
+        app.on_key(code(KeyCode::Backspace));
+        assert_eq!(app.graph.symbol.as_ref().unwrap().root, find);
+        assert_eq!(app.view, View::Graph);
+        // ...then Ctrl-o leaves it for the Diff line the jump came from.
+        app.on_key(ctrl('o'));
+        assert_eq!(app.view, View::Diff);
+        assert_eq!(app.diff.rows[app.diff.pos.cursor], line);
+        // Nothing left: in the Graph, its own back stack as before.
+        app.on_key(key('3'));
+        app.on_key(ctrl('o'));
+        assert_eq!(app.view, View::Graph);
+        assert_eq!(app.graph.mode, Mode::Changed);
     }
 }

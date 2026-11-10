@@ -190,3 +190,30 @@ fn keys_walk_changes_threads_and_comment_diff_lines() {
         FileOutcome::Close
     );
 }
+
+#[test]
+fn opens_in_the_layout_of_the_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sh = shared(dir.path());
+    sh.layout = crate::views::Layout::Split;
+    let v = FileView::open(&mut sh, "f.rs", 7).unwrap();
+    assert!(v.split);
+    assert!(v.rows.iter().all(|r| !matches!(r, FileRow::Code(_))));
+}
+
+#[test]
+fn ctrl_letters_do_not_act_as_the_letter() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sh = shared(dir.path());
+    let mut v = FileView::open(&mut sh, "f.rs", 7).unwrap();
+    let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    let rows = v.rows.len();
+    // Ctrl-s is not s (split), Ctrl-e not e (editor), Ctrl-c not c.
+    assert_eq!(v.on_key(&mut sh, ctrl('s')), FileOutcome::Continue);
+    assert!(!v.split);
+    assert_eq!(v.on_key(&mut sh, ctrl('e')), FileOutcome::Continue);
+    assert_eq!(v.on_key(&mut sh, ctrl('c')), FileOutcome::Continue);
+    // Ctrl-d still scrolls.
+    v.on_key(&mut sh, ctrl('d'));
+    assert_eq!(v.rows.len(), rows);
+}

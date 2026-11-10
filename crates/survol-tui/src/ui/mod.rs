@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::app::{App, GraphStatus, GroupStatus, Popup, RemoteStatus, View};
 use crate::theme::theme;
+use crate::views::Focus;
 use crate::views::graph::Mode;
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -64,7 +65,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         None => {}
     }
     if app.help {
-        render_help(f, f.area(), app.view);
+        render_help(f, f.area(), app.view, &mut app.help_scroll);
     }
 }
 
@@ -313,11 +314,17 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(m.to_string().fg(t.warn))
     } else {
         key_help(match app.view {
+            View::Diff if app.diff.focus == Focus::List => {
+                " j/k files  h/l fold  Enter/C-l diff  space ✓  r file ✓  u unreviewed  c/C file comment  P review  a ask  gs graph  gf file  e edit  / filter  m files  ? help"
+            }
             View::Diff => {
                 " j/k move  n/N hunk  J/K file  space ✓  r file ✓  u unreviewed  c comment  V range  C file  P review  a ask  gs graph  gf file  e edit  / filter  m files  ? help"
             }
+            View::Stack if app.stack.focus == Focus::List => {
+                " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  C file comment  C-l content  P review  a ask  gs graph  gf file  R regroup  ? help"
+            }
             View::Stack => {
-                " j/k move  h/l fold  space ✓ + next  u unreviewed  J/K group  Enter/gd diff  c comment  V range  P review  a ask  gs graph  gf file  R regroup  ? help"
+                " j/k move  n/N hunk  space ✓ + next  J/K group  Enter/gd diff  c comment  V range  C file  Esc tree  P review  a ask  gs graph  gf file  ? help"
             }
             View::Graph => match app.graph.mode {
                 Mode::Symbol => {
@@ -353,9 +360,17 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl-h / Ctrl-l", "focus list / content pane"),
     ("B", "show / hide the list pane"),
     ("j / k, Ctrl-d / Ctrl-u", "move, half page down / up"),
+    ("Ctrl-f / Ctrl-b", "page down / up"),
     ("gg / G", "top / bottom"),
-    ("h / l, 0", "scroll content horizontally, reset"),
-    ("s", "unified ↔ split"),
+    (
+        "h / l, 0",
+        "content: scroll horizontally, reset (lists: fold / unfold, parent)",
+    ),
+    (
+        "Ctrl-o",
+        "back where a jump came from (gd, gs, Enter, a link, the Review panel)",
+    ),
+    ("s", "unified ↔ split (also the layout gf opens in)"),
     (
         "gf",
         "whole file: changes in place (n/N, ]c/[c, d, s, c, e)",
@@ -364,30 +379,39 @@ const HELP: &[(&str, &str)] = &[
     ("a", "ask the LLM about the node / group / hunk"),
     ("A", "last answer, then the review's questions"),
     ("P", "Review panel: drafts, summary, discussions, publish"),
-    ("q", "quit (state is saved on each change)"),
+    ("?", "these keys: j / k, Ctrl-d / Ctrl-u, gg / G scroll"),
+    (
+        "q, Ctrl-c",
+        "quit (state is saved on each change; not while publishing)",
+    ),
     (
         "Ctrl-r",
-        "reload: new snapshot of the working tree, new commits",
+        "reload: new snapshot of the working tree, new commits (twice if a question or the grouping is running)",
     ),
     ("# Diff", ""),
-    ("n / N  ({ })", "next / previous hunk"),
-    ("J / K  ([ ])", "next / previous file"),
+    ("n / N  (} {)", "next / previous hunk"),
+    ("J / K  (] [)", "next / previous file"),
     ("u", "next unreviewed hunk"),
     ("space", "toggle hunk reviewed, go to next"),
     ("r / v", "toggle file reviewed (folds it)"),
-    ("o / za, Enter on header", "fold / unfold file"),
+    (
+        "o / za, Enter on header",
+        "fold / unfold file (zo, zc toggle too)",
+    ),
     ("zM / zR", "fold / unfold all (list: every directory)"),
     ("/", "filter files, Esc to clear"),
     ("m", "files: tree → pairs (classes and tests) → flat"),
     ("h / l (list)", "fold / unfold directory, parent"),
     ("space on a directory", "mark all its files reviewed"),
+    ("Esc (list)", "clear the filter, else focus the diff"),
     ("gs", "Graph view of the symbol under the cursor"),
     (
         "c",
         "comment the line (on a draft: edit; on a thread: reply)",
     ),
     ("V then c", "select lines, comment the range"),
-    ("C", "comment the whole file"),
+    ("C, c / C (list)", "comment the whole file"),
+    ("Enter on a line", "open it in the editor (as e)"),
     ("o / za on a note", "show the whole note, fold it back"),
     (
         "Enter on a note",
@@ -396,11 +420,15 @@ const HELP: &[(&str, &str)] = &[
     ("# Stack", ""),
     ("space", "toggle group / layer / hunk reviewed, go on"),
     ("u", "next unreviewed group"),
-    ("J / K  ([ ])", "next / previous group"),
+    ("J / K  (] [)", "next / previous group"),
     ("h / l (list)", "fold / unfold, parent / child"),
     ("o / za, zM / zR", "fold / unfold node, all"),
-    ("Enter / gd", "show the hunk in the Diff view"),
-    ("n / N (content)", "next / previous hunk"),
+    (
+        "Enter / gd",
+        "the Diff view: at the line (content), at the node's first hunk (list)",
+    ),
+    ("n / N  (} {) (content)", "next / previous hunk"),
+    ("Esc (content)", "focus the tree"),
     ("w", "grouping warnings"),
     ("R", "regroup without cache (asks: LLM call)"),
     (
@@ -409,6 +437,7 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("gs", "Graph view of the hunk's symbol"),
     ("c / V then c / C (content)", "comment line / range / file"),
+    ("C (list)", "comment the file of the node (one file only)"),
     ("o / za, Enter on a note", "whole note / fold; its thread"),
     ("# Graph", ""),
     (
@@ -448,9 +477,10 @@ const HELP: &[(&str, &str)] = &[
         "into the flow, back to the entry points",
     ),
     (
-        "flows: n / N",
+        "flows: n / N  (] [)",
         "next / previous changed (or added / removed) step",
     ),
+    ("flows: Enter (flow)", "symbol view of the step"),
     (
         "flows: b",
         "after → before → merged (when the flow differs)",
@@ -460,19 +490,29 @@ const HELP: &[(&str, &str)] = &[
         "write the flow as Mermaid (X: and open it in the browser)",
     ),
     ("Enter", "symbol: focus it (new root); section/module: fold"),
+    ("o / za", "fold / unfold the section or module"),
     ("l / h", "expand / collapse (callers of callers…), parent"),
-    ("Backspace / Ctrl-o", "back to the previous symbol or list"),
-    ("n / N  (J / K)", "next / previous section or module"),
-    ("/", "find a symbol by name (changed or not)"),
+    (
+        "Backspace / Ctrl-o",
+        "back to the previous symbol or list, then where a jump came from",
+    ),
+    ("n / N  (J / K, ] [)", "next / previous section or module"),
+    ("/", "find a symbol by name (changed or not); Esc: back"),
     ("e", "open the node's line in the editor"),
     ("gd", "the symbol's hunks in the Diff view"),
-    ("Ctrl-l, j / k", "preview pane, scroll it"),
+    ("Ctrl-l, j / k", "preview pane, scroll it; Enter: editor"),
     (
         "t (module map)",
         "all modules ↔ changed ones and their neighbours",
     ),
-    ("x", "write the module map as Mermaid (.git/survol/exports)"),
-    ("X", "same, plus an HTML page opened in the browser"),
+    (
+        "x (module map)",
+        "write the module map as Mermaid (.git/survol/exports)",
+    ),
+    (
+        "X (module map)",
+        "same, plus an HTML page opened in the browser",
+    ),
     ("S", "add the last exported diagram to the overall comment"),
     (
         "a (answer: Tab, Enter, d, e)",
@@ -495,26 +535,52 @@ fn help_lines(view: View) -> Vec<(&'static str, &'static str)> {
     out
 }
 
-fn render_help(f: &mut Frame, area: Rect, view: View) {
+fn render_help(f: &mut Frame, area: Rect, view: View, scroll: &mut usize) {
     let help = help_lines(view);
-    let w = 80.min(area.width);
-    let h = (help.len() as u16 + 2).min(area.height);
+    let w = 90.min(area.width);
+    let room = w.saturating_sub(2) as usize;
+    let kw = help
+        .iter()
+        .filter(|(k, _)| !k.starts_with("# "))
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(room / 2);
+    // Descriptions wrapped under themselves, after the key column.
+    let dw = room.saturating_sub(kw + 4).max(8);
+    let mut lines: Vec<Line> = Vec::new();
+    for (k, d) in &help {
+        if let Some(title) = k.strip_prefix("# ") {
+            lines.push(Line::from(format!(" {title}").bold()));
+            continue;
+        }
+        for (i, part) in wrap(d, dw).into_iter().enumerate() {
+            let key = if i == 0 { *k } else { "" };
+            lines.push(Line::from(vec![
+                format!("   {key:<kw$} ").fg(theme().key),
+                part.into(),
+            ]));
+        }
+    }
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let inner = h.saturating_sub(2) as usize;
+    *scroll = (*scroll).min(lines.len().saturating_sub(inner));
     let rect = Rect::new(
         area.x + (area.width - w) / 2,
         area.y + (area.height - h) / 2,
         w,
         h,
     );
-    let lines: Vec<Line> = help
-        .iter()
-        .map(|(k, d)| match k.strip_prefix("# ") {
-            Some(title) => Line::from(format!(" {title}").bold()),
-            None => Line::from(vec![format!("   {k:<26}").fg(theme().key), (*d).into()]),
-        })
-        .collect();
+    let title = if lines.len() > inner {
+        " keys · j/k scroll · any other key closes ".to_string()
+    } else {
+        " keys ".to_string()
+    };
     f.render_widget(Clear, rect);
     f.render_widget(
-        Paragraph::new(lines).block(popup_block(" keys ".into())),
+        Paragraph::new(lines)
+            .scroll((*scroll as u16, 0))
+            .block(popup_block(title)),
         rect,
     );
 }
@@ -608,6 +674,51 @@ pub(crate) mod tests {
         assert_eq!(graph[0].0, "# All views");
         assert!(graph.iter().any(|(k, _)| *k == "# Graph"));
         assert!(!graph.iter().any(|(k, _)| *k == "# Stack"));
+    }
+
+    #[test]
+    fn help_is_wrapped_not_cut_and_scrolls() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        for view in View::ALL {
+            app.switch(view);
+            app.help = true;
+            app.help_scroll = 0;
+            let text = screen(&mut app, 90, 120).join("\n");
+            for (k, d) in help_lines(view) {
+                for word in k.trim_start_matches("# ").split_whitespace() {
+                    assert!(text.contains(word), "`{word}` of `{k}` is missing:\n{text}");
+                }
+                for word in d.split_whitespace() {
+                    assert!(text.contains(word), "`{word}` of `{k}` is missing:\n{text}");
+                }
+            }
+        }
+        // On a short screen: a hint, and the scroll is kept on the last page.
+        app.switch(View::Graph);
+        app.help_scroll = 1000;
+        let text = screen(&mut app, 90, 20).join("\n");
+        assert!(text.contains("j/k scroll"), "{text}");
+        assert!(app.help_scroll < 100);
+        assert!(text.contains("overall comment"), "the last line:\n{text}");
+    }
+
+    #[test]
+    fn footer_follows_the_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let footer = |app: &mut App| screen(app, 250, 20).pop().unwrap();
+        assert!(footer(&mut app).contains("c comment"));
+        app.diff.focus = crate::views::Focus::List;
+        let list = footer(&mut app);
+        assert!(list.contains("c/C file comment") && !list.contains("V range"));
+    }
+
+    #[test]
+    fn help_pairs_the_aliases_in_order() {
+        let diff = help_lines(View::Diff);
+        assert!(diff.iter().any(|(k, _)| *k == "n / N  (} {)"));
+        assert!(diff.iter().any(|(k, _)| *k == "J / K  (] [)"));
     }
 
     #[test]
