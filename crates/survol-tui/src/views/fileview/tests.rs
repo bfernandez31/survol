@@ -139,9 +139,9 @@ fn keys_walk_changes_threads_and_comment_diff_lines() {
     assert_eq!(v.rows[v.pos.cursor], v.rows[3], "the removed d");
     v.on_key(&mut sh, key('n'));
     assert!(matches!(v.rows[v.pos.cursor], FileRow::Code(c) if c.old == Some(10)));
-    // [c: the thread above, on line i.
+    // [t: the thread above, on line i.
     v.on_key(&mut sh, key('['));
-    v.on_key(&mut sh, key('c'));
+    v.on_key(&mut sh, key('t'));
     assert!(v.rows[v.pos.cursor].is_note_head());
     // c on it: edit the draft; Enter: its thread.
     assert!(matches!(
@@ -216,4 +216,33 @@ fn ctrl_letters_do_not_act_as_the_letter() {
     // Ctrl-d still scrolls.
     v.on_key(&mut sh, ctrl('d'));
     assert_eq!(v.rows.len(), rows);
+}
+
+#[test]
+fn brackets_c_go_to_changes_t_to_threads_enter_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sh = shared(dir.path());
+    let line = comments::line_anchor(&sh.review.diff, 1, 0);
+    sh.comments
+        .add(Anchor::Line { start: None, line }, "and i?");
+    sh.rebuild_notes();
+    let mut v = FileView::open(&mut sh, "f.rs", 1).unwrap();
+    // ]c: the next change (like n), told once that it moved.
+    v.on_key(&mut sh, key(']'));
+    v.on_key(&mut sh, key('c'));
+    assert_eq!(v.rows[v.pos.cursor], v.rows[3], "the removed d");
+    assert!(sh.message().unwrap().starts_with("]c / [c go to the next"));
+    // ]t: the thread.
+    v.on_key(&mut sh, key(']'));
+    v.on_key(&mut sh, key('t'));
+    assert!(v.rows[v.pos.cursor].is_note_head());
+    // zo / zc on the note; Enter on a code line no longer opens the editor.
+    v.on_key(&mut sh, key('g'));
+    v.on_key(&mut sh, key('g'));
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(v.on_key(&mut sh, enter), FileOutcome::Continue);
+    assert!(sh.message().unwrap().contains("e opens the editor"));
+    // v selects like V.
+    v.on_key(&mut sh, key('v'));
+    assert!(v.visual.is_some());
 }

@@ -144,7 +144,7 @@ pub fn render_flow(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let block = pane(focused)
         .title(Line::from(title))
-        .title_bottom(Line::from(" x Mermaid · Enter symbol · e edit · gd diff ").fg(theme().meta));
+        .title_bottom(Line::from(" y Mermaid · Enter symbol · e edit · gd diff ").fg(theme().meta));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let width = inner.width as usize;

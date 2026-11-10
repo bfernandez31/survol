@@ -10,7 +10,7 @@ use survol_core::model::{FileStatus, Hunk, LineKind};
 
 use super::comments::{CommentTarget, NoteIndex, NoteKind, row_target};
 use super::graph::{Source, load_source};
-use super::{Layout, Row, Scroll};
+use super::{Fold, Layout, Row, Scroll};
 use crate::app::Shared;
 
 /// A line of code of the file: at the head, or removed from the base.
@@ -234,7 +234,8 @@ pub struct FileView {
     pub visual: Option<usize>,
     /// Generation of the notes the rows were built with.
     pub notes_gen: u64,
-    pending: Option<char>,
+    /// First key of a prefix (`g`, `z`, `]`, `[`) waiting for the second.
+    pub pending: Option<char>,
 }
 
 impl FileView {
@@ -407,17 +408,34 @@ impl FileView {
         if let Some(p) = self.pending.take() {
             match (p, key.code) {
                 ('g', KeyCode::Char('g')) => self.pos.goto_top(0, self.rows.len()),
-                (']', KeyCode::Char('c')) => {
-                    if !self.jump(true, |v, i| v.rows[i].is_note_head()) {
-                        sh.notify("no thread below");
+                (']' | '[', KeyCode::Char('c')) => {
+                    sh.once(
+                        "gf-]c",
+                        "]c / [c go to the next / previous change now (like n / N); ]t / [t to the threads",
+                    );
+                    let forward = p == ']';
+                    if !self.jump(forward, Self::change_start) {
+                        sh.notify(if forward {
+                            "no change below"
+                        } else {
+                            "no change above"
+                        });
                     }
                 }
-                ('[', KeyCode::Char('c')) => {
-                    if !self.jump(false, |v, i| v.rows[i].is_note_head()) {
-                        sh.notify("no thread above");
+                (']' | '[', KeyCode::Char('t')) => {
+                    let forward = p == ']';
+                    if !self.jump(forward, |v, i| v.rows[i].is_note_head()) {
+                        sh.notify(if forward {
+                            "no thread below"
+                        } else {
+                            "no thread above"
+                        });
                     }
                 }
-                ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_note(sh),
+                (']' | '[', _) => sh.notify("]c / [c change · ]t / [t thread"),
+                ('z', KeyCode::Char(c)) if Fold::of(c).is_some() => {
+                    self.fold_note(sh, Fold::of(c).unwrap_or(Fold::Toggle))
+                }
                 _ => {}
             }
             return FileOutcome::Continue;
@@ -460,7 +478,7 @@ impl FileView {
                 self.split = !self.split;
                 self.relayout(sh);
             }
-            KeyCode::Char('V') => {
+            KeyCode::Char('V' | 'v') => {
                 self.visual = match self.visual {
                     Some(_) => None,
                     None => Some(self.pos.cursor),
@@ -473,7 +491,8 @@ impl FileView {
                 Some(&FileRow::Note { note, .. }) => {
                     return FileOutcome::Thread(sh.notes.items[note as usize].kind);
                 }
-                _ => return FileOutcome::Edit(self.cursor_line()),
+                // The whole file is the bottom level: the editor is `e`.
+                _ => sh.notify("Enter opens a thread here; e opens the editor at the line"),
             },
             _ => {}
         }
@@ -482,9 +501,18 @@ impl FileView {
 
     /// `o` on a note: whole or folded.
     fn toggle_note(&mut self, sh: &mut Shared) {
+        self.fold_note(sh, Fold::Toggle);
+    }
+
+    /// `o` / `za` / `zo` / `zc` on a note: whole or folded.
+    fn fold_note(&mut self, sh: &mut Shared, fold: Fold) {
         let Some(&FileRow::Note { note, .. }) = self.rows.get(self.pos.cursor) else {
             return;
         };
+        let folded = !sh.notes.is_expanded(note);
+        if fold.folded(folded) == folded {
+            return;
+        }
         sh.toggle_note(note);
         let at = self.pos.cursor;
         self.build(sh);

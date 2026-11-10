@@ -767,7 +767,8 @@ fn render_module_details(f: &mut Frame, area: Rect, app: &App, focused: bool) {
     );
     lines.push(Line::default());
     lines.push(Line::from(
-        " Enter / l: its changed symbols · x: export the map as Mermaid".fg(theme().meta),
+        " Enter / l: its changed symbols · y: export the map as Mermaid (gx: and open it)"
+            .fg(theme().meta),
     ));
     f.render_widget(Paragraph::new(lines), inner);
 }

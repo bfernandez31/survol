@@ -25,6 +25,21 @@ local defaults = {
   -- <localleader> or a space is only mapped in normal mode: inside the float
   -- it would hold back every space (marks a hunk reviewed) for 'timeoutlen'.
   toggle_key = nil,
+  -- Optional key, in the buffers opened from survol (`e`), showing survol
+  -- again where you left it (like :SurvolBack), e.g. "<C-g>" or "q".
+  back_key = nil,
+  -- Send <Esc>, <C-h>, <C-l> and <C-o> straight to survol inside the float,
+  -- whatever your terminal-mode mappings (an <Esc> leaving terminal mode,
+  -- vim-tmux-navigator's <C-h> / <C-l>...). false keeps your mappings.
+  pass_keys = true,
+}
+
+-- Keys survol needs that terminal-mode mappings often take, and their bytes.
+local PASS_KEYS = {
+  ["<Esc>"] = "\27",
+  ["<C-h>"] = "\8",
+  ["<C-l>"] = "\12",
+  ["<C-o>"] = "\15",
 }
 
 M.config = vim.deepcopy(defaults)
@@ -185,6 +200,15 @@ function M.open(target)
   end
   state.job = job
   local tk = M.config.toggle_key
+  if M.config.pass_keys then
+    for lhs, bytes in pairs(PASS_KEYS) do
+      if not (tk and tk:lower() == lhs:lower()) then
+        vim.keymap.set("t", lhs, function()
+          vim.api.nvim_chan_send(job, bytes)
+        end, { buffer = buf, nowait = true, desc = "survol: " .. lhs })
+      end
+    end
+  end
   if tk and M.terminal_safe(tk) then
     vim.keymap.set("t", tk, M.hide, { buffer = buf, desc = "Hide survol" })
   end
@@ -215,6 +239,18 @@ local function place_cursor(line, col)
   vim.cmd("normal! zvzz")
 end
 
+-- `back_key` in the buffer just opened from survol.
+local function map_back()
+  local key = M.config.back_key
+  if key then
+    vim.keymap.set("n", key, function()
+      if not M.show() then
+        vim.notify("survol is not running", vim.log.levels.WARN)
+      end
+    end, { buffer = 0, desc = "Back to survol" })
+  end
+end
+
 local function do_open(path, line, col, mode)
   M.hide()
   vim.cmd.stopinsert()
@@ -230,6 +266,7 @@ local function do_open(path, line, col, mode)
     if vim.api.nvim_win_get_tabpage(w) == vim.api.nvim_get_current_tabpage()
       and vim.api.nvim_win_get_config(w).relative == "" then
       vim.api.nvim_set_current_win(w)
+      map_back()
       return place_cursor(line, col)
     end
   end
@@ -242,6 +279,7 @@ local function do_open(path, line, col, mode)
   else
     vim.cmd("edit " .. fname)
   end
+  map_back()
   place_cursor(line, col)
 end
 

@@ -246,6 +246,52 @@ test("toggle_key: mapped in the float unless it starts with leader or space", fu
   survol.config.toggle_key = cfg
 end)
 
+test("pass_keys: Esc, C-h, C-l, C-o go to survol inside the float", function()
+  local cfg = vim.deepcopy(survol.config)
+  survol.config.args = { "-c", "exec sleep 600", "sh" }
+  local function tmap(key)
+    local m = vim.fn.maparg(key, "t", false, true)
+    return type(m) == "table" and m.buffer == 1 and m
+  end
+  survol.open()
+  for _, key in ipairs({ "<Esc>", "<C-H>", "<C-L>", "<C-O>" }) do
+    local m = tmap(key)
+    assert(m, key .. " mapped in the float")
+    eq(m.nowait, 1, key .. " nowait")
+  end
+  survol.close()
+  -- The toggle key wins over a passed key; pass_keys = false maps none.
+  survol.config.toggle_key = "<C-o>"
+  survol.open()
+  eq(tmap("<C-O>").desc, "Hide survol")
+  survol.close()
+  survol.config.toggle_key = nil
+  survol.config.pass_keys = false
+  survol.open()
+  eq(tmap("<Esc>"), false, "no pass-through")
+  survol.close()
+  survol.config = cfg
+end)
+
+test("back_key: in a file opened from survol, shows survol again", function()
+  local cfg = vim.deepcopy(survol.config)
+  -- A long-running stand-in again (the test above made it exit).
+  survol.config.args = { "-c", "exec sleep 600", "sh" }
+  survol.config.back_key = "<C-g>"
+  survol.open()
+  local job = survol._state().job
+  eq(survol.open_file(plain, 10, 1), "ok")
+  flush()
+  assert(not survol.is_visible(), "hidden")
+  eq(current_path(), plain)
+  local m = vim.fn.maparg("<C-g>", "n", false, true)
+  eq(m.buffer, 1, "buffer-local")
+  m.callback()
+  assert(survol.is_visible(), "shown again")
+  eq(survol._state().job, job, "same job")
+  survol.config = cfg
+end)
+
 test("completion", function()
   eq(survol.complete("--n", "Survol --n"), { "--no-llm", "--no-lsp" })
   assert(vim.tbl_contains(survol.complete("f", "Survol --lang f"), "fr"))

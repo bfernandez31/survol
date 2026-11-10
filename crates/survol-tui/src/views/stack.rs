@@ -11,7 +11,7 @@ use survol_core::group::Grouping;
 use survol_core::model::Diff;
 use survol_core::review_state::ReviewState;
 
-use super::{Focus, Row, Scroll, push_hunk_rows};
+use super::{Focus, Fold, Row, Scroll, push_hunk_rows};
 use crate::app::{Action, Shared};
 use crate::views::comments::{CommentTarget, row_target};
 use crate::views::graph::symbol_at_position;
@@ -151,7 +151,14 @@ pub struct StackView {
     /// Waiting for y/n before folding / unfolding the rename-only hunks.
     pub confirm_fold_renames: bool,
     pub show_warnings: bool,
-    pending: Option<char>,
+    /// First key of a prefix (`g`, `z`, `]`, `[`) waiting for the second.
+    pub pending: Option<char>,
+    /// Groups shown (`/`): those whose title, summary, layers or files
+    /// contain it.
+    pub filter: String,
+    pub filter_editing: bool,
+    /// Per group: hidden by the filter.
+    hidden: Vec<bool>,
     /// Other end of a `V` selection (content row index).
     pub visual: Option<usize>,
     /// [`NoteIndex::generation`](crate::views::comments::NoteIndex) the rows were built with.
@@ -164,6 +171,7 @@ impl StackView {
         self.confirm_regroup
             || self.confirm_fold_renames
             || self.show_warnings
+            || self.filter_editing
             || self.pending.is_some()
     }
 
@@ -245,9 +253,67 @@ impl StackView {
     }
 
     fn flatten(&self) -> Vec<Node> {
+        let hidden = |n: &Node| self.hidden.get(n.group()).copied().unwrap_or(false);
         match &self.grouping {
-            Some(g) => flatten(g, &self.folded, &self.open_layers),
+            Some(g) => flatten(g, &self.folded, &self.open_layers)
+                .into_iter()
+                .filter(|n| !hidden(n))
+                .collect(),
             None => Vec::new(),
+        }
+    }
+
+    /// `/`: shows the groups whose title, summary, layers or files contain
+    /// `filter` (case insensitive).
+    pub fn set_filter(&mut self, sh: &Shared, filter: String) {
+        let needle = filter.to_lowercase();
+        let d = &sh.review.diff;
+        self.hidden = match &self.grouping {
+            Some(g) if !needle.is_empty() => g
+                .groups
+                .iter()
+                .map(|gr| {
+                    let has = |s: &str| s.to_lowercase().contains(&needle);
+                    let files = gr
+                        .hunk_ids
+                        .iter()
+                        .map(|&h| d.hunks[h].file)
+                        .chain(gr.file_ids.iter().copied());
+                    !(has(&gr.title)
+                        || has(&gr.summary)
+                        || gr.layers.iter().any(|l| has(&l.name))
+                        || files.into_iter().any(|f| has(&d.files[f].path)))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.filter = filter;
+        self.refresh_tree(sh);
+    }
+
+    fn filter_clear(&mut self, sh: &Shared) {
+        if !self.filter.is_empty() || !self.hidden.is_empty() {
+            self.set_filter(sh, String::new());
+        }
+    }
+
+    fn on_filter_key(&mut self, sh: &Shared, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.filter_editing = false,
+            KeyCode::Esc => {
+                self.filter_editing = false;
+                self.set_filter(sh, String::new());
+            }
+            KeyCode::Backspace => {
+                let mut f = self.filter.clone();
+                f.pop();
+                self.set_filter(sh, f);
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let f = format!("{}{c}", self.filter);
+                self.set_filter(sh, f);
+            }
+            _ => {}
         }
     }
 
@@ -277,6 +343,37 @@ impl StackView {
             self.sel = usize::MAX;
             self.select(sh, i);
         }
+    }
+
+    /// `gG` from another view: selects the hunk `h` in its group and layer,
+    /// unfolding them. Whether the hunk is in a group.
+    pub fn reveal_hunk(&mut self, sh: &Shared, h: usize) -> bool {
+        let Some(g) = &self.grouping else {
+            return false;
+        };
+        let found = g.groups.iter().enumerate().find_map(|(gi, gr)| {
+            gr.layers
+                .iter()
+                .position(|l| l.hunk_ids.contains(&h))
+                .map(|li| (gi, li))
+        });
+        let Some((group, layer)) = found else {
+            return false;
+        };
+        self.filter_clear(sh);
+        self.folded[group] = false;
+        self.open_layers.insert((group, layer));
+        self.tree = self.flatten();
+        self.select_node(
+            sh,
+            Node::Hunk {
+                group,
+                layer,
+                hunk: h,
+            },
+        );
+        self.focus = Focus::List;
+        true
     }
 
     /// Recomputes the visible tree, keeping the selection on the same node
@@ -505,20 +602,30 @@ impl StackView {
     }
 
     fn toggle_fold(&mut self, sh: &Shared) {
+        self.fold_node(sh, Fold::Toggle);
+    }
+
+    /// Folds, unfolds or toggles the selected node; on a hunk or a file,
+    /// closing folds its parent.
+    fn fold_node(&mut self, sh: &Shared, fold: Fold) {
         let Some(node) = self.selected() else {
             return;
         };
         match node {
-            Node::Group(g) => self.folded[g] = !self.folded[g],
+            Node::Group(g) => self.folded[g] = fold.folded(self.folded[g]),
             Node::Layer { group, layer } => {
-                if !self.open_layers.remove(&(group, layer)) {
+                let open = self.open_layers.contains(&(group, layer));
+                if fold.folded(!open) {
+                    self.open_layers.remove(&(group, layer));
+                } else {
                     self.open_layers.insert((group, layer));
                 }
             }
-            Node::Hunk { group, layer, .. } => {
+            Node::Hunk { group, layer, .. } if fold != Fold::Open => {
                 self.open_layers.remove(&(group, layer));
             }
-            Node::File { group, .. } => self.folded[group] = true,
+            Node::File { group, .. } if fold != Fold::Open => self.folded[group] = true,
+            _ => {}
         }
         self.refresh_tree(sh);
     }
@@ -533,11 +640,16 @@ impl StackView {
         }
     }
 
-    /// `o` / `za`: the note under the cursor whole or folded, else the node.
-    fn toggle_here(&mut self, sh: &mut Shared) {
+    /// `o` / `za` / `zo` / `zc`: the note under the cursor whole or folded,
+    /// else the node.
+    fn fold_here(&mut self, sh: &mut Shared, fold: Fold) {
         let Some(note) = self.cursor_note() else {
-            return self.toggle_fold(sh);
+            return self.fold_node(sh, fold);
         };
+        let folded = !sh.notes.is_expanded(note);
+        if fold.folded(folded) == folded {
+            return;
+        }
         sh.toggle_note(note);
         self.relayout(sh);
         let head = |r: &StackRow| matches!(*r, StackRow::Diff(Row::Comment { note: n, part: 0, .. }) if n == note);
@@ -608,23 +720,15 @@ impl StackView {
     /// moves on: to the next unreviewed group if this one is done, else to the
     /// next unreviewed node of the group.
     pub fn toggle_reviewed(&mut self, sh: &mut Shared) {
-        let (Some(g), Some(node)) = (&self.grouping, self.selected()) else {
+        let Some(node) = self.selected() else {
             return;
         };
-        let d = &sh.review.diff;
-        let (done, total) = node_progress(g, node, d, &sh.state);
-        let reviewed = done < total;
-        let (hunks, files) = node_items(g, node);
-        for h in hunks {
-            sh.state.set_hunk(d, h, reviewed);
-        }
-        for f in files {
-            sh.state.set_file(d, f, reviewed);
-        }
-        sh.save();
-        if !reviewed {
+        if self.mark(sh, node) != Some(true) {
             return;
         }
+        let Some(g) = &self.grouping else {
+            return;
+        };
 
         let d = &sh.review.diff;
         let gi = node.group();
@@ -647,6 +751,91 @@ impl StackView {
             });
         if let Some(k) = next {
             self.select(sh, k);
+        }
+    }
+
+    /// Toggles "reviewed" on everything under `node`, without moving (`x`;
+    /// `X` on the node's group). The new state.
+    fn mark(&mut self, sh: &mut Shared, node: Node) -> Option<bool> {
+        let g = self.grouping.as_ref()?;
+        let d = &sh.review.diff;
+        let (done, total) = node_progress(g, node, d, &sh.state);
+        let reviewed = done < total;
+        let (hunks, files) = node_items(g, node);
+        for h in hunks {
+            sh.state.set_hunk(d, h, reviewed);
+        }
+        for f in files {
+            sh.state.set_file(d, f, reviewed);
+        }
+        sh.save();
+        Some(reviewed)
+    }
+
+    /// `[u`: the group not fully reviewed before the current one.
+    fn prev_unreviewed_group(&mut self, sh: &mut Shared) {
+        let Some(g) = &self.grouping else {
+            return;
+        };
+        let n = g.groups.len();
+        let here = self.selected().map_or(0, |s| s.group());
+        let d = &sh.review.diff;
+        let prev = (1..=n)
+            .map(|k| (here + n - k) % n)
+            .find(|&i| !g.groups[i].is_reviewed(d, &sh.state));
+        match prev {
+            Some(i) => self.select_node(sh, Node::Group(i)),
+            None => sh.notify("every group is reviewed"),
+        }
+    }
+
+    /// `]t` / `[t` (content): the next / previous note.
+    fn next_thread(&mut self, sh: &mut Shared, forward: bool) {
+        let is_head = |r: &StackRow| matches!(r, StackRow::Diff(Row::Comment { part: 0, .. }));
+        let c = self.pos.cursor;
+        let found = if forward {
+            (c + 1..self.rows.len()).find(|&i| is_head(&self.rows[i]))
+        } else {
+            (0..c).rev().find(|&i| is_head(&self.rows[i]))
+        };
+        match found {
+            Some(r) => {
+                self.focus = Focus::Content;
+                self.pos.cursor = r;
+                self.pos.clamp(self.rows.len());
+            }
+            None => sh.notify("no thread in this direction (in the content of the node)"),
+        }
+    }
+
+    /// `]` / `[` then `f` group, `c` hunk, `t` thread, `u` unreviewed group.
+    fn bracket(&mut self, sh: &mut Shared, forward: bool, c: char) {
+        match c {
+            'f' => self.next_group(sh, forward),
+            'c' if self.focus == Focus::Content => self.next_content_hunk(forward),
+            'c' => {
+                let from = self.sel;
+                let found = if forward {
+                    (from + 1..self.tree.len()).find(|&i| matches!(self.tree[i], Node::Hunk { .. }))
+                } else {
+                    (0..from)
+                        .rev()
+                        .find(|&i| matches!(self.tree[i], Node::Hunk { .. }))
+                };
+                match found {
+                    Some(i) => self.select(sh, i),
+                    None => self.next_content_hunk(forward),
+                }
+            }
+            't' => self.next_thread(sh, forward),
+            'u' if forward => self.next_unreviewed_group(sh),
+            'u' => self.prev_unreviewed_group(sh),
+            _ => {
+                let p = if forward { ']' } else { '[' };
+                sh.notify(format!(
+                    "{p}f group · {p}c hunk · {p}t thread · {p}u unreviewed ({p} alone is a prefix now)"
+                ))
+            }
         }
     }
 
@@ -843,6 +1032,10 @@ impl StackView {
             sh.notify("cancelled");
             return Action::None;
         }
+        if self.filter_editing {
+            self.on_filter_key(sh, key);
+            return Action::None;
+        }
         if super::stray_ctrl(&key, &['d', 'u', 'f', 'b', 'h', 'l']) {
             self.pending = None;
             return Action::None;
@@ -857,7 +1050,13 @@ impl StackView {
                 ('g', KeyCode::Char('d')) => return self.diff_target(),
                 ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
                 ('g', KeyCode::Char('f')) => return self.whole_file(sh),
-                ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_here(sh),
+                ('g', KeyCode::Char('G')) => {
+                    sh.notify("already in the Stack view (gd: Diff, gs: Graph)")
+                }
+                ('z', KeyCode::Char(c)) if Fold::of(c).is_some() => {
+                    self.fold_here(sh, Fold::of(c).unwrap_or(Fold::Toggle))
+                }
+                (']' | '[', KeyCode::Char(c)) => self.bracket(sh, p == ']', c),
                 ('z', KeyCode::Char('M')) => self.set_all_folded(sh, true),
                 ('z', KeyCode::Char('R')) => self.set_all_folded(sh, false),
                 _ => {}
@@ -866,10 +1065,11 @@ impl StackView {
         }
 
         match key.code {
-            KeyCode::Char('g') | KeyCode::Char('z') if !ctrl => {
-                if let KeyCode::Char(c) = key.code {
-                    self.pending = Some(c);
-                }
+            KeyCode::Char(c @ ('g' | 'z' | ']' | '[')) if !ctrl => self.pending = Some(c),
+            KeyCode::Char('/') => {
+                self.list_hidden = false;
+                self.focus = Focus::List;
+                self.filter_editing = true;
             }
             KeyCode::Char('h') if ctrl => {
                 self.list_hidden = false;
@@ -902,16 +1102,33 @@ impl StackView {
             },
             _ if self.grouping.is_none() => {}
             KeyCode::Char(' ') => self.toggle_reviewed(sh),
+            KeyCode::Char('x') => {
+                if let Some(node) = self.selected() {
+                    self.mark(sh, node);
+                }
+            }
+            KeyCode::Char('X') => {
+                if let Some(node) = self.selected() {
+                    self.mark(sh, Node::Group(node.group()));
+                }
+            }
             KeyCode::Char('u') if !ctrl => self.next_unreviewed_group(sh),
-            KeyCode::Char('J') | KeyCode::Char(']') => self.next_group(sh, true),
-            KeyCode::Char('K') | KeyCode::Char('[') => self.next_group(sh, false),
-            KeyCode::Char('o') => self.toggle_here(sh),
+            KeyCode::Char('J') => self.next_group(sh, true),
+            KeyCode::Char('K') => self.next_group(sh, false),
+            KeyCode::Char('o') => self.fold_here(sh, Fold::Toggle),
             KeyCode::Char('e') => self.open_in_editor(sh),
             KeyCode::Enter if self.cursor_note().is_some() => {
                 let note = self.cursor_note().unwrap_or_default();
                 return Action::Thread(sh.notes.items[note as usize].kind);
             }
             KeyCode::Char('0') => self.hscroll = 0,
+            KeyCode::Char('v') => {
+                return self.on_key(
+                    sh,
+                    KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT),
+                    llm_enabled,
+                );
+            }
             KeyCode::Char('c' | 'V') if self.focus == Focus::List => {
                 let k = if key.code == KeyCode::Char('c') {
                     'c'
@@ -938,6 +1155,16 @@ impl StackView {
                 };
             }
             KeyCode::Esc if self.visual.is_some() => self.visual = None,
+            KeyCode::Esc if self.focus == Focus::List && !self.filter.is_empty() => {
+                self.set_filter(sh, String::new())
+            }
+            KeyCode::Char(c @ ('}' | '{')) if self.focus == Focus::Content => {
+                sh.once(
+                    "}",
+                    "} / { are now ]c / [c (next / previous hunk); they stay aliases until 0.4",
+                );
+                self.next_content_hunk(c == '}');
+            }
             _ => match self.focus {
                 Focus::List => return self.on_tree_key(sh, key),
                 Focus::Content => return self.on_content_key(key),
@@ -988,8 +1215,8 @@ impl StackView {
                 self.pos.clamp(self.rows.len());
             }
             KeyCode::Home => self.pos.goto_top(0, self.rows.len()),
-            KeyCode::Char('n') | KeyCode::Char('}') => self.next_content_hunk(true),
-            KeyCode::Char('N') | KeyCode::Char('{') => self.next_content_hunk(false),
+            KeyCode::Char('n') => self.next_content_hunk(true),
+            KeyCode::Char('N') => self.next_content_hunk(false),
             KeyCode::Char('h') | KeyCode::Left => self.hscroll = self.hscroll.saturating_sub(8),
             KeyCode::Char('l') | KeyCode::Right => self.hscroll += 8,
             KeyCode::Enter => return self.diff_target(),

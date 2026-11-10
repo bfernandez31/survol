@@ -325,6 +325,13 @@ impl NoteIndex {
         self.generation += 1;
     }
 
+    /// Whether note `note` shows whole (`o`).
+    pub fn is_expanded(&self, note: u32) -> bool {
+        self.items
+            .get(note as usize)
+            .is_some_and(|n| self.expanded.contains(&n.kind))
+    }
+
     /// Index of the note `kind`, if placed in the diff.
     pub fn find(&self, kind: NoteKind) -> Option<u32> {
         self.items
@@ -461,6 +468,8 @@ pub struct ThreadView {
     pub from_panel: bool,
     /// Back to the whole-file view when closed.
     pub from_file: bool,
+    /// `g` typed: `gg` goes to the top.
+    pub pending_g: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +478,8 @@ pub enum ThreadOutcome {
     Close,
     /// Reply to the discussion, or edit the draft.
     Write(CommentTarget),
+    /// Open the line of the thread in the editor (`e`).
+    Editor(NoteKind),
     /// The next (`true`) or previous thread of the diff.
     Next(bool),
 }
@@ -482,6 +493,7 @@ impl ThreadView {
             total: 0,
             from_panel: false,
             from_file: false,
+            pending_g: false,
         }
     }
 
@@ -503,6 +515,7 @@ impl ThreadView {
         if super::stray_ctrl(&key, &['d', 'u']) {
             return ThreadOutcome::Continue;
         }
+        let g = std::mem::take(&mut self.pending_g);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return ThreadOutcome::Close,
             KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
@@ -511,9 +524,15 @@ impl ThreadView {
             KeyCode::Char('u') if ctrl => self.scroll_by(-half),
             KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_by(half * 2),
             KeyCode::PageUp => self.scroll_by(-half * 2),
-            KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
+            KeyCode::Char('g') if g => self.scroll = 0,
+            KeyCode::Char('g') => {
+                self.pending_g = true;
+                return ThreadOutcome::Continue;
+            }
+            KeyCode::Home => self.scroll = 0,
             KeyCode::Char('G') | KeyCode::End => self.scroll_by(isize::MAX / 2),
-            KeyCode::Char('c' | 'e') if !ctrl => return ThreadOutcome::Write(self.target()),
+            KeyCode::Char('c') if !ctrl => return ThreadOutcome::Write(self.target()),
+            KeyCode::Char('e') if !ctrl => return ThreadOutcome::Editor(self.kind),
             KeyCode::Char('n') | KeyCode::Tab => return ThreadOutcome::Next(true),
             KeyCode::Char('N') | KeyCode::BackTab => return ThreadOutcome::Next(false),
             _ => {}
@@ -666,6 +685,8 @@ pub struct ReviewPanel {
     pub confirm: Option<Confirm>,
     /// Updated by the renderer.
     pub height: usize,
+    /// `g` typed: `gg` goes to the first row.
+    pub pending_g: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -675,6 +696,8 @@ pub enum PanelOutcome {
     Edit(CommentTarget),
     /// Show where this row is (draft or discussion).
     Jump(PanelRow),
+    /// Open the line of this row in the editor (`e`).
+    Editor(PanelRow),
     Delete(u64),
     /// Prepare the publication (then confirm).
     AskPublish,
@@ -726,18 +749,25 @@ impl ReviewPanel {
             };
         }
         let row = rows.get(self.sel).copied();
+        let g = std::mem::take(&mut self.pending_g);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => return PanelOutcome::Close,
             KeyCode::Char('j') | KeyCode::Down => {
                 self.sel = (self.sel + 1).min(rows.len().saturating_sub(1))
             }
             KeyCode::Char('k') | KeyCode::Up => self.sel = self.sel.saturating_sub(1),
-            KeyCode::Char('g') | KeyCode::Home => self.sel = 0,
+            KeyCode::Char('g') if g => self.sel = 0,
+            KeyCode::Char('g') => self.pending_g = true,
+            KeyCode::Home => self.sel = 0,
             KeyCode::Char('G') | KeyCode::End => self.sel = rows.len().saturating_sub(1),
             KeyCode::Char('p') => return PanelOutcome::AskPublish,
             KeyCode::Char('r') => return PanelOutcome::Refresh,
             KeyCode::Char('S') => return PanelOutcome::Edit(CommentTarget::Summary),
-            KeyCode::Char('e' | 'c') => match row {
+            KeyCode::Char('e') => match row {
+                Some(PanelRow::Summary) | None => {}
+                Some(r) => return PanelOutcome::Editor(r),
+            },
+            KeyCode::Char('c') => match row {
                 Some(PanelRow::Summary) => return PanelOutcome::Edit(CommentTarget::Summary),
                 Some(PanelRow::Draft(id)) => return PanelOutcome::Edit(CommentTarget::Draft(id)),
                 Some(PanelRow::Discussion(d)) => {
@@ -1016,9 +1046,19 @@ mod tests {
         assert_eq!(t.on_key(key(KeyCode::Esc)), ThreadOutcome::Close);
         let mut d = ThreadView::new(NoteKind::Draft(4));
         assert_eq!(
-            d.on_key(key(KeyCode::Char('e'))),
+            d.on_key(key(KeyCode::Char('c'))),
             ThreadOutcome::Write(CommentTarget::Draft(4))
         );
+        // e: the line in the editor; gg: the top.
+        assert_eq!(
+            d.on_key(key(KeyCode::Char('e'))),
+            ThreadOutcome::Editor(NoteKind::Draft(4))
+        );
+        d.scroll = 3;
+        d.on_key(key(KeyCode::Char('g')));
+        assert_eq!(d.scroll, 3, "g alone waits for the second g");
+        d.on_key(key(KeyCode::Char('g')));
+        assert_eq!(d.scroll, 0);
     }
 
     #[test]
@@ -1106,5 +1146,32 @@ mod tests {
         assert_eq!(t.on_key(ctrl('n')), ThreadOutcome::Continue);
         assert_eq!(t.on_key(ctrl('q')), ThreadOutcome::Continue);
         assert_eq!(t.on_key(ctrl('g')), ThreadOutcome::Continue);
+    }
+
+    #[test]
+    fn panel_c_edits_e_opens_the_editor_gg_goes_up() {
+        let rows = [PanelRow::Summary, PanelRow::Draft(7)];
+        let mut p = ReviewPanel::default();
+        assert_eq!(
+            p.on_key(key(KeyCode::Char('e')), &rows),
+            PanelOutcome::Continue
+        );
+        assert_eq!(
+            p.on_key(key(KeyCode::Char('c')), &rows),
+            PanelOutcome::Edit(CommentTarget::Summary)
+        );
+        p.on_key(key(KeyCode::Char('j')), &rows);
+        assert_eq!(
+            p.on_key(key(KeyCode::Char('e')), &rows),
+            PanelOutcome::Editor(PanelRow::Draft(7))
+        );
+        assert_eq!(
+            p.on_key(key(KeyCode::Char('c')), &rows),
+            PanelOutcome::Edit(CommentTarget::Draft(7))
+        );
+        p.on_key(key(KeyCode::Char('g')), &rows);
+        assert_eq!(p.sel, 1);
+        p.on_key(key(KeyCode::Char('g')), &rows);
+        assert_eq!(p.sel, 0);
     }
 }

@@ -16,6 +16,35 @@ use survol_core::model::{DiffLine, LineKind};
 
 use self::comments::NoteIndex;
 
+/// `za` / `zo` / `zc` (and `o`): toggle, open or close a fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fold {
+    Toggle,
+    Open,
+    Close,
+}
+
+impl Fold {
+    /// The fold of the second key of `z` (`a`, `o`, `c`).
+    pub fn of(c: char) -> Option<Fold> {
+        match c {
+            'a' => Some(Fold::Toggle),
+            'o' => Some(Fold::Open),
+            'c' => Some(Fold::Close),
+            _ => None,
+        }
+    }
+
+    /// Whether something folded now (`folded`) is folded after this.
+    pub fn folded(self, folded: bool) -> bool {
+        match self {
+            Fold::Toggle => !folded,
+            Fold::Open => false,
+            Fold::Close => true,
+        }
+    }
+}
+
 /// A letter typed with Ctrl that the context does not bind (`bound`): it
 /// must not do what the letter alone does (`Ctrl-v` is not `v`).
 pub fn stray_ctrl(key: &KeyEvent, bound: &[char]) -> bool {

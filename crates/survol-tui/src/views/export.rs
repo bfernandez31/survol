@@ -1,6 +1,6 @@
 //! Mermaid exports of the Graph view (module map, flows): a Markdown file
-//! in `.git/survol/exports/` (`x`), with a self-contained HTML page next to
-//! it opened in the browser (`X`), and the diagram offered to the overall
+//! in `.git/survol/exports/` (`y`), with a self-contained HTML page next to
+//! it opened in the browser (`gx`), and the diagram offered to the overall
 //! comment of the review (`S`), where GitLab renders it.
 
 use std::io;

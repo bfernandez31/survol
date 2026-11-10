@@ -146,7 +146,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App, v: &mut FileView) {
         if v.split { "side by side" } else { "unified" },
         if v.show_removed { "shown" } else { "hidden" }
     );
-    let hint = " n/N change · ]c/[c thread · d removed · s side by side · c comment · Enter thread · e editor · Esc ";
+    let hint = " n/N change · ]t/[t thread · d removed · s side by side · c comment · Enter thread · e editor · ? keys · Esc ";
     let block = popup_block(title)
         .title(Line::from(mode).right_aligned().fg(theme().meta))
         .title_bottom(Line::from(hint).fg(theme().meta));
