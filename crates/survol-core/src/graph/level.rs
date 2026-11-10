@@ -3,9 +3,8 @@
 //!
 //! What lies outside the scope is kept as coarser nodes on the border: the
 //! other modules around the files of a module; the other files of the module
-//! and the other modules around the symbols of a file. Only the nodes the
-//! review touches and their neighbours are kept, the heaviest first, up to a
-//! maximum: a level is always small enough to be drawn.
+//! and the other modules around the symbols of a file. Only the outside nodes
+//! linked to an inside one are kept.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -62,17 +61,16 @@ pub struct LevelEdge {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Level {
-    /// Inside nodes first, changed ones first among them.
+    /// Changed inside nodes first (the most changed, members before types,
+    /// then the most linked), then the other inside nodes, then the outside
+    /// ones, the most linked first.
     pub nodes: Vec<LevelNode>,
     /// Heaviest first.
     pub edges: Vec<LevelEdge>,
-    /// Nodes left out: not around a change (`all` off), or over the maximum.
-    pub hidden: usize,
 }
 
-/// The level of `scope`. `all`: every node, not only the changed ones and
-/// their neighbours. At most `max` nodes are kept.
-pub fn level(g: &Graph, scope: &Scope, all: bool, max: usize) -> Level {
+/// The level of `scope`.
+pub fn level(g: &Graph, scope: &Scope) -> Level {
     // A file scope shows its module's other files apart.
     let home = match scope {
         Scope::File(path) => g.file(path).map(|f| f.module.as_str()),
@@ -157,32 +155,29 @@ pub fn level(g: &Graph, scope: &Scope, all: bool, max: usize) -> Level {
         *edge.kinds.entry(e.kind).or_default() += 1;
     }
 
-    // Around the changes: the changed inside nodes and their neighbours.
+    // Changed inside nodes first, the most changed first, then the heaviest.
+    // A type is changed when one of its members is: the members first.
     let changed = |n: &LevelNode| n.changed() && !n.outside;
-    let mut keep: Vec<bool> = nodes.iter().map(changed).collect();
-    if all || !keep.contains(&true) {
-        keep = vec![true; nodes.len()];
-    } else {
-        for e in edges.values() {
-            let (a, b) = (changed(&nodes[e.from]), changed(&nodes[e.to]));
-            keep[e.from] |= b;
-            keep[e.to] |= a;
-        }
-    }
-    // The heaviest first, within the maximum.
     let mut weight = vec![0usize; nodes.len()];
-    for e in edges.values().filter(|e| keep[e.from] && keep[e.to]) {
+    for e in edges.values() {
         weight[e.from] += e.count;
         weight[e.to] += e.count;
     }
-    let mut order: Vec<usize> = (0..nodes.len()).filter(|&i| keep[i]).collect();
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
     order.sort_by_key(|&i| {
         let n = &nodes[i];
-        (!changed(n), n.outside, std::cmp::Reverse(weight[i]), i)
+        let changes = if changed(n) { n.changes } else { 0 };
+        let is_type = matches!(n.of, NodeRef::Symbol(s) if g.symbol(s).kind.is_type());
+        (
+            !changed(n),
+            n.outside,
+            std::cmp::Reverse(changes),
+            is_type,
+            std::cmp::Reverse(weight[i]),
+            i,
+        )
     });
-    order.truncate(max);
-    let hidden = nodes.len() - order.len();
-    let mut new_id = vec![usize::MAX; nodes.len()];
+    let mut new_id = vec![0; nodes.len()];
     for (new, &old) in order.iter().enumerate() {
         new_id[old] = new;
     }
@@ -190,7 +185,6 @@ pub fn level(g: &Graph, scope: &Scope, all: bool, max: usize) -> Level {
     let nodes: Vec<LevelNode> = order.iter().filter_map(|&i| slots[i].take()).collect();
     let mut edges: Vec<LevelEdge> = edges
         .into_values()
-        .filter(|e| new_id[e.from] != usize::MAX && new_id[e.to] != usize::MAX)
         .map(|e| LevelEdge {
             from: new_id[e.from],
             to: new_id[e.to],
@@ -202,11 +196,7 @@ pub fn level(g: &Graph, scope: &Scope, all: bool, max: usize) -> Level {
             .cmp(&a.count)
             .then((a.from, a.to).cmp(&(b.from, b.to)))
     });
-    Level {
-        nodes,
-        edges,
-        hidden,
-    }
+    Level { nodes, edges }
 }
 
 fn describe(
@@ -223,7 +213,10 @@ fn describe(
         }
         NodeRef::File(path) => {
             let symbols = g.symbols_in_file(path);
-            let changed = symbols.iter().filter(|&&s| g.symbol(s).changed).count();
+            let changed = symbols
+                .iter()
+                .filter(|&&s| g.symbol(s).changed && g.symbol(s).kind != SymbolKind::File)
+                .count();
             let name = path.rsplit('/').next().unwrap_or(path).to_string();
             (
                 name,
@@ -262,4 +255,55 @@ pub fn parent(g: &Graph, scope: &Scope) -> Option<Scope> {
                 .map_or(Scope::Root, |f| Scope::Module(f.module.clone())),
         ),
     }
+}
+
+/// The scope showing `of` as one of its inside nodes.
+pub fn home(g: &Graph, of: &NodeRef) -> Scope {
+    match of {
+        NodeRef::Module(_) => Scope::Root,
+        NodeRef::File(path) => g
+            .file(path)
+            .map_or(Scope::Root, |f| Scope::Module(f.module.clone())),
+        NodeRef::Symbol(s) => Scope::File(g.symbol(*s).file.clone()),
+    }
+}
+
+/// Whether symbol `s` lives in `of`.
+fn contains(g: &Graph, of: &NodeRef, s: SymIdx) -> bool {
+    match of {
+        NodeRef::Module(m) => g.module_of(s) == Some(m.as_str()),
+        NodeRef::File(path) => g.symbol(s).file == *path,
+        NodeRef::Symbol(x) => *x == s,
+    }
+}
+
+/// Following the links from `from` into `to` (coarser, outside the level of
+/// `from`): the node of `to` as fine as `from` the most linked with it, the
+/// file for a file, the symbol for a symbol. `None` for a module, or when no
+/// such node is linked.
+pub fn follow(g: &Graph, from: &NodeRef, to: &NodeRef) -> Option<NodeRef> {
+    let mut counts: BTreeMap<NodeRef, usize> = BTreeMap::new();
+    for e in g.edges().iter().filter(|e| e.kind.is_dependency()) {
+        let there = if contains(g, from, e.from) && contains(g, to, e.to) {
+            e.to
+        } else if contains(g, from, e.to) && contains(g, to, e.from) {
+            e.from
+        } else {
+            continue;
+        };
+        let node = match from {
+            NodeRef::Module(_) => return None,
+            NodeRef::File(_) => NodeRef::File(g.symbol(there).file.clone()),
+            // A file's own symbol stands for its imports: not a node.
+            NodeRef::Symbol(_) if g.symbol(there).kind == SymbolKind::File => continue,
+            NodeRef::Symbol(_) => NodeRef::Symbol(there),
+        };
+        *counts.entry(node).or_default() += 1;
+    }
+    // The most linked, the first in order on a tie.
+    let best = counts.values().copied().max()?;
+    counts
+        .into_iter()
+        .find(|&(_, n)| n == best)
+        .map(|(node, _)| node)
 }

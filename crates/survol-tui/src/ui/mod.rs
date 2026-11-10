@@ -327,7 +327,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                     " j/k move  Enter/l flow  n/N change  Enter symbol  b before/after  x/X Mermaid  S to comment  e edit  gd diff  h back  m mode  ? help"
                 }
                 Mode::Map => {
-                    " h/j/k/l move  Enter into the box  ⌫/u back out  n/N changed  t all/around the changes  e edit  gd diff  gf file  m mode  ? help"
+                    " h/l column  j/k move  Enter to the middle / down a level  ⌫/u back  n/N changed  e edit  gd diff  gf file  m mode  ? help"
                 }
                 Mode::Modules => {
                     " j/k move  Enter/l changed symbols  Enter on symbol: graph  t all/impacted  e edit  gd diff  x/X Mermaid  S to comment  / find  m mode  ? help"
@@ -417,17 +417,24 @@ const HELP: &[(&str, &str)] = &[
     ),
     (
         "M",
-        "map: the graph as boxes and arrows, one level at a time",
+        "map: one box, what uses it on the left, what it uses on the right",
     ),
     (
-        "map: h j k l, n / N",
-        "move from box to box, next / previous changed box",
+        "map: h / l, j / k",
+        "column on the left / right, next / previous box of the column",
     ),
     (
-        "map: Enter, Backspace / u",
-        "into the box (module → files → symbols), back out",
+        "map: Enter",
+        "side box: to the middle; middle box: down a level (module → files → symbols)",
     ),
-    ("map: t", "every box of the level / only around the changes"),
+    (
+        "map: Backspace / u / Ctrl-o",
+        "previous middle box, else back up a level",
+    ),
+    (
+        "map: n / N",
+        "next / previous changed box of the level to the middle",
+    ),
     (
         "f",
         "flows: impacted entry points and their end-to-end flow",

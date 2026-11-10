@@ -1,22 +1,17 @@
-//! Map mode of the Graph view: the code graph drawn as boxes and arrows,
-//! one level at a time. `Enter` goes into a box (a module shows its files, a
-//! file its symbols), `Backspace` back out; what is outside the level stays
-//! on its border.
+//! Map mode of the Graph view: one box at a time, at one level of the graph
+//! (modules, the files of a module, the symbols of a file). The selection is
+//! in the middle, what uses it on the left, what it uses on the right.
+//!
+//! `Enter` on a neighbour puts it in the middle (`Backspace` goes back to the
+//! previous one), on the middle box goes down a level (a module shows its
+//! files, a file its symbols, a symbol opens its tree). A neighbour outside
+//! the level (another module, another file) is followed there.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use survol_core::graph::level::{self, Level, LevelNode, NodeRef, Scope};
+use survol_core::graph::level::{self, Level, LevelEdge, LevelNode, NodeRef, Scope};
 use survol_core::graph::{Graph, SymIdx};
-use unicode_width::UnicodeWidthStr;
 
-use super::boxes::{self, Direction, Drawing};
-
-/// Nodes drawn at one level: what a screen or two can hold.
-pub const MAX_NODES: usize = 36;
-/// Links a level can draw before it becomes unreadable. Over it, the links
-/// with the outside are left out, then the ones a path already implies.
-pub const MAX_LINKS: usize = 20;
-/// Longest label in a box.
-const MAX_LABEL: usize = 30;
+use super::Scroll;
 
 /// What a key asks the Graph view to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,103 +23,178 @@ pub enum Outcome {
     Ignored,
 }
 
+/// The three columns of the map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Column {
+    /// What uses the middle box.
+    Left,
+    #[default]
+    Center,
+    /// What the middle box uses.
+    Right,
+}
+
+/// A box of a side column: a node and its link with the middle box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Neighbour {
+    /// Index into [`Level::nodes`].
+    pub node: usize,
+    /// Index into [`Level::edges`].
+    pub edge: usize,
+}
+
+/// A place visited: a level, its middle box, and the boxes put in the middle
+/// before it at that level.
+#[derive(Debug, Clone)]
+struct Place {
+    scope: Scope,
+    /// `None`: the default box of the level.
+    center: Option<NodeRef>,
+    history: Vec<NodeRef>,
+}
+
+impl Place {
+    fn new(scope: Scope, center: Option<NodeRef>) -> Self {
+        Place {
+            scope,
+            center,
+            history: Vec::new(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct MapState {
-    /// `None` until the map is first shown.
-    scope: Option<Scope>,
-    /// `t`: every node of the level, not only around the changes.
-    pub all: bool,
+    /// The places entered, the shown one last; empty until first shown.
+    places: Vec<Place>,
     pub level: Level,
     /// The short name of each node, and the path it lives in (see [`Name`]).
     pub names: Vec<Name>,
-    /// The text of each box: the name, cut when too long.
-    pub labels: Vec<String>,
     /// Written on the border of each box: the number of changed symbols
     /// inside, `M` / `D` for a modified / removed symbol.
     pub badges: Vec<String>,
-    /// The frame of each node, when the level is drawn in frames (modules,
-    /// by parent package).
-    pub groups: Vec<usize>,
-    pub drawing: Drawing,
-    /// Links of the level drawn as arrows; the others only show in the
-    /// details and as the colour of the boxes around the selected one.
-    pub drawn: usize,
-    pub selected: usize,
-    /// Top-left cell of the drawing shown, kept by the renderer.
-    pub scroll: (u16, u16),
+    /// The middle box, `None` when the level is empty.
+    pub center: Option<usize>,
+    pub left: Vec<Neighbour>,
+    pub right: Vec<Neighbour>,
+    pub column: Column,
+    /// Cursor and scroll of the left and right columns, in boxes.
+    pub left_pos: Scroll,
+    pub right_pos: Scroll,
     /// Unused: the map has no list.
-    pub pos: super::Scroll,
+    pub pos: Scroll,
 }
 
 impl MapState {
     pub fn scope(&self) -> &Scope {
-        self.scope.as_ref().unwrap_or(&Scope::Root)
+        self.places.last().map_or(&Scope::Root, |p| &p.scope)
     }
 
-    /// Builds the map when it is first shown or the graph changed.
+    /// Builds the map when it is first shown.
     pub fn ensure(&mut self, g: &Graph) {
-        if self.scope.is_none() {
-            self.open(g, Scope::Root, None);
+        if self.places.is_empty() {
+            self.places.push(Place::new(Scope::Root, None));
+            self.show(g);
         }
     }
 
-    /// The graph changed: the same place, rebuilt.
+    /// The graph changed: the same place, rebuilt, the same box selected
+    /// when it is still there.
     pub fn refresh(&mut self, g: &Graph) {
-        if let Some(scope) = self.scope.take() {
-            let selected = self.selected_node().map(|n| n.of.clone());
-            self.open(g, scope, selected.as_ref());
+        if self.places.is_empty() {
+            return;
         }
-    }
-
-    /// Shows `scope`, the cursor on `select` when it is there, else on the
-    /// first changed node.
-    fn open(&mut self, g: &Graph, scope: Scope, select: Option<&NodeRef>) {
-        self.level = level::level(g, &scope, self.all, MAX_NODES);
-        let grouped = scope == Scope::Root;
-        self.names = names(&self.level.nodes, grouped);
-        self.labels = self.names.iter().map(|n| cut(&n.name)).collect();
-        self.badges = self.level.nodes.iter().map(badge).collect();
-        let widths: Vec<u16> = self
-            .labels
-            .iter()
-            .zip(&self.badges)
-            .map(|(l, b)| (l.width() as u16 + 4).max(b.width() as u16 + 6))
-            .collect();
-        let outside = |i: usize| self.level.nodes[i].outside;
-        // Heaviest first, as the level gives them.
-        let mut edges: Vec<(usize, usize)> =
-            self.level.edges.iter().map(|e| (e.from, e.to)).collect();
-        if edges.len() > MAX_LINKS {
-            edges.retain(|&(a, b)| !outside(a) && !outside(b));
-        }
-        if edges.len() > MAX_LINKS {
-            edges = reduce(self.level.nodes.len(), edges);
-        }
-        self.drawn = edges.len();
-        self.groups.clear();
-        self.drawing = if grouped {
-            // One frame per parent, in the order of the nodes.
-            let mut titles: Vec<String> = Vec::new();
-            for name in &self.names {
-                let g = titles.iter().position(|t| *t == name.frame);
-                self.groups.push(g.unwrap_or(titles.len()));
-                if g.is_none() {
-                    titles.push(name.frame.clone());
-                }
-            }
-            boxes::layout_grouped(&widths, &edges, &self.groups, &titles)
-        } else {
-            boxes::layout(&widths, &edges)
+        let (column, selected) = (self.column, self.selected_node().map(|n| n.of.clone()));
+        self.show(g);
+        let side = match column {
+            Column::Left => &self.left,
+            Column::Right => &self.right,
+            Column::Center => return,
         };
-        self.selected = select
-            .and_then(|of| self.level.nodes.iter().position(|n| n.of == *of))
-            .unwrap_or(0);
-        self.scroll = (0, 0);
-        self.scope = Some(scope);
+        let at = side
+            .iter()
+            .position(|n| Some(&self.level.nodes[n.node].of) == selected.as_ref());
+        if let Some(i) = at {
+            self.column = column;
+            self.pos_mut(column).cursor = i;
+        }
     }
 
+    /// Builds the level of the current place, its middle box on the place's
+    /// center (else the first box of the level: the most changed one).
+    fn show(&mut self, g: &Graph) {
+        let Some(place) = self.places.last_mut() else {
+            return;
+        };
+        self.level = level::level(g, &place.scope);
+        self.names = names(&self.level.nodes);
+        self.badges = self.level.nodes.iter().map(badge).collect();
+        let at = |of: &NodeRef| self.level.nodes.iter().position(|n| n.of == *of);
+        let center = place.center.as_ref().and_then(at).or_else(|| {
+            // The first box: the most changed one.
+            (!self.level.nodes.is_empty()).then_some(0)
+        });
+        place.center = center.map(|i| self.level.nodes[i].of.clone());
+        self.set_center(center);
+    }
+
+    /// Puts box `center` of the level in the middle, the cursor on it.
+    fn set_center(&mut self, center: Option<usize>) {
+        self.center = center;
+        (self.left, self.right) = match center {
+            Some(c) => columns(&self.level, c),
+            None => Default::default(),
+        };
+        self.column = Column::Center;
+        self.left_pos = Scroll::default();
+        self.right_pos = Scroll::default();
+    }
+
+    /// Puts another box of the level in the middle, remembering this one.
+    fn recenter(&mut self, node: usize) {
+        if Some(node) == self.center {
+            return;
+        }
+        let of = self.level.nodes[node].of.clone();
+        if let Some(place) = self.places.last_mut()
+            && let Some(old) = place.center.replace(of)
+        {
+            place.history.push(old);
+        }
+        self.set_center(Some(node));
+    }
+
+    pub fn center_node(&self) -> Option<&LevelNode> {
+        self.level.nodes.get(self.center?)
+    }
+
+    fn pos_mut(&mut self, column: Column) -> &mut Scroll {
+        match column {
+            Column::Left => &mut self.left_pos,
+            _ => &mut self.right_pos,
+        }
+    }
+
+    /// The selected box of a side column.
+    pub fn selected_neighbour(&self) -> Option<Neighbour> {
+        match self.column {
+            Column::Left => self.left.get(self.left_pos.cursor).copied(),
+            Column::Right => self.right.get(self.right_pos.cursor).copied(),
+            Column::Center => None,
+        }
+    }
+
+    /// The node of the selected box, in any column.
     pub fn selected_node(&self) -> Option<&LevelNode> {
-        self.level.nodes.get(self.selected)
+        match self.selected_neighbour() {
+            Some(n) => self.level.nodes.get(n.node),
+            None => self.center_node(),
+        }
+    }
+
+    /// The link of a side box with the middle one.
+    pub fn edge(&self, n: Neighbour) -> &LevelEdge {
+        &self.level.edges[n.edge]
     }
 
     /// The names from the root to the scope.
@@ -142,136 +212,211 @@ impl MapState {
         out
     }
 
-    /// Goes into the selected box.
+    /// The changed boxes of the level, and which of them is in the middle.
+    pub fn changed_position(&self) -> (Option<usize>, usize) {
+        let changed: Vec<usize> = changed_nodes(&self.level).collect();
+        let at = self
+            .center
+            .and_then(|c| changed.iter().position(|&i| i == c));
+        (at, changed.len())
+    }
+
+    /// `Enter`: down a level from the middle box; a side box to the middle,
+    /// or followed to its own level when it lies outside this one.
     fn enter(&mut self, g: &Graph) -> Outcome {
-        let Some(node) = self.selected_node() else {
+        let Some(node) = self.selected_node().cloned() else {
             return Outcome::None;
         };
-        let scope = match &node.of {
-            NodeRef::Module(m) => Scope::Module(m.clone()),
-            NodeRef::File(path) => Scope::File(path.clone()),
-            NodeRef::Symbol(s) => return Outcome::Symbol(*s),
+        let place = match self.selected_neighbour() {
+            None => match &node.of {
+                NodeRef::Module(m) => Place::new(Scope::Module(m.clone()), None),
+                NodeRef::File(path) => Place::new(Scope::File(path.clone()), None),
+                NodeRef::Symbol(s) => return Outcome::Symbol(*s),
+            },
+            Some(n) if !node.outside => {
+                self.recenter(n.node);
+                return Outcome::None;
+            }
+            Some(_) => {
+                let from = self.center_node().map(|c| c.of.clone());
+                match from.and_then(|from| level::follow(g, &from, &node.of)) {
+                    Some(to) => Place::new(level::home(g, &to), Some(to)),
+                    None => match &node.of {
+                        NodeRef::Module(m) => Place::new(Scope::Module(m.clone()), None),
+                        NodeRef::File(path) => Place::new(Scope::File(path.clone()), None),
+                        NodeRef::Symbol(s) => {
+                            Place::new(level::home(g, &node.of), Some(NodeRef::Symbol(*s)))
+                        }
+                    },
+                }
+            }
         };
-        self.open(g, scope, None);
+        self.places.push(place);
+        self.show(g);
         Outcome::None
     }
 
-    /// Back to the level containing this one, the cursor on where we were.
-    /// `false` at the root.
-    pub fn leave(&mut self, g: &Graph) -> bool {
-        let Some(parent) = level::parent(g, self.scope()) else {
+    /// `Backspace`: the previous middle box of this level, else the place
+    /// before this one, else up a level. `false` at the root with nothing
+    /// before.
+    pub fn back(&mut self, g: &Graph) -> bool {
+        let Some(place) = self.places.last_mut() else {
             return false;
         };
-        let from = match self.scope() {
-            Scope::Module(m) => Some(NodeRef::Module(m.clone())),
-            Scope::File(path) => Some(NodeRef::File(path.clone())),
+        if let Some(previous) = place.history.pop() {
+            place.center = Some(previous.clone());
+            let at = self.level.nodes.iter().position(|n| n.of == previous);
+            self.set_center(at);
+            return true;
+        }
+        if self.places.len() > 1 {
+            self.places.pop();
+            self.show(g);
+            return true;
+        }
+        let scope = self.scope().clone();
+        let Some(parent) = level::parent(g, &scope) else {
+            return false;
+        };
+        let from = match scope {
+            Scope::Module(m) => Some(NodeRef::Module(m)),
+            Scope::File(path) => Some(NodeRef::File(path)),
             Scope::Root => None,
         };
-        self.open(g, parent, from.as_ref());
+        self.places = vec![Place::new(parent, from)];
+        self.show(g);
         true
     }
 
-    fn step(&mut self, direction: Direction) {
-        if let Some(i) = boxes::step(&self.drawing.boxes, self.selected, direction) {
-            self.selected = i;
-        }
+    /// `h` / `l`: the column on the left / right, when it has boxes.
+    fn step(&mut self, right: bool) {
+        self.column = match (self.column, right) {
+            (Column::Center, false) if !self.left.is_empty() => Column::Left,
+            (Column::Center, true) if !self.right.is_empty() => Column::Right,
+            (Column::Left, true) | (Column::Right, false) => Column::Center,
+            (column, _) => column,
+        };
     }
 
-    /// `n` / `N`: the next changed box, in reading order.
+    /// `j` / `k`: the next / previous box of the column.
+    fn move_by(&mut self, delta: isize) {
+        let (pos, len) = match self.column {
+            Column::Left => (&mut self.left_pos, self.left.len()),
+            Column::Right => (&mut self.right_pos, self.right.len()),
+            Column::Center => return,
+        };
+        pos.cursor = pos
+            .cursor
+            .saturating_add_signed(delta)
+            .min(len.saturating_sub(1));
+        pos.clamp(len);
+    }
+
+    /// `n` / `N`: the next / previous changed box of the level to the middle.
     fn next_changed(&mut self, forward: bool) {
-        let mut order: Vec<usize> = (0..self.level.nodes.len())
-            .filter(|&i| self.level.nodes[i].changed() && !self.level.nodes[i].outside)
-            .collect();
-        let key = |i: usize| (self.drawing.boxes[i].x, self.drawing.boxes[i].y);
-        let Some(here) = self.drawing.boxes.get(self.selected).map(|b| (b.x, b.y)) else {
-            return;
-        };
-        order.sort_by_key(|&i| key(i));
-        let next = if forward {
-            order.iter().find(|&&i| key(i) > here).or(order.first())
-        } else {
-            order
-                .iter()
-                .rev()
-                .find(|&&i| key(i) < here)
-                .or(order.last())
-        };
-        if let Some(&i) = next {
-            self.selected = i;
+        if let Some(i) = next_changed(&self.level, self.center, forward) {
+            self.recenter(i);
         }
     }
 
     pub fn on_key(&mut self, g: &Graph, key: KeyEvent) -> Outcome {
+        let back = match key.code {
+            KeyCode::Char('o') => key.modifiers.contains(KeyModifiers::CONTROL),
+            KeyCode::Backspace | KeyCode::Char('u') | KeyCode::Char('-') => {
+                !key.modifiers.contains(KeyModifiers::CONTROL)
+            }
+            _ => false,
+        };
+        if back {
+            // At the root with nothing before: the Graph view's own back.
+            let handled = self.back(g) || key.code == KeyCode::Char('u');
+            return if handled {
+                Outcome::None
+            } else {
+                Outcome::Ignored
+            };
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Ignored;
         }
         match key.code {
-            KeyCode::Char('h') | KeyCode::Left => self.step(Direction::Left),
-            KeyCode::Char('l') | KeyCode::Right => self.step(Direction::Right),
-            KeyCode::Char('k') | KeyCode::Up => self.step(Direction::Up),
-            KeyCode::Char('j') | KeyCode::Down => self.step(Direction::Down),
+            KeyCode::Char('h') | KeyCode::Left => self.step(false),
+            KeyCode::Char('l') | KeyCode::Right => self.step(true),
+            KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
+            KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('n') => self.next_changed(true),
             KeyCode::Char('N') => self.next_changed(false),
             KeyCode::Enter | KeyCode::Char('i') => return self.enter(g),
-            KeyCode::Char('u') | KeyCode::Char('-') => {
-                self.leave(g);
-            }
-            KeyCode::Char('t') => {
-                self.all = !self.all;
-                let (scope, selected) = (
-                    self.scope().clone(),
-                    self.selected_node().map(|n| n.of.clone()),
-                );
-                self.open(g, scope, selected.as_ref());
-            }
             _ => return Outcome::Ignored,
         }
         Outcome::None
     }
 }
 
-/// Drops the edges a longer path already implies (`a → c` when `a → b → c`),
-/// the lightest first: what can be reached stays reachable.
-fn reduce(nodes: usize, mut edges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    let mut i = edges.len();
-    while i > 0 {
-        i -= 1;
-        let (from, to) = edges[i];
-        // Is `to` still reached from `from` without this edge?
-        let mut seen = vec![false; nodes];
-        let mut todo = vec![from];
-        seen[from] = true;
-        while let Some(v) = todo.pop() {
-            for (k, &(a, b)) in edges.iter().enumerate() {
-                if k != i && a == v && !seen[b] {
-                    seen[b] = true;
-                    todo.push(b);
-                }
-            }
-        }
-        if seen[to] {
-            edges.remove(i);
-        }
-    }
-    edges
+/// The changed boxes inside the level, in the order of the level.
+fn changed_nodes(level: &Level) -> impl Iterator<Item = usize> + '_ {
+    (0..level.nodes.len()).filter(|&i| level.nodes[i].changed() && !level.nodes[i].outside)
+}
+
+/// The columns around box `center`: what uses it, what it uses. Changed
+/// boxes first, then the most linked, then by name.
+fn columns(level: &Level, center: usize) -> (Vec<Neighbour>, Vec<Neighbour>) {
+    let side = |incoming: bool| {
+        let mut out: Vec<Neighbour> = level
+            .edges
+            .iter()
+            .enumerate()
+            .filter_map(|(edge, e)| {
+                let (near, far) = if incoming {
+                    (e.to, e.from)
+                } else {
+                    (e.from, e.to)
+                };
+                (near == center && far != center).then_some(Neighbour { node: far, edge })
+            })
+            .collect();
+        out.sort_by_key(|n| {
+            let node = &level.nodes[n.node];
+            let changed = node.changed() && !node.outside;
+            (
+                !changed,
+                std::cmp::Reverse(level.edges[n.edge].count),
+                node.label.clone(),
+            )
+        });
+        out
+    };
+    (side(true), side(false))
+}
+
+/// The changed box after (`forward`) or before `center`, in the order of the
+/// level, going round.
+fn next_changed(level: &Level, center: Option<usize>, forward: bool) -> Option<usize> {
+    let changed: Vec<usize> = changed_nodes(level).collect();
+    let here = center.and_then(|c| changed.iter().position(|&i| i == c));
+    let n = changed.len();
+    let i = match (here, forward) {
+        _ if n == 0 => return None,
+        (Some(i), true) => (i + 1) % n,
+        (Some(i), false) => (i + n - 1) % n,
+        (None, true) => 0,
+        (None, false) => n - 1,
+    };
+    Some(changed[i])
 }
 
 /// How a node is named on the map.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Name {
-    /// In the box: the last part of a module, a file name, a symbol.
+    /// In the box: the last parts of a module (as many as it takes to tell it
+    /// from the other modules of the level), a file name, a symbol.
     pub name: String,
     /// Where it lives: the package or directory above. Empty for a symbol.
     pub parent: String,
-    /// The frame it is drawn in, when the level has frames: its parent, or
-    /// itself when it is the parent of other modules.
-    pub frame: String,
 }
 
-/// The names of the nodes. A module is named by its last part; without
-/// frames (`framed` off), by as many last parts as it takes to tell it from
-/// the other modules of the level.
-fn names(nodes: &[LevelNode], framed: bool) -> Vec<Name> {
+/// The names of the nodes.
+fn names(nodes: &[LevelNode]) -> Vec<Name> {
     let split = |s: &str| -> (String, String) {
         match s.rfind(['.', '/']) {
             Some(i) => (s[..i].to_string(), s[i + 1..].to_string()),
@@ -293,8 +438,7 @@ fn names(nodes: &[LevelNode], framed: bool) -> Vec<Name> {
                         || other.ends_with(&format!(".{name}"))
                         || other.ends_with(&format!("/{name}"))
                 };
-                while !framed
-                    && !parent.is_empty()
+                while !parent.is_empty()
                     && modules.iter().any(|m| *m != full && ends_like(m, &name))
                 {
                     name = full[split(&parent).0.len()..]
@@ -302,39 +446,18 @@ fn names(nodes: &[LevelNode], framed: bool) -> Vec<Name> {
                         .to_string();
                     parent = split(&parent).0;
                 }
-                let has_children = modules.iter().any(|m| split(m).0 == *full);
-                let frame = if has_children || parent.is_empty() {
-                    full.clone()
-                } else {
-                    parent.clone()
-                };
-                Name {
-                    name,
-                    parent,
-                    frame,
-                }
+                Name { name, parent }
             }
             NodeRef::File(path) => Name {
                 name: n.label.clone(),
                 parent: path.rsplit_once('/').map_or("", |(dir, _)| dir).to_string(),
-                frame: String::new(),
             },
             NodeRef::Symbol(_) => Name {
                 name: n.label.clone(),
-                ..Name::default()
+                parent: String::new(),
             },
         })
         .collect()
-}
-
-/// A name cut to [`MAX_LABEL`].
-fn cut(name: &str) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    if chars.len() <= MAX_LABEL {
-        return name.to_string();
-    }
-    let head: String = chars[..MAX_LABEL - 1].iter().collect();
-    format!("{head}…")
 }
 
 /// What changed in a node, for the border of its box.
@@ -349,6 +472,10 @@ fn badge(node: &LevelNode) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use survol_core::graph::EdgeKind;
+
     use super::*;
 
     fn module(name: &str) -> LevelNode {
@@ -362,44 +489,125 @@ mod tests {
         }
     }
 
-    #[test]
-    fn implied_links_are_dropped_and_cycles_stay_connected() {
-        assert_eq!(reduce(3, vec![(0, 1), (1, 2), (0, 2)]), [(0, 1), (1, 2)]);
-        // 0 ↔ 1, both to 2: one of the two links to 2 stays.
-        let kept = reduce(3, vec![(0, 1), (1, 0), (0, 2), (1, 2)]);
-        assert_eq!(kept, [(0, 1), (1, 0), (0, 2)]);
+    fn edge(from: usize, to: usize, count: usize) -> LevelEdge {
+        LevelEdge {
+            from,
+            to,
+            count,
+            kinds: BTreeMap::from([(EdgeKind::Calls, count)]),
+        }
+    }
+
+    /// `center` (changed) used by a, b (changed), c; using d, e (outside).
+    fn star() -> Level {
+        let mut nodes: Vec<LevelNode> = ["center", "a", "b", "c", "d", "e"]
+            .iter()
+            .map(|n| module(n))
+            .collect();
+        nodes[0].changes = 2;
+        nodes[2].changes = 1;
+        nodes[5].changes = 4;
+        nodes[5].outside = true;
+        let edges = vec![
+            edge(1, 0, 5),
+            edge(2, 0, 1),
+            edge(3, 0, 5),
+            edge(0, 4, 2),
+            edge(0, 5, 1),
+            // Between neighbours: not in the columns.
+            edge(1, 3, 9),
+        ];
+        Level { nodes, edges }
+    }
+
+    fn labels(level: &Level, side: &[Neighbour]) -> Vec<String> {
+        side.iter()
+            .map(|n| level.nodes[n.node].label.clone())
+            .collect()
     }
 
     #[test]
-    fn modules_are_named_by_their_last_part_and_framed_by_parent() {
+    fn columns_hold_the_users_and_the_used_changed_first_then_by_links() {
+        let level = star();
+        let (left, right) = columns(&level, 0);
+        // b is changed; a and c have as many links, by name.
+        assert_eq!(labels(&level, &left), ["b", "a", "c"]);
+        // e is changed but outside the level: it does not count as changed.
+        assert_eq!(labels(&level, &right), ["d", "e"]);
+        assert_eq!(level.edges[right[0].edge].count, 2);
+
+        // Around a: what it uses, the middle box and c.
+        let (left, right) = columns(&level, 1);
+        assert!(left.is_empty());
+        assert_eq!(labels(&level, &right), ["center", "c"]);
+    }
+
+    #[test]
+    fn changed_boxes_follow_each_other_round_the_level() {
+        let level = star();
+        assert_eq!(next_changed(&level, Some(0), true), Some(2));
+        assert_eq!(next_changed(&level, Some(2), true), Some(0));
+        assert_eq!(next_changed(&level, Some(0), false), Some(2));
+        // From an unchanged box: the first / last changed one.
+        assert_eq!(next_changed(&level, Some(1), true), Some(0));
+        assert_eq!(next_changed(&level, Some(1), false), Some(2));
+        assert_eq!(next_changed(&Level::default(), None, true), None);
+    }
+
+    #[test]
+    fn keys_move_between_columns_and_within_them() {
+        let mut map = MapState {
+            level: star(),
+            ..MapState::default()
+        };
+        map.set_center(Some(0));
+        let name = |map: &MapState| map.selected_node().unwrap().label.clone();
+        assert_eq!(name(&map), "center");
+        map.step(false);
+        assert_eq!((map.column, name(&map)), (Column::Left, "b".into()));
+        map.move_by(1);
+        map.move_by(1);
+        map.move_by(1);
+        assert_eq!(name(&map), "c", "the cursor stops on the last box");
+        map.step(false);
+        assert_eq!(map.column, Column::Left, "nothing further left");
+        map.step(true);
+        map.step(true);
+        assert_eq!((map.column, name(&map)), (Column::Right, "d".into()));
+
+        // To the middle; back to the previous middle box.
+        map.places
+            .push(Place::new(Scope::Root, Some(map.level.nodes[0].of.clone())));
+        map.recenter(4);
+        assert_eq!((map.column, name(&map)), (Column::Center, "d".into()));
+        assert_eq!(labels(&map.level, &map.left), ["center"]);
+        map.next_changed(true);
+        assert_eq!(name(&map), "center");
+        let place = map.places.last().unwrap();
+        assert_eq!(place.history.len(), 2);
+    }
+
+    #[test]
+    fn modules_are_named_by_as_many_last_parts_as_they_need() {
         let nodes = [
             module("org.acme.app"),
             module("org.acme.app.owner"),
             module("org.acme.app.vet"),
             module("src/app/owner"),
         ];
-        let framed = names(&nodes, true);
-        let name = |n: &Name| (n.name.clone(), n.frame.clone());
-        assert_eq!(name(&framed[0]), ("app".into(), "org.acme.app".into()));
-        assert_eq!(name(&framed[1]), ("owner".into(), "org.acme.app".into()));
-        assert_eq!(name(&framed[3]), ("owner".into(), "src/app".into()));
-        assert_eq!(framed[1].parent, "org.acme.app");
-
-        // Without frames, two modules of the same name are told apart.
-        let plain: Vec<String> = names(&nodes, false).into_iter().map(|n| n.name).collect();
+        let named = names(&nodes);
+        let plain: Vec<&str> = named.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(plain, ["app", "app.owner", "vet", "app/owner"]);
+        assert_eq!(named[2].parent, "org.acme.app");
     }
 
     #[test]
-    fn long_names_are_cut_and_changes_go_to_the_badge() {
+    fn changes_go_to_the_badge() {
         let mut m = module("a");
         assert_eq!(badge(&m), "");
         m.changes = 342;
         assert_eq!(badge(&m), "342");
         m.outside = true;
         assert_eq!(badge(&m), "");
-        let long = "x".repeat(40);
-        assert_eq!(cut(&long).chars().count(), MAX_LABEL);
-        assert!(cut(&long).ends_with('…'));
     }
 }

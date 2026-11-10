@@ -1,7 +1,6 @@
 //! State and key handling of each view. Rendering lives in `ui/`.
 
 pub mod ask;
-pub mod boxes;
 pub mod comments;
 pub mod diff;
 pub mod explorer;

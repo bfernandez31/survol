@@ -1,28 +1,37 @@
-//! Rendering of the map mode: the level drawn as boxes and arrows, and the
-//! links of the selected box on the right.
+//! Rendering of the map mode: the middle box, what uses it on the left, what
+//! it uses on the right, arrows only from the left column to the middle and
+//! from the middle to the right column; the selected box on the right pane.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use survol_core::graph::Graph;
 use survol_core::graph::level::{LevelEdge, LevelNode, NodeRef, Scope};
+use survol_core::graph::{EdgeKind, Graph};
 use unicode_width::UnicodeWidthChar;
 
 use super::rows::{truncate_left, truncate_right};
 use super::{pane, wrap};
 use crate::app::App;
 use crate::theme::theme;
-use crate::views::boxes::{self, Wire};
+use crate::views::Scroll;
 use crate::views::graph::{kind_label, kind_name};
-use crate::views::map::MapState;
+use crate::views::map::{Column, MapState, Neighbour};
 
 /// Width of the details pane, when there is room for it.
 const DETAILS: u16 = 42;
+/// Height of a box of a side column.
+const BOX: u16 = 3;
+
+// Directions a line leaves a cell in.
+const UP: u8 = 1;
+const DOWN: u8 = 2;
+const LEFT: u8 = 4;
+const RIGHT: u8 = 8;
 
 pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
     let Some(g) = &app.sh.graph else {
@@ -30,9 +39,9 @@ pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
     };
     let map = &mut app.graph.map;
     map.ensure(g);
-    let (main, side) = if body.width >= DETAILS * 2 + 20 {
+    let (main, side) = if body.width >= DETAILS * 2 + 40 {
         let [main, side] =
-            Split::horizontal([Constraint::Min(20), Constraint::Length(DETAILS)]).areas(body);
+            Split::horizontal([Constraint::Min(40), Constraint::Length(DETAILS)]).areas(body);
         (main, Some(side))
     } else {
         (body, None)
@@ -41,16 +50,20 @@ pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
     let block = pane(true).title(title(map));
     let inner = block.inner(main);
     f.render_widget(block, main);
-    if map.level.nodes.is_empty() {
+    if map.center.is_none() {
         let text = match map.scope() {
             Scope::Root => "  No module in an indexed language.",
             Scope::Module(_) => "  No file here.",
             Scope::File(_) => "  No symbol in this file.",
         };
         f.render_widget(Paragraph::new(text.fg(theme().meta)), inner);
+    } else if inner.width < 40 || inner.height < 8 {
+        f.render_widget(
+            Paragraph::new("  Too small for the map.".fg(theme().meta)),
+            inner,
+        );
     } else {
-        follow(map, inner);
-        draw(f.buffer_mut(), inner, map);
+        draw(f.buffer_mut(), inner, g, map);
     }
     if let Some(side) = side {
         render_details(f, side, g, map);
@@ -60,256 +73,378 @@ pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
 fn title(map: &MapState) -> Line<'static> {
     let t = theme();
     let mut spans = vec![Span::raw(" ")];
-    let crumbs = map.breadcrumb();
-    for (i, c) in crumbs.iter().enumerate() {
-        if i > 0 {
-            spans.push(" › ".fg(t.meta));
-        }
-        let last = i + 1 == crumbs.len();
-        spans.push(if last {
-            c.clone().bold()
-        } else {
-            c.clone().fg(t.meta)
-        });
+    for c in map.breadcrumb() {
+        spans.push(truncate_left(&c, 32).fg(t.meta));
+        spans.push(" › ".fg(t.meta));
     }
-    let what = if map.all { "all" } else { "around the changes" };
-    spans.push(format!("  {what}").fg(t.meta));
-    if map.level.hidden > 0 {
-        spans.push(format!(", {} hidden", map.level.hidden).fg(t.meta));
+    if let Some(c) = map.center {
+        spans.push(map.names[c].name.clone().bold());
     }
-    if map.drawn < map.level.edges.len() {
-        spans.push(format!(", {} of {} links drawn", map.drawn, map.level.edges.len()).fg(t.meta));
+    let (at, changed) = map.changed_position();
+    if changed > 0 {
+        let at = at.map_or("-".to_string(), |i| (i + 1).to_string());
+        spans.push(format!("  changed {at}/{changed}").fg(t.meta));
     }
     spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
-/// Scrolls so that the selected box is in `area`, with a margin.
-fn follow(map: &mut MapState, area: Rect) {
-    let Some(b) = map.drawing.boxes.get(map.selected) else {
-        return;
+/// The boxes of a side column shown in `height` rows: their indexes in the
+/// column and their top rows (from 0), and the boxes left out above and
+/// below. Over the height, a row at the top and one at the bottom say how
+/// many are left out; under it, the boxes are centred.
+fn window(pos: &mut Scroll, len: usize, height: u16) -> (Vec<(usize, u16)>, usize, usize) {
+    let fits = (height / BOX) as usize;
+    let (capacity, first) = if len > fits {
+        (((height.saturating_sub(2)) / BOX).max(1) as usize, 1)
+    } else {
+        (fits, (height - len as u16 * BOX) / 2)
     };
-    let axis = |scroll: u16, start: u16, len: u16, view: u16, total: u16, margin: u16| -> u16 {
-        if total <= view {
-            return 0;
-        }
-        let mut s = scroll;
-        if start < s + margin {
-            s = start.saturating_sub(margin);
-        }
-        if start + len + margin > s + view {
-            s = (start + len + margin).saturating_sub(view);
-        }
-        s.min(total - view)
-    };
-    map.scroll = (
-        axis(map.scroll.0, b.x, b.width, area.width, map.drawing.width, 6),
-        axis(
-            map.scroll.1,
-            b.y,
-            b.height,
-            area.height,
-            map.drawing.height,
-            2,
-        ),
-    );
+    pos.height = capacity;
+    pos.clamp(len);
+    let end = (pos.scroll + capacity).min(len);
+    let shown = (pos.scroll..end)
+        .enumerate()
+        .map(|(k, i)| (i, first + k as u16 * BOX))
+        .collect();
+    (shown, pos.scroll, len - end)
 }
 
-fn draw(buf: &mut Buffer, area: Rect, map: &MapState) {
-    let t = theme();
-    let (sx, sy) = map.scroll;
-    // A cell of the drawing on the screen, when it is in the pane.
-    let at = |x: u16, y: u16| -> Option<(u16, u16)> {
-        let (x, y) = (x.checked_sub(sx)?, y.checked_sub(sy)?);
-        (x < area.width && y < area.height).then(|| (area.x + x, area.y + y))
-    };
-    let mut put = |x: u16, y: u16, c: char, style: Style| {
-        if let Some(cell) = at(x, y).and_then(|p| buf.cell_mut(p)) {
+/// The cells of the drawing, clipped to the pane.
+struct Canvas<'a> {
+    buf: &'a mut Buffer,
+    area: Rect,
+}
+
+impl Canvas<'_> {
+    fn put(&mut self, x: u16, y: u16, c: char, style: Style) {
+        if self.area.contains((x, y).into())
+            && let Some(cell) = self.buf.cell_mut((x, y))
+        {
             cell.set_char(c).set_style(style);
         }
-    };
-
-    // Every line first, then the ones of the selected box over them: what it
-    // uses in one colour, what uses it in another.
-    let sel = map.selected;
-    let mut lines = |wires: &mut dyn Iterator<Item = &Wire>, style: Style| {
-        let wires: Vec<&Wire> = wires.collect();
-        let mut masks: HashMap<(u16, u16), u8> = HashMap::new();
-        for w in &wires {
-            for &(cell, m) in &w.cells {
-                *masks.entry(cell).or_default() |= m;
-            }
-        }
-        for ((x, y), m) in masks {
-            put(x, y, boxes::glyph(m), style);
-        }
-        for w in &wires {
-            if let Some(((x, y), c)) = w.arrow {
-                put(x, y, c, style);
-            }
-        }
-    };
-    // The frames, and the arrows between them: those of the selected box's
-    // frame that one of its own links goes through take its colours.
-    let group = |i: usize| map.groups.get(i).copied();
-    let through = |from: usize, to: usize| {
-        map.level.edges.iter().any(|e| {
-            let ends = (e.from == sel && from == e.from) || (e.to == sel && to == e.to);
-            ends && group(e.from) == group(from) && group(e.to) == group(to)
-        })
-    };
-    let links = &map.drawing.links;
-    lines(&mut links.iter(), Style::new().fg(t.rule));
-    if let Some(home) = group(sel) {
-        let node_in = |g: usize| (0..map.groups.len()).find(|&i| map.groups[i] == g);
-        let hot = |w: &&Wire, out: bool| {
-            let (near, far) = if out { (w.from, w.to) } else { (w.to, w.from) };
-            near == home
-                && node_in(far).is_some_and(|other| {
-                    if out {
-                        through(sel, other)
-                    } else {
-                        through(other, sel)
-                    }
-                })
-        };
-        lines(
-            &mut links.iter().filter(|w| hot(w, false)),
-            Style::new().fg(t.relation).bold(),
-        );
-        lines(
-            &mut links.iter().filter(|w| hot(w, true)),
-            Style::new().fg(t.accent).bold(),
-        );
-    }
-    let wires = &map.drawing.wires;
-    lines(&mut wires.iter(), Style::new().fg(t.rule));
-    lines(
-        &mut wires.iter().filter(|w| w.to == sel && w.from != sel),
-        Style::new().fg(t.relation).bold(),
-    );
-    lines(
-        &mut wires.iter().filter(|w| w.from == sel),
-        Style::new().fg(t.accent).bold(),
-    );
-
-    for frame in &map.drawing.frames {
-        let r = frame.rect;
-        let style = Style::new().fg(t.rule);
-        let (x1, y1) = (r.x + r.width - 1, r.y + r.height - 1);
-        for x in r.x + 1..x1 {
-            put(x, r.y, '─', style);
-            put(x, y1, '─', style);
-        }
-        for y in r.y + 1..y1 {
-            put(r.x, y, '│', style);
-            put(x1, y, '│', style);
-        }
-        put(r.x, r.y, '╭', style);
-        put(x1, r.y, '╮', style);
-        put(r.x, y1, '╰', style);
-        put(x1, y1, '╯', style);
-        let title = format!(" {} ", frame.title);
-        write(&mut put, r.x + 1, r.y, x1, &title, Style::new().fg(t.dir));
     }
 
-    for (i, node) in map.level.nodes.iter().enumerate() {
-        let r = map.drawing.boxes[i];
-        let selected = i == sel;
-        // Around the selected box: what it uses, what uses it, drawn or not.
-        let linked =
-            |from: usize, to: usize| map.level.edges.iter().any(|e| e.from == from && e.to == to);
-        let border = if selected {
-            Style::new().fg(t.border_focus).bold()
-        } else if linked(sel, i) {
-            Style::new().fg(t.accent).bold()
-        } else if linked(i, sel) {
-            Style::new().fg(t.relation).bold()
-        } else if node.outside {
-            Style::new().fg(t.meta)
-        } else {
-            Style::new().fg(t.border)
-        };
-        // Outside the level: a dashed box.
-        let (h, v) = if node.outside {
+    /// Writes `text` from `x`, stopping before `end`.
+    fn write(&mut self, x: u16, y: u16, end: u16, text: &str, style: Style) {
+        let mut x = x;
+        for c in text.chars() {
+            let w = c.width().unwrap_or(0) as u16;
+            if w == 0 || x + w > end {
+                continue;
+            }
+            self.put(x, y, c, style);
+            x += w;
+        }
+    }
+
+    fn rect(&mut self, r: Rect, dashed: bool, style: Style) {
+        let (h, v) = if dashed {
             ('┄', '┆')
         } else {
             ('─', '│')
         };
         let (x1, y1) = (r.x + r.width - 1, r.y + r.height - 1);
         for x in r.x + 1..x1 {
-            put(x, r.y, h, border);
-            put(x, y1, h, border);
+            self.put(x, r.y, h, style);
+            self.put(x, y1, h, style);
         }
         for y in r.y + 1..y1 {
-            put(r.x, y, v, border);
-            put(x1, y, v, border);
+            self.put(r.x, y, v, style);
+            self.put(x1, y, v, style);
             for x in r.x + 1..x1 {
-                put(x, y, ' ', Style::new());
+                self.put(x, y, ' ', Style::new());
             }
         }
-        put(r.x, r.y, '╭', border);
-        put(x1, r.y, '╮', border);
-        put(r.x, y1, '╰', border);
-        put(x1, y1, '╯', border);
-        // The name in the text colour when the review changes it, greyed
-        // otherwise: what changed is on the border.
-        let mut text = if node.removed {
-            Style::new().fg(t.status_deleted).crossed_out()
-        } else if node.changed() && !node.outside {
-            Style::new()
-        } else {
-            Style::new().fg(t.meta)
+        self.put(r.x, r.y, '╭', style);
+        self.put(x1, r.y, '╮', style);
+        self.put(r.x, y1, '╰', style);
+        self.put(x1, y1, '╯', style);
+    }
+}
+
+/// A line between a side box and the middle one: its cells with the
+/// directions it leaves them in, where its label goes, and its arrow head.
+struct Wire {
+    cells: Vec<(u16, u16, u8)>,
+    label: (u16, u16, u16),
+    head: (u16, u16),
+}
+
+/// The line from row `from` at `x0` to row `to` at `x1`, turning at column
+/// `turn`.
+fn wire(x0: u16, from: u16, turn: u16, x1: u16, to: u16) -> Vec<(u16, u16, u8)> {
+    let vertical = |a: u16, b: u16| match a.cmp(&b) {
+        std::cmp::Ordering::Less => DOWN,
+        std::cmp::Ordering::Greater => UP,
+        std::cmp::Ordering::Equal => 0,
+    };
+    let mut cells: Vec<(u16, u16, u8)> = (x0..turn).map(|x| (x, from, LEFT | RIGHT)).collect();
+    let (out, back) = (vertical(from, to), vertical(to, from));
+    if from == to {
+        cells.push((turn, from, LEFT | RIGHT));
+    } else {
+        cells.push((turn, from, LEFT | out));
+        cells.extend((from.min(to) + 1..from.max(to)).map(|y| (turn, y, UP | DOWN)));
+        cells.push((turn, to, RIGHT | back));
+    }
+    cells.extend((turn + 1..x1).map(|x| (x, to, LEFT | RIGHT)));
+    cells
+}
+
+fn glyph(m: u8) -> char {
+    match m {
+        m if m == UP | DOWN => '│',
+        m if m == DOWN | RIGHT => '╭',
+        m if m == DOWN | LEFT => '╮',
+        m if m == UP | RIGHT => '╰',
+        m if m == UP | LEFT => '╯',
+        m if m == UP | DOWN | RIGHT => '├',
+        m if m == UP | DOWN | LEFT => '┤',
+        m if m == LEFT | RIGHT | DOWN => '┬',
+        m if m == LEFT | RIGHT | UP => '┴',
+        m if m == UP | DOWN | LEFT | RIGHT => '┼',
+        m if m & (UP | DOWN) != 0 => '│',
+        _ => '─',
+    }
+}
+
+/// The label of a link: its kind (`+` when there are others), and how many.
+fn link_label(e: &LevelEdge) -> String {
+    let main = e.kinds.iter().max_by_key(|(_, n)| **n).map(|(k, _)| *k);
+    let mut out = main.map_or(String::new(), short_kind);
+    if e.kinds.len() > 1 {
+        out.push('+');
+    }
+    if e.count > 1 {
+        out.push_str(&format!(" {}", e.count));
+    }
+    out
+}
+
+fn short_kind(k: EdgeKind) -> String {
+    match k {
+        EdgeKind::Calls => "calls",
+        EdgeKind::Imports => "imports",
+        EdgeKind::Inherits => "extends",
+        EdgeKind::Overrides => "overrides",
+        EdgeKind::Uses => "uses",
+        EdgeKind::Tests => "tests",
+        EdgeKind::Injects => "injects",
+        EdgeKind::HttpCalls => "http",
+        EdgeKind::Configures => "config",
+        EdgeKind::Routes => "routes",
+        EdgeKind::Publishes => "events",
+    }
+    .to_string()
+}
+
+fn draw(buf: &mut Buffer, area: Rect, g: &Graph, map: &mut MapState) {
+    let t = theme();
+    let Some(center) = map.center else {
+        return;
+    };
+    let mut cv = Canvas { buf, area };
+    // Columns, and the lanes the arrows take between them.
+    // The middle box a little wider than the others.
+    let gap = if area.width >= 110 { 18 } else { 12 };
+    let side = (area.width - 2 * gap) * 3 / 10;
+    let width = area.width - 2 * gap - 2 * side;
+    let (lx, cx) = (area.x, area.x + side + gap);
+    let rx = cx + width + gap;
+    let rw = area.x + area.width - rx;
+    let top = area.y + 2;
+    let height = area.height - 2;
+
+    let (left_n, right_n) = (map.left.len(), map.right.len());
+    cv.write(
+        lx,
+        area.y,
+        lx + side,
+        &format!("used by ({left_n})"),
+        Style::new().fg(t.relation).bold(),
+    );
+    cv.write(
+        rx,
+        area.y,
+        rx + rw,
+        &format!("uses ({right_n})"),
+        Style::new().fg(t.accent).bold(),
+    );
+
+    // The middle box: its name, where it lives, what it holds.
+    let node = &map.level.nodes[center];
+    let name = &map.names[center];
+    let room = width.saturating_sub(4) as usize;
+    let mut lines: Vec<(String, Style)> = wrap(&name.name, room)
+        .into_iter()
+        .map(|l| (l, name_style(node).bold()))
+        .collect();
+    let names = lines.len();
+    if !name.parent.is_empty() {
+        lines.push((truncate_left(&name.parent, room), Style::new().fg(t.dir)));
+    }
+    lines.push((describe(g, node), Style::new().fg(t.meta)));
+    let ch = lines.len() as u16 + 2;
+    let cy = top + height.saturating_sub(ch) / 2;
+    let row = cy + 1;
+
+    // The lines: every one, then the selected one over them, bold.
+    let (left, la, lb) = window(&mut map.left_pos, left_n, height);
+    let (right, ra, rb) = window(&mut map.right_pos, right_n, height);
+    let mut wires: Vec<(Wire, Neighbour, bool)> = Vec::new();
+    for &(i, y) in &left {
+        let (from, turn) = (top + y + 1, cx - 3);
+        let w = Wire {
+            cells: wire(lx + side, from, turn, cx - 1, row),
+            label: (lx + side + 1, from, turn.saturating_sub(1)),
+            head: (cx - 1, row),
         };
-        if selected {
-            text = text.bold().reversed();
+        wires.push((w, map.left[i], true));
+    }
+    for &(i, y) in &right {
+        let (to, turn) = (top + y + 1, cx + width + 2);
+        let w = Wire {
+            cells: wire(cx + width, row, turn, rx - 1, to),
+            label: (turn + 2, to, rx - 2),
+            head: (rx - 1, to),
+        };
+        wires.push((w, map.right[i], false));
+    }
+    let mut masks: BTreeMap<(u16, u16), u8> = BTreeMap::new();
+    for (w, _, _) in &wires {
+        for &(x, y, m) in &w.cells {
+            *masks.entry((x, y)).or_default() |= m;
         }
-        write(&mut put, r.x + 2, r.y + 1, x1, &map.labels[i], text);
-        let badge = &map.badges[i];
-        if !badge.is_empty() {
-            let colour = if node.removed {
-                t.status_deleted
+    }
+    let selected = map.selected_neighbour();
+    let colour = |incoming: bool| if incoming { t.relation } else { t.accent };
+    let mut wires: Vec<_> = wires.into_iter().collect();
+    // The selected line last, over the others.
+    wires.sort_by_key(|(_, n, _)| Some(*n) == selected);
+    for (w, n, incoming) in &wires {
+        let hot = Some(*n) == selected;
+        let style = if hot {
+            Style::new().fg(colour(*incoming)).bold()
+        } else {
+            Style::new().fg(colour(*incoming))
+        };
+        for &(x, y, _) in &w.cells {
+            cv.put(x, y, glyph(masks[&(x, y)]), style);
+        }
+        cv.put(w.head.0, w.head.1, '▶', style);
+        // The kind and the number of links, else only the number.
+        let e = &map.level.edges[n.edge];
+        let (x, y, end) = w.label;
+        let room = end.saturating_sub(x) as usize;
+        let mut label = format!(" {} ", link_label(e));
+        if label.chars().count() > room {
+            label = format!(" ×{} ", e.count);
+        }
+        if label.chars().count() <= room {
+            let style = if hot { style } else { Style::new().fg(t.meta) };
+            cv.write(x, y, end, &label, style);
+        }
+    }
+
+    // The boxes.
+    let focus = Style::new().fg(t.border_focus).bold();
+    let middle = Rect::new(cx, cy, width, ch);
+    let border = if map.column == Column::Center {
+        focus
+    } else {
+        Style::new().fg(t.border).bold()
+    };
+    cv.rect(middle, false, border);
+    for (k, (text, style)) in lines.iter().enumerate() {
+        let style = if k < names && map.column == Column::Center {
+            style.reversed()
+        } else {
+            *style
+        };
+        let text = truncate_right(text, width.saturating_sub(4) as usize);
+        cv.write(cx + 2, cy + 1 + k as u16, cx + width - 1, &text, style);
+    }
+    badge(&mut cv, middle, &map.badges[center], node);
+    let sides = [(&left, &map.left, lx, side), (&right, &map.right, rx, rw)];
+    for (shown, column, x, w) in sides {
+        for &(i, y) in shown {
+            let n = column[i];
+            let node = &map.level.nodes[n.node];
+            let r = Rect::new(x, top + y, w, BOX);
+            let hot = Some(n) == selected;
+            let border = if hot {
+                focus
+            } else if node.outside {
+                Style::new().fg(t.meta)
             } else {
-                t.status_modified
+                Style::new().fg(t.border)
             };
-            let badge = format!(" {badge} ");
-            let x = x1.saturating_sub(badge.chars().count() as u16 + 1);
-            write(&mut put, x, y1, x1, &badge, Style::new().fg(colour));
+            cv.rect(r, node.outside, border);
+            let style = if hot {
+                name_style(node).bold().reversed()
+            } else {
+                name_style(node)
+            };
+            let text = truncate_right(&map.names[n.node].name, w.saturating_sub(4) as usize);
+            cv.write(x + 2, r.y + 1, x + w - 1, &text, style);
+            badge(&mut cv, r, &map.badges[n.node], node);
+        }
+    }
+    // What does not fit.
+    let more = Style::new().fg(t.meta).italic();
+    for (above, below, x, w) in [(la, lb, lx, side), (ra, rb, rx, rw)] {
+        if above > 0 {
+            cv.write(x + 2, top, x + w, &format!("↑ +{above}"), more);
+        }
+        if below > 0 {
+            cv.write(x + 2, top + height - 1, x + w, &format!("↓ +{below}"), more);
         }
     }
 }
 
-/// Writes `text` from `x`, stopping before `end`.
-fn write(
-    put: &mut impl FnMut(u16, u16, char, Style),
-    x: u16,
-    y: u16,
-    end: u16,
-    text: &str,
-    style: Style,
-) {
-    let mut x = x;
-    for c in text.chars() {
-        let w = c.width().unwrap_or(0) as u16;
-        if w == 0 || x + w > end {
-            continue;
-        }
-        put(x, y, c, style);
-        x += w;
+/// The name in the text colour when the review changes it, greyed otherwise.
+fn name_style(node: &LevelNode) -> Style {
+    let t = theme();
+    if node.removed {
+        Style::new().fg(t.status_deleted).crossed_out()
+    } else if node.changed() && !node.outside {
+        Style::new()
+    } else {
+        Style::new().fg(t.meta)
     }
+}
+
+/// What changed inside, on the bottom border.
+fn badge(cv: &mut Canvas, r: Rect, badge: &str, node: &LevelNode) {
+    if badge.is_empty() {
+        return;
+    }
+    let t = theme();
+    let colour: Color = if node.removed {
+        t.status_deleted
+    } else {
+        t.status_modified
+    };
+    let badge = format!(" {badge} ");
+    let x1 = r.x + r.width - 1;
+    let x = x1.saturating_sub(badge.chars().count() as u16 + 1);
+    cv.write(x, r.y + r.height - 1, x1, &badge, Style::new().fg(colour));
 }
 
 fn render_details(f: &mut Frame, area: Rect, g: &Graph, map: &MapState) {
     let t = theme();
-    let block = pane(false).title(" links ");
+    let block = pane(false).title(" details ");
     let width = block.inner(area).width as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    let Some(node) = map.selected_node() else {
+    let room = width.saturating_sub(1);
+    let (Some(node), Some(center)) = (map.selected_node(), map.center) else {
         f.render_widget(block, area);
         return;
     };
-    let room = width.saturating_sub(1);
-    let name = &map.names[map.selected];
+    let neighbour = map.selected_neighbour();
+    let index = neighbour.map_or(center, |n| n.node);
+    let name = &map.names[index];
+    let mut lines: Vec<Line> = Vec::new();
     for l in wrap(&name.name, room) {
         lines.push(Line::from(format!(" {l}").bold()));
     }
@@ -321,81 +456,83 @@ fn render_details(f: &mut Frame, area: Rect, g: &Graph, map: &MapState) {
     for l in wrap(&describe(g, node), room) {
         lines.push(Line::from(format!(" {l}").fg(t.meta)));
     }
-    let enter = match (&node.of, node.outside) {
-        (NodeRef::Symbol(_), _) => "Enter: its callers, callees and tests",
-        (_, true) => "Outside this level. Enter: go there",
-        (NodeRef::Module(_), _) => "Enter: its files",
-        (NodeRef::File(_), _) => "Enter: its symbols",
+    let enter = match (&node.of, neighbour.is_some(), node.outside) {
+        (_, true, true) => "Outside this level. Enter: follow the link there",
+        (_, true, false) => "Enter: to the middle",
+        (NodeRef::Symbol(_), false, _) => "Enter: its callers, callees and tests",
+        (NodeRef::Module(_), false, _) => "Enter: its files",
+        (NodeRef::File(_), false, _) => "Enter: its symbols",
     };
-    lines.push(Line::from(format!(" {enter}").fg(t.meta).italic()));
+    for l in wrap(enter, room) {
+        lines.push(Line::from(format!(" {l}").fg(t.meta).italic()));
+    }
+    lines.push(Line::default());
 
-    let sel = map.selected;
-    let mut section = |title: &str, colour, edges: Vec<(&LevelEdge, usize)>| {
-        if edges.is_empty() {
-            return;
-        }
-        lines.push(Line::default());
-        lines.push(Line::from(
-            format!(" {title} ({})", edges.len()).fg(colour).bold(),
-        ));
-        for (e, other) in edges {
-            let kinds: Vec<String> = e
-                .kinds
-                .iter()
-                .map(|(k, n)| format!("{} {n}", kind_name(k)))
-                .collect();
-            let name = &map.names[other];
-            let count = format!("×{}", e.count);
-            let room = width.saturating_sub(count.chars().count() + 4);
-            let short = truncate_right(&name.name, room);
-            let gap = width.saturating_sub(short.chars().count() + count.chars().count() + 3);
-            lines.push(Line::from(vec![
-                format!("  {short}").into(),
-                " ".repeat(gap).into(),
-                count.fg(colour),
-            ]));
-            let room = width.saturating_sub(5);
-            if !name.parent.is_empty() {
-                lines.push(Line::from(
-                    format!("    {}", truncate_left(&name.parent, room)).fg(t.dir),
-                ));
-            }
-            lines.push(Line::from(
-                format!("    {}", truncate_right(&kinds.join(", "), room)).fg(t.meta),
-            ));
+    let kinds = |kinds: &BTreeMap<EdgeKind, usize>, lines: &mut Vec<Line>| {
+        for (k, n) in kinds {
+            lines.push(Line::from(format!("   {} {n}", kind_name(k)).fg(t.meta)));
         }
     };
-    let edges = &map.level.edges;
-    section(
-        "→ uses",
-        t.accent,
-        edges
-            .iter()
-            .filter(|e| e.from == sel)
-            .map(|e| (e, e.to))
-            .collect(),
-    );
-    section(
-        "← used by",
-        t.relation,
-        edges
-            .iter()
-            .filter(|e| e.to == sel)
-            .map(|e| (e, e.from))
-            .collect(),
-    );
+    let center_name = &map.names[center].name;
+    match neighbour {
+        Some(n) => {
+            let e = map.edge(n);
+            let (title, colour) = if map.column == Column::Left {
+                (format!("uses {center_name}"), t.relation)
+            } else {
+                (format!("used by {center_name}"), t.accent)
+            };
+            lines.push(Line::from(
+                format!(
+                    " {} ×{}",
+                    truncate_right(&title, room.saturating_sub(6)),
+                    e.count
+                )
+                .fg(colour)
+                .bold(),
+            ));
+            kinds(&e.kinds, &mut lines);
+        }
+        None => {
+            // The links of each side, by kind.
+            for (title, side, colour) in [
+                ("used by", &map.left, t.relation),
+                ("uses", &map.right, t.accent),
+            ] {
+                let mut by_kind: BTreeMap<EdgeKind, usize> = BTreeMap::new();
+                let mut count = 0;
+                for &n in side {
+                    let e = map.edge(n);
+                    count += e.count;
+                    for (k, c) in &e.kinds {
+                        *by_kind.entry(*k).or_default() += c;
+                    }
+                }
+                lines.push(Line::from(
+                    format!(" {title}: {} box(es), {count} link(s)", side.len())
+                        .fg(colour)
+                        .bold(),
+                ));
+                kinds(&by_kind, &mut lines);
+            }
+        }
+    }
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// What the box holds, in a few words.
 fn describe(g: &Graph, node: &LevelNode) -> String {
-    let changes = |n: usize| match n {
-        0 => String::new(),
-        n => format!(", {n} changed symbol(s)"),
+    let count = |n: usize, what: &str| {
+        let s = if n == 1 { "" } else { "s" };
+        let changed = match node.changes {
+            0 => String::new(),
+            c => format!(", {c} changed"),
+        };
+        format!("{n} {what}{s}{changed}")
     };
     match &node.of {
-        NodeRef::Module(_) => format!("module, {} file(s){}", node.size, changes(node.changes)),
-        NodeRef::File(_) => format!("file, {} symbol(s){}", node.size, changes(node.changes)),
+        NodeRef::Module(_) => count(node.size, "file"),
+        NodeRef::File(_) => count(node.size, "symbol"),
         NodeRef::Symbol(s) => {
             let sym = g.symbol(*s);
             let state = if sym.removed {
@@ -405,7 +542,61 @@ fn describe(g: &Graph, node: &LevelNode) -> String {
             } else {
                 ""
             };
-            format!("{} line {}{state}", kind_label(sym.kind), sym.line)
+            format!("{}, line {}{state}", kind_label(sym.kind), sym.line)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_column_scrolls_with_its_cursor_and_says_what_it_leaves_out() {
+        let mut pos = Scroll::default();
+        // Three boxes in 15 rows: centred.
+        let (shown, above, below) = window(&mut pos, 3, 15);
+        assert_eq!(shown, [(0, 3), (1, 6), (2, 9)]);
+        assert_eq!((above, below), (0, 0));
+        // Ten in 14 rows: four, below a row for what is left out above.
+        let (shown, above, below) = window(&mut pos, 10, 14);
+        assert_eq!((shown.len(), shown[0], above, below), (4, (0, 1), 0, 6));
+        pos.cursor = 9;
+        let (shown, above, below) = window(&mut pos, 10, 14);
+        assert_eq!((shown.last().unwrap().0, above, below), (9, 6, 0));
+    }
+
+    #[test]
+    fn lines_join_at_the_turn() {
+        // From row 2 down to row 5, turning at column 3.
+        let cells = wire(0, 2, 3, 6, 5);
+        let at = |x, y| {
+            cells
+                .iter()
+                .find(|c| (c.0, c.1) == (x, y))
+                .map(|c| glyph(c.2))
+        };
+        assert_eq!(at(0, 2), Some('─'));
+        assert_eq!(at(3, 2), Some('╮'));
+        assert_eq!(at(3, 4), Some('│'));
+        assert_eq!(at(3, 5), Some('╰'));
+        assert_eq!(at(5, 5), Some('─'));
+        // Straight across.
+        assert!(wire(0, 2, 3, 6, 2).iter().all(|c| glyph(c.2) == '─'));
+        assert_eq!(glyph(UP | DOWN | RIGHT), '├');
+    }
+
+    #[test]
+    fn a_link_label_names_its_main_kind() {
+        let mut e = LevelEdge {
+            from: 0,
+            to: 1,
+            count: 1,
+            kinds: BTreeMap::from([(EdgeKind::Calls, 1)]),
+        };
+        assert_eq!(link_label(&e), "calls");
+        e.kinds.insert(EdgeKind::Imports, 2);
+        e.count = 3;
+        assert_eq!(link_label(&e), "imports+ 3");
     }
 }

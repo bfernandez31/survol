@@ -6,9 +6,9 @@
 //!   then any other edge kind), each node expandable to walk the graph
 //!   further in the same direction, with a back stack;
 //! - **module map**: packages / directories with their dependencies;
-//! - **map**: the graph drawn as boxes and arrows, one level at a time
-//!   (modules, the files of a module, the symbols of a file; see
-//!   [`super::map`]);
+//! - **map**: one box of the graph in the middle, what uses it on the left,
+//!   what it uses on the right, one level at a time (modules, the files of a
+//!   module, the symbols of a file; see [`super::map`]);
 //! - **flows**: the entry points whose end-to-end flow reaches a change, and
 //!   that flow as a tree, before / after (see [`super::flows`]).
 //!
@@ -37,7 +37,7 @@ pub enum Mode {
     /// Results of a `/` search.
     Found,
     Modules,
-    /// The graph drawn as boxes and arrows, one level at a time.
+    /// One box in the middle, what uses it and what it uses around it.
     Map,
     /// End-to-end flows from the impacted entry points.
     Flows,
@@ -1173,9 +1173,6 @@ impl GraphView {
             return Action::None;
         };
         if self.mode == Mode::Map {
-            if key.code == KeyCode::Backspace && self.map.leave(g) {
-                return Action::None;
-            }
             match self.map.on_key(g, key) {
                 Outcome::Symbol(s) => {
                     self.show_symbol(sh, s);
@@ -1428,6 +1425,7 @@ mod tests {
     use super::*;
     use crate::views::Row;
     use crate::views::diff::DiffView;
+    use crate::views::map::Column;
 
     const SERVICE: &str = "package app.owner;\n\
         public class OwnerService {\n\
@@ -1752,7 +1750,7 @@ mod tests {
     }
 
     #[test]
-    fn map_goes_into_modules_files_and_symbols_and_back() {
+    fn map_centres_a_box_between_its_users_and_what_it_uses() {
         use survol_core::graph::level::Scope;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1761,44 +1759,78 @@ mod tests {
         assert_eq!(v.mode, Mode::Map);
         v.map.ensure(sh.graph.as_ref().unwrap());
         assert_eq!(*v.map.scope(), Scope::Root);
-        // The cursor starts on the changed module.
-        let module = v.map.selected_node().unwrap().clone();
-        assert!(
-            module.changed() && module.label.ends_with("owner"),
-            "{module:?}"
-        );
-
-        v.on_key(&mut sh, code(KeyCode::Enter));
-        assert_eq!(*v.map.scope(), Scope::Module(module.label.clone()));
-        let labels = |v: &GraphView| -> Vec<(String, bool)> {
+        let center = |v: &GraphView| v.map.center_node().unwrap().label.clone();
+        let side = |v: &GraphView, left: bool| -> Vec<(String, bool)> {
+            let column = if left { &v.map.left } else { &v.map.right };
             let nodes = &v.map.level.nodes;
-            nodes.iter().map(|n| (n.label.clone(), n.outside)).collect()
+            column
+                .iter()
+                .map(|n| (nodes[n.node].label.clone(), nodes[n.node].outside))
+                .collect()
         };
-        assert!(labels(&v).contains(&("OwnerService.java".into(), false)));
-        // The module using it stays on the border.
-        assert!(labels(&v).iter().any(|(l, out)| *out && l.ends_with("web")));
+        // The changed module in the middle, the web module using it.
+        let module = center(&v);
+        assert!(module.ends_with("owner"), "{module}");
+        assert!(side(&v, true).iter().any(|(l, _)| l.ends_with("web")));
 
+        // Down to its files: the changed one in the middle, the module
+        // using it outside the level, the repository it uses.
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(*v.map.scope(), Scope::Module(module.clone()));
+        assert_eq!(center(&v), "OwnerService.java");
+        assert!(
+            side(&v, true)
+                .iter()
+                .any(|(l, out)| *out && l.ends_with("web"))
+        );
+        assert!(side(&v, false).contains(&("OwnerRepository.java".into(), false)));
+
+        // A neighbour to the middle, and back.
+        v.on_key(&mut sh, key('l'));
+        assert_eq!(v.map.column, Column::Right);
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        assert_eq!(center(&v), "OwnerRepository.java");
+        assert_eq!(side(&v, true), [("OwnerService.java".into(), false)]);
+        v.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(center(&v), "OwnerService.java");
+
+        // Down to its symbols: the changed method; the controller calling it
+        // is followed to its own file.
         v.on_key(&mut sh, code(KeyCode::Enter));
         assert_eq!(*v.map.scope(), Scope::File(PATH.into()));
-        assert!(
-            labels(&v)
-                .iter()
-                .any(|(l, out)| !out && l.starts_with("OwnerService."))
+        assert_eq!(center(&v), "OwnerService.find");
+        v.on_key(&mut sh, key('h'));
+        let users = side(&v, true);
+        let at = users.iter().position(|(l, _)| l.ends_with("web")).unwrap();
+        for _ in 0..at {
+            v.on_key(&mut sh, key('j'));
+        }
+        let web = v.map.selected_node().unwrap().clone();
+        assert!(web.outside && web.label.ends_with("web"), "{web:?}");
+        v.on_key(&mut sh, code(KeyCode::Enter));
+        let controller = "src/main/java/app/web/OwnerController.java";
+        assert_eq!(*v.map.scope(), Scope::File(controller.into()));
+        assert_eq!(center(&v), "OwnerController.show");
+        v.on_key(
+            &mut sh,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
         );
+        assert_eq!(center(&v), "OwnerService.find");
 
         // A symbol opens its tree; back returns to the map, then goes up.
-        let symbol = v.map.level.nodes.iter().position(|n| !n.outside).unwrap();
-        v.map.selected = symbol;
         v.on_key(&mut sh, code(KeyCode::Enter));
         assert_eq!(v.mode, Mode::Symbol);
         v.on_key(&mut sh, code(KeyCode::Backspace));
         assert_eq!(v.mode, Mode::Map);
         v.on_key(&mut sh, code(KeyCode::Backspace));
-        assert_eq!(*v.map.scope(), Scope::Module(module.label.clone()));
-        assert_eq!(v.map.selected_node().unwrap().label, "OwnerService.java");
+        assert_eq!(*v.map.scope(), Scope::Module(module.clone()));
+        assert_eq!(center(&v), "OwnerService.java");
         v.on_key(&mut sh, key('u'));
         assert_eq!(*v.map.scope(), Scope::Root);
-        assert_eq!(v.map.selected_node().unwrap().label, module.label);
+        assert_eq!(center(&v), module);
+        // Nothing before the root: the view's own back.
+        v.on_key(&mut sh, code(KeyCode::Backspace));
+        assert_eq!(v.mode, Mode::Changed);
     }
 
     #[test]

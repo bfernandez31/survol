@@ -161,28 +161,48 @@ Mermaid blocks, so everyone sees it in the merge / pull request.
 
 ![Module map: the six changed modules first, then their neighbours, 44 unrelated modules hidden; the right pane details the dependencies of the service package](docs/screenshots/graph-module-map.png)
 
-**Map** (`M`): the graph drawn as boxes and arrows, one level at a time. It opens on the
-modules; `Enter` goes into a box (a module shows its files, a file its symbols, a symbol
-opens its tree), `Backspace` / `u` goes back out, the title is the path from the root.
-What lies outside the level stays around it as dashed boxes, coarser the further it is:
-around the symbols of a file, the other files of its module and the other modules.
-`Enter` on one of them goes there.
+**Map** (`M`): one box at a time, between what uses it and what it uses. The selected box
+is in the middle, what uses it (callers, importers, what depends on it) in a column on the
+left, what it uses in a column on the right; arrows only go from the left column to the
+middle and from the middle to the right column, never between neighbours.
 
-- The modules are drawn in one frame per parent package: the path they share is written
-  once, on the frame, and each box only carries the last part of its name. The links
-  between two frames are one arrow in the left margin.
-- An arrow reads "uses" (calls, imports, extends, injects...), left to right; an arrow
-  pointing left closes a cycle. A box the review changes has its name in the text colour
-  and, on its bottom border, the number of changed symbols inside (`M` / `D` for a
-  modified / removed symbol); the others are greyed. `n` / `N` jump from changed box to
-  changed box.
-- Around the selected box, what it uses and what uses it take two colours, boxes and
-  arrows alike; the right pane lists these links: the short name and the number of
-  links, then where it lives and the kinds of links.
-- A level only shows the changed boxes and their neighbours, at most 36 (`t`: every box of
-  the level). When it has more than 20 links, the arrows to the outside are left out, then
-  the links a longer path already implies: the title says how many are drawn, the colours
-  and the right pane still show them all.
+```
+used by (1)                                                                                   uses (5)
+                                                                                              ╭──────────────────────╮
+                                                                              ╭─ ×32 ────────▶│ ClinicService.java   │
+                                                                              │               ╰────────────────── 2 ─╯
+                                                                              │               ╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮
+                                                                              ├─ calls+ 44 ──▶┆ repository           ┆
+                                          ╭────────────────────────────────╮  │               ╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯
+╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮               ╭─▶│ ClinicServiceImpl.java         │──┤               ╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮
+┆ controller           ┆─ injects 7 ───╯  │ …ork/samples/petclinic/service │  ├─ uses+ 34 ───▶┆ model                ┆
+╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯                  │ 40 symbols, 3 changed          │  │               ╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯
+                                          ╰──────────────────────────── 3 ─╯  │               ╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮
+                                                                              ├─ injects 6 ──▶┆ jdbc                 ┆
+                                                                              │               ╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯
+                                                                              │               ╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮
+                                                                              ╰─ injects 6 ──▶┆ jpa                  ┆
+                                                                                              ╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯
+```
+
+- One level at a time: the modules, then the files of a module, then the symbols of a file;
+  the title is the path from the root and the box in the middle. A level opens on its most
+  changed box; `n` / `N` put the next / previous changed box in the middle.
+- `h` / `l` go from column to column, `j` / `k` from box to box in a column (a column taller
+  than the screen scrolls, `↑ +N` / `↓ +N` say how many boxes are out of sight). `Enter` on
+  a side box puts it in the middle; `Enter` on the middle box goes down a level (a module
+  shows its files, a file its symbols, a symbol opens its tree). `Backspace` / `u` /
+  `Ctrl-o` go back to the previous box in the middle, then up a level.
+- What lies outside the level shows in the columns too, as dashed boxes: around the files
+  of a module, the other modules; around the symbols of a file, the other files of its
+  module and the other modules. `Enter` on one follows the link there, at the same depth:
+  from a file, to the file of the other module it is the most linked with.
+- A box the review changes has its name in the text colour and, on its bottom border, the
+  number of changed symbols inside (`M` / `D` for a modified / removed symbol); the others
+  are greyed. Columns list the changed boxes first, then the most linked. Each arrow says
+  its main kind of link and how many links it folds (`calls+ 44`: mostly calls, other
+  kinds too; only `×32` when the lane is too narrow);
+  the right pane details the selected box and its links with the middle one by kind.
 
 **Flows** (`f`): the entry points (HTTP endpoints, front-end routes, listeners, scheduled
 jobs, runners) whose end-to-end flow reaches a changed symbol. `Enter` / `l` opens the flow:
@@ -577,7 +597,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | Key | Action |
 |---|---|
 | `m` | mode: changed symbols / search / module map / map / flows / symbol |
-| `M` | map: the graph as boxes and arrows; `h` `j` `k` `l` move, `Enter` into the box, `Backspace` / `u` back out, `n` / `N` changed boxes, `t` all / around the changes |
+| `M` | map: one box between what uses it and what it uses; `h` / `l` column, `j` / `k` box, `Enter` to the middle / down a level, `Backspace` / `u` back, `n` / `N` changed boxes |
 | `Enter` | symbol: focus it (new root); section / module: fold |
 | `l` / `h` | expand / collapse (callers of callers…), parent |
 | `Backspace` / `Ctrl-o` | back to the previous symbol or list |
