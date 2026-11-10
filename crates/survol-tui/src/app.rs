@@ -1,6 +1,7 @@
 //! Application state: what the views share, view switching, global keys and
 //! the background grouping. Each view lives in `views/`, rendering in `ui/`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -74,6 +75,8 @@ pub enum Action {
     FoldRenames,
     /// Show this symbol in the Graph view.
     ShowSymbol(SymIdx),
+    /// Show the Stack group (and layer) holding this hunk.
+    ShowGroup(usize),
     /// Show this line (index in the hunk) in the Diff view.
     ShowLine {
         hunk: usize,
@@ -161,6 +164,8 @@ pub struct Shared {
     pub remote: Option<RemoteReview>,
     /// Drafts and discussions placed in the diff.
     pub notes: NoteIndex,
+    /// Messages already shown once in this session ([`Shared::once`]).
+    told: HashSet<&'static str>,
 }
 
 impl Shared {
@@ -192,7 +197,19 @@ impl Shared {
             comments_path,
             remote: None,
             notes,
+            told: HashSet::new(),
         }
+    }
+
+    /// Shows `msg` the first time `key` happens in the session: an old key
+    /// kept as an alias, or a key whose meaning changed. Returns whether it
+    /// was shown.
+    pub fn once(&mut self, key: &'static str, msg: impl Into<String>) -> bool {
+        let first = self.told.insert(key);
+        if first {
+            self.notify(msg);
+        }
+        first
     }
 
     /// `o` on a note: shows it whole, or folds it back.
@@ -816,6 +833,18 @@ impl App {
                     }
                 }
             }
+            Action::ShowGroup(h) => {
+                let from = self.here();
+                if self.stack.reveal_hunk(&self.sh, h) {
+                    self.switch(View::Stack);
+                    if from.view != View::Stack {
+                        self.push_jump(from);
+                    }
+                } else {
+                    self.sh
+                        .notify("the groups are not ready yet (or this hunk is in none)");
+                }
+            }
             Action::Regroup => {
                 if self.grouping_running() {
                     self.sh.notify("grouping is already running");
@@ -868,6 +897,14 @@ impl App {
     /// jump came from. In the Graph view, its own history goes first, back
     /// to the place the jump arrived at.
     fn jump_back(&mut self) {
+        // The Map mode first goes back through its own boxes and levels.
+        if self.view == View::Graph
+            && self.graph.mode == Mode::Map
+            && let Some(g) = &self.sh.graph
+            && self.graph.map.back(g)
+        {
+            return;
+        }
         if self.view == View::Graph {
             let depth = self.graph.back.len();
             let at_jump = self
@@ -1091,6 +1128,24 @@ impl App {
     }
 
     fn on_popup_key(&mut self, key: KeyEvent) {
+        // `?`: the keys of the popup (not in those where it is text).
+        if key.code == KeyCode::Char('?')
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(
+                self.popup,
+                Some(
+                    Popup::File(_)
+                        | Popup::Thread(_)
+                        | Popup::Review
+                        | Popup::Answer(_)
+                        | Popup::History(_)
+                )
+            )
+        {
+            self.help = true;
+            self.help_scroll = 0;
+            return;
+        }
         let Some(popup) = self.popup.take() else {
             return;
         };
@@ -1117,6 +1172,7 @@ impl App {
                     self.popup = Some(Popup::History(HistoryView::default()));
                 }
                 AnswerOutcome::Follow { r, diff } => {
+                    let told = v.told.take();
                     let action = self.follow_ref(&r, diff);
                     if action == Action::None {
                         self.popup = Some(Popup::Answer(v));
@@ -1125,11 +1181,28 @@ impl App {
                         self.sh.notify("A: back to the answer");
                         self.apply(action);
                     }
+                    if let Some((key, msg)) = told {
+                        self.sh.once(key, msg);
+                    }
+                }
+                AnswerOutcome::WholeFile(r) => {
+                    if r.side == Side::Old {
+                        self.sh.notify(
+                            "this line only exists in the base revision: gd shows it in the diff",
+                        );
+                        self.popup = Some(Popup::Answer(v));
+                    } else {
+                        self.last_answer = Some(v);
+                        self.apply(Action::WholeFile {
+                            path: r.path.clone(),
+                            line: r.line,
+                        });
+                    }
                 }
                 AnswerOutcome::Edit(r) => {
                     if r.side == Side::Old {
                         self.sh.notify(
-                            "this line only exists in the base revision: d shows it in the diff",
+                            "this line only exists in the base revision: gd shows it in the diff",
                         );
                     } else {
                         self.sh.open_path(&r.path, r.line);
@@ -1172,6 +1245,14 @@ impl App {
             },
             Popup::Thread(mut t) => match t.on_key(key) {
                 ThreadOutcome::Continue => self.popup = Some(Popup::Thread(t)),
+                ThreadOutcome::Editor(kind) => {
+                    self.edit_note_line(kind);
+                    self.sh.once(
+                        "thread-e",
+                        "e opens the editor now; c writes the reply (or edits the draft)",
+                    );
+                    self.popup = Some(Popup::Thread(t));
+                }
                 ThreadOutcome::Close => {
                     if t.from_panel {
                         self.popup = Some(Popup::Review);
@@ -1482,6 +1563,41 @@ impl App {
             PanelOutcome::Publish(plan) => self.start_publish(plan),
             PanelOutcome::Refresh => self.start_remote(),
             PanelOutcome::Thread(kind) => self.open_thread(kind, true),
+            PanelOutcome::Editor(row) => {
+                let action = self.panel_jump(row);
+                self.open_action_in_editor(action);
+                self.sh.once(
+                    "panel-e",
+                    "e opens the editor now; c edits the draft (or replies)",
+                );
+            }
+        }
+    }
+
+    /// `e` in a thread: its line in the editor.
+    fn edit_note_line(&mut self, kind: NoteKind) {
+        let row = match kind {
+            NoteKind::Draft(id) => PanelRow::Draft(id),
+            NoteKind::Remote(d) => PanelRow::Discussion(d),
+        };
+        let action = self.panel_jump(row);
+        self.open_action_in_editor(action);
+    }
+
+    /// Opens in the editor the place a jump to the Diff view would show.
+    fn open_action_in_editor(&mut self, action: Action) {
+        let d = &self.sh.review.diff;
+        match action {
+            Action::ShowLine { hunk, line } => {
+                let file = d.hunks[hunk].file;
+                self.sh.open_in_editor(file, Some(hunk), Some(line));
+            }
+            Action::ShowHunk(hunk) => {
+                let file = d.hunks[hunk].file;
+                self.sh.open_in_editor(file, Some(hunk), None);
+            }
+            Action::ShowFile(f) => self.sh.open_in_editor(f, None, None),
+            _ => {}
         }
     }
 
@@ -2268,10 +2384,10 @@ mod tests {
             panic!("not back to the file");
         };
         assert_eq!(v.counts(), (2, 1));
-        // ]c... already on it: [c goes back up to it, Enter shows its thread.
+        // [t goes back up to the thread, Enter shows it.
         app.on_key(key('G'));
         app.on_key(key('['));
-        app.on_key(key('c'));
+        app.on_key(key('t'));
         app.on_key(code(KeyCode::Enter));
         assert!(matches!(app.popup, Some(Popup::Thread(_))));
         app.on_key(code(KeyCode::Esc));
@@ -2586,5 +2702,205 @@ mod tests {
         app.on_key(key('C'));
         assert!(app.popup.is_none(), "group of a lock file and a rename");
         assert!(app.sh.message().unwrap().starts_with("C: select a hunk"));
+    }
+
+    fn grouped_app(dir: &std::path::Path) -> App {
+        let (review, grouping) = fixture(dir);
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.join("state.json"),
+            Config::default(),
+        );
+        app.stack.set_grouping(&app.sh, grouping);
+        app
+    }
+
+    fn row(app: &App) -> Row {
+        app.diff.rows[app.diff.pos.cursor]
+    }
+
+    #[test]
+    fn diff_v_selects_and_x_marks_reviewed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app(dir.path());
+        cursor_to(&mut app, Row::Line { hunk: 0, line: 0 });
+        // v: a selection, like V (once: what changed).
+        app.on_key(key('v'));
+        assert!(app.diff.visual.is_some());
+        assert!(app.sh.message().unwrap().starts_with("v now selects lines"));
+        app.on_key(key('v'));
+        assert!(app.diff.visual.is_none());
+        assert!(!app.sh.state.is_file_reviewed(&app.sh.review.diff, 0));
+        // x: the hunk reviewed, the cursor stays.
+        app.on_key(key('x'));
+        assert!(app.sh.state.is_hunk_reviewed(&app.sh.review.diff, 0));
+        assert_eq!(row(&app), Row::Line { hunk: 0, line: 0 });
+        app.on_key(key('x'));
+        assert!(!app.sh.state.is_hunk_reviewed(&app.sh.review.diff, 0));
+        // X: the file reviewed (and folded).
+        app.on_key(key('X'));
+        assert!(app.sh.state.is_file_reviewed(&app.sh.review.diff, 0));
+        assert!(app.diff.collapsed[0]);
+        // r: still the file, with a word on the new key, once.
+        cursor_to(&mut app, Row::Line { hunk: 2, line: 0 });
+        app.on_key(key('r'));
+        assert!(app.sh.state.is_file_reviewed(&app.sh.review.diff, 1));
+        assert!(app.sh.message().unwrap().starts_with("r is now X"));
+        app.sh.notify("other");
+        app.on_key(key('r'));
+        assert_eq!(app.sh.message(), Some("other"), "told once only");
+    }
+
+    #[test]
+    fn diff_brackets_go_to_the_next_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app(dir.path());
+        let press = |app: &mut App, keys: &str| keys.chars().for_each(|c| app.on_key(key(c)));
+        cursor_to(&mut app, Row::Line { hunk: 0, line: 0 });
+        press(&mut app, "]c");
+        assert_eq!(row(&app), Row::Hunk(1));
+        press(&mut app, "[c");
+        assert_eq!(row(&app), Row::Hunk(0));
+        press(&mut app, "]f");
+        assert_eq!(row(&app), Row::File(1));
+        press(&mut app, "[f");
+        assert_eq!(row(&app), Row::File(0));
+        // ]u: the next unreviewed hunk, skipping a reviewed one.
+        let d = &app.sh.review.diff;
+        app.sh.state.set_hunk(d, 1, true);
+        press(&mut app, "]u");
+        assert_eq!(row(&app), Row::Hunk(0));
+        press(&mut app, "]u");
+        assert_eq!(row(&app), Row::Hunk(2));
+        // ]t: the next thread.
+        let line = comments::line_anchor(&app.sh.review.diff, 3, 0);
+        app.sh
+            .comments
+            .add(Anchor::Line { start: None, line }, "lock?");
+        app.refresh_notes();
+        press(&mut app, "]t");
+        assert!(matches!(row(&app), Row::Comment { part: 0, .. }));
+        // ] alone is a prefix: an unknown letter says what follows.
+        let at = app.diff.pos.cursor;
+        press(&mut app, "]j");
+        assert_eq!(app.diff.pos.cursor, at);
+        assert!(app.sh.message().unwrap().contains("]c hunk"));
+        // } stays an alias of ]c for now.
+        cursor_to(&mut app, Row::Line { hunk: 0, line: 0 });
+        press(&mut app, "}");
+        assert_eq!(row(&app), Row::Hunk(1));
+        assert!(app.sh.message().unwrap().contains("]c"));
+    }
+
+    #[test]
+    fn diff_enter_esc_folds_and_go_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = grouped_app(dir.path());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "b\n".repeat(12)).unwrap();
+        // Enter on a line: the whole file, not the editor.
+        cursor_to(&mut app, Row::Line { hunk: 1, line: 1 });
+        app.on_key(code(KeyCode::Enter));
+        assert!(
+            matches!(app.popup, Some(Popup::File(_))),
+            "{:?}",
+            app.sh.message()
+        );
+        app.on_key(code(KeyCode::Esc));
+        // zc / zo: close / open the file, never the other way.
+        app.on_key(key('z'));
+        app.on_key(key('o'));
+        assert!(!app.diff.collapsed[0]);
+        app.on_key(key('z'));
+        app.on_key(key('c'));
+        assert!(app.diff.collapsed[0]);
+        app.on_key(key('z'));
+        app.on_key(key('c'));
+        assert!(app.diff.collapsed[0]);
+        app.on_key(key('z'));
+        app.on_key(key('o'));
+        assert!(!app.diff.collapsed[0]);
+        // gd here: already in the Diff view.
+        cursor_to(&mut app, Row::Line { hunk: 1, line: 1 });
+        app.on_key(key('g'));
+        app.on_key(key('d'));
+        assert!(app.sh.message().unwrap().starts_with("already in the Diff"));
+        // gG: the hunk in its Stack group; Ctrl-o: back to the line.
+        app.on_key(key('g'));
+        app.on_key(key('G'));
+        assert_eq!(app.view, View::Stack);
+        assert_eq!(
+            app.stack.selected(),
+            Some(crate::views::stack::Node::Hunk {
+                group: 0,
+                layer: 1,
+                hunk: 1
+            })
+        );
+        app.on_key(ctrl('o'));
+        assert_eq!(app.view, View::Diff);
+        assert_eq!(row(&app), Row::Line { hunk: 1, line: 1 });
+        // Esc in the list stays in the list.
+        app.on_key(ctrl('h'));
+        app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.diff.focus, crate::views::Focus::List);
+    }
+
+    #[test]
+    fn stack_x_marks_and_slash_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = grouped_app(dir.path());
+        app.on_key(key('2'));
+        let first = app.stack.selected();
+        // l: into the group, on its first layer; x: the layer, staying.
+        app.on_key(key('l'));
+        app.on_key(key('l'));
+        let layer = app.stack.selected();
+        app.on_key(key('x'));
+        let d = &app.sh.review.diff;
+        assert!(app.sh.state.is_hunk_reviewed(d, 0));
+        assert!(!app.sh.state.is_hunk_reviewed(d, 1));
+        assert_eq!(app.stack.selected(), layer);
+        // X: the whole group.
+        app.on_key(key('X'));
+        let d = &app.sh.review.diff;
+        assert!(app.sh.state.is_hunk_reviewed(d, 1));
+        assert_ne!(first, None);
+        // /: only the groups about Cargo.lock.
+        app.on_key(key('/'));
+        for c in "cargo".chars() {
+            app.on_key(key(c));
+        }
+        app.on_key(code(KeyCode::Enter));
+        let groups: Vec<usize> = app.stack.tree.iter().map(|n| n.group()).collect();
+        assert!(
+            !groups.is_empty() && groups.iter().all(|&g| g == 2),
+            "{groups:?}"
+        );
+        app.on_key(code(KeyCode::Esc));
+        assert!(app.stack.tree.iter().any(|n| n.group() == 0));
+        // ]f: the next group.
+        app.on_key(key('g'));
+        app.on_key(key('g'));
+        app.on_key(key(']'));
+        app.on_key(key('f'));
+        assert_eq!(app.stack.selected().map(|n| n.group()), Some(1));
+    }
+
+    #[test]
+    fn question_mark_in_a_popup_shows_its_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app(dir.path());
+        app.on_key(key('P'));
+        app.on_key(key('?'));
+        assert!(app.help);
+        assert_eq!(crate::ui::HelpCtx::of(&app).section, "Review panel");
+        app.on_key(key('x'));
+        assert!(!app.help);
+        assert!(
+            matches!(app.popup, Some(Popup::Review)),
+            "still in the panel"
+        );
     }
 }

@@ -108,6 +108,10 @@ pub struct AnswerView {
     pub total_lines: usize,
     /// Line of the selected link, set by the renderer to keep it visible.
     pub link_line: Option<usize>,
+    /// `g` typed: `gd`, `gs`, `gf` follow the link.
+    pub pending_g: bool,
+    /// An old key was used (`d`): the message to show once.
+    pub told: Option<(&'static str, &'static str)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +124,8 @@ pub enum AnswerOutcome {
         diff: bool,
     },
     Edit(CodeRef),
+    /// The whole file at the reference (`gf`).
+    WholeFile(CodeRef),
     History,
 }
 
@@ -132,6 +138,8 @@ impl AnswerView {
             height: 10,
             total_lines: 0,
             link_line: None,
+            pending_g: false,
+            told: None,
         };
         v.link = v.valid_links().first().copied();
         v
@@ -172,10 +180,23 @@ impl AnswerView {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.height / 2).max(1) as isize;
         if super::stray_ctrl(&key, &['d', 'u']) {
+            self.pending_g = false;
             return AnswerOutcome::Continue;
+        }
+        if std::mem::take(&mut self.pending_g) {
+            let Some(r) = self.selected().cloned() else {
+                return AnswerOutcome::Continue;
+            };
+            return match key.code {
+                KeyCode::Char('d') => AnswerOutcome::Follow { r, diff: true },
+                KeyCode::Char('s') => AnswerOutcome::Follow { r, diff: false },
+                KeyCode::Char('f') => AnswerOutcome::WholeFile(r),
+                _ => AnswerOutcome::Continue,
+            };
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return AnswerOutcome::Close,
+            KeyCode::Char('g') => self.pending_g = true,
             KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_by(-1),
             KeyCode::Char('d') if ctrl => self.scroll_by(half),
@@ -189,7 +210,13 @@ impl AnswerView {
                 if let Some(r) = self.selected().cloned() {
                     return match key.code {
                         KeyCode::Char('e') => AnswerOutcome::Edit(r),
-                        KeyCode::Char('d') => AnswerOutcome::Follow { r, diff: true },
+                        KeyCode::Char('d') => {
+                            self.told = Some((
+                                "answer-d",
+                                "d is now gd (the Diff view); d stays an alias until 0.4",
+                            ));
+                            AnswerOutcome::Follow { r, diff: true }
+                        }
                         _ => AnswerOutcome::Follow { r, diff: false },
                     };
                 }
@@ -343,5 +370,40 @@ mod tests {
         assert_eq!(v.on_key(ctrl('a')), AnswerOutcome::Continue);
         let mut h = HistoryView::default();
         assert_eq!(h.on_key(ctrl('q'), 2), HistoryOutcome::Continue);
+    }
+
+    #[test]
+    fn answer_g_prefix_follows_the_link_d_is_an_alias() {
+        let mut v = AnswerView::new(answer(vec![cref(1, true)]));
+        v.on_key(key(KeyCode::Char('g')));
+        assert_eq!(
+            v.on_key(key(KeyCode::Char('d'))),
+            AnswerOutcome::Follow {
+                r: cref(1, true),
+                diff: true
+            }
+        );
+        assert!(v.told.is_none());
+        v.on_key(key(KeyCode::Char('g')));
+        assert_eq!(
+            v.on_key(key(KeyCode::Char('s'))),
+            AnswerOutcome::Follow {
+                r: cref(1, true),
+                diff: false
+            }
+        );
+        v.on_key(key(KeyCode::Char('g')));
+        assert_eq!(
+            v.on_key(key(KeyCode::Char('f'))),
+            AnswerOutcome::WholeFile(cref(1, true))
+        );
+        assert_eq!(
+            v.on_key(key(KeyCode::Char('d'))),
+            AnswerOutcome::Follow {
+                r: cref(1, true),
+                diff: true
+            }
+        );
+        assert_eq!(v.told.map(|(k, _)| k), Some("answer-d"));
     }
 }

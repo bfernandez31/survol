@@ -26,7 +26,7 @@ use survol_core::model::{Diff, LineKind};
 use super::export::{self, Diagram};
 use super::flows::{EntryRow, FlowsState};
 use super::map::{MapState, Outcome};
-use super::{Focus, Scroll};
+use super::{Focus, Fold, Scroll};
 use crate::app::{Action, Shared};
 use crate::highlight::Spans;
 
@@ -478,8 +478,9 @@ pub struct GraphView {
     pub preview_offset: isize,
     pub hscroll: usize,
     sources: HashMap<(String, bool), Rc<Source>>,
-    pending: Option<char>,
-    /// Last diagram exported (`x`), for `S`.
+    /// First key of a prefix (`g`, `z`, `]`, `[`) waiting for the second.
+    pub pending: Option<char>,
+    /// Last diagram exported (`y`), for `S`.
     pub last_export: Option<Diagram>,
 }
 
@@ -811,6 +812,12 @@ impl GraphView {
     }
 
     fn toggle_fold(&mut self, g: &Graph) {
+        self.fold(g, Fold::Toggle);
+    }
+
+    /// `o` / `za` / `zo` / `zc`: the section, node or module under the
+    /// cursor.
+    fn fold(&mut self, g: &Graph, fold: Fold) {
         match self.mode {
             Mode::Symbol => {
                 let c = self.pos().cursor;
@@ -818,7 +825,11 @@ impl GraphView {
                     return;
                 };
                 match self.tree.get(c).cloned() {
-                    Some(TreeRow::Section { rel, .. }) => toggle(&mut st.toggled, rel),
+                    Some(TreeRow::Section { rel, folded, .. }) => {
+                        if fold.folded(folded) != folded {
+                            toggle(&mut st.toggled, rel)
+                        }
+                    }
                     Some(TreeRow::Node {
                         rel,
                         path,
@@ -826,7 +837,10 @@ impl GraphView {
                         ..
                     }) => {
                         let key = (rel, path);
-                        if !st.expanded.remove(&key) {
+                        let folded = !st.expanded.contains(&key);
+                        if fold.folded(folded) {
+                            st.expanded.remove(&key);
+                        } else {
                             st.expanded.insert(key);
                         }
                     }
@@ -840,7 +854,10 @@ impl GraphView {
                     Some(ModRow::Module(m)) | Some(ModRow::Symbol { module: m, .. }) => *m,
                     None => return,
                 };
-                if !self.open_modules.remove(&m) {
+                let folded = !self.open_modules.contains(&m);
+                if fold.folded(folded) {
+                    self.open_modules.remove(&m);
+                } else {
                     self.open_modules.insert(m);
                 }
                 self.rebuild_modules(g);
@@ -849,6 +866,120 @@ impl GraphView {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// `zM` / `zR`: every section of the symbol tree, or every module of the
+    /// module map, folded / unfolded.
+    fn fold_all(&mut self, sh: &mut Shared, g: &Graph, folded: bool) {
+        match self.mode {
+            Mode::Symbol => {
+                let Some(st) = &mut self.symbol else {
+                    return;
+                };
+                for row in &self.tree {
+                    if let TreeRow::Section { rel, folded: f, .. } = row
+                        && *f != folded
+                    {
+                        toggle(&mut st.toggled, *rel);
+                    }
+                }
+                if folded {
+                    st.expanded.clear();
+                }
+                self.refresh_tree(g);
+            }
+            Mode::Modules => {
+                if folded {
+                    self.open_modules.clear();
+                } else {
+                    let all: Vec<usize> = self
+                        .mod_rows
+                        .iter()
+                        .filter_map(|r| match r {
+                            ModRow::Module(m) => Some(*m),
+                            ModRow::Symbol { .. } => None,
+                        })
+                        .collect();
+                    self.open_modules.extend(all);
+                }
+                self.rebuild_modules(g);
+            }
+            _ => sh.notify("nothing to fold here: zM / zR fold the symbol tree and the module map"),
+        }
+    }
+
+    /// Whether row `i` of the list is a changed symbol (`n` / `N`).
+    fn changed_row(&self, g: &Graph, i: usize) -> bool {
+        let changed = |s: SymIdx| g.symbol(s).changed;
+        match self.mode {
+            Mode::Changed => matches!(self.list.get(i), Some(ListRow::Symbol(_))),
+            Mode::Found => matches!(self.found.get(i), Some(&ListRow::Symbol(s)) if changed(s)),
+            Mode::Modules => matches!(self.mod_rows.get(i), Some(ModRow::Symbol { .. })),
+            Mode::Symbol => {
+                matches!(self.tree.get(i), Some(TreeRow::Node { link, .. }) if changed(link.symbol))
+            }
+            Mode::Map | Mode::Flows => false,
+        }
+    }
+
+    /// `n` / `N` in the lists: the next / previous changed symbol (in the
+    /// flows: the next entry point kind).
+    fn next_changed_row(&mut self, sh: &mut Shared, g: &Graph, forward: bool) {
+        if self.mode == Mode::Flows {
+            return self.next_header(forward);
+        }
+        let c = self.pos().cursor;
+        let found = if forward {
+            (c + 1..self.len()).find(|&i| self.changed_row(g, i))
+        } else {
+            (0..c).rev().find(|&i| self.changed_row(g, i))
+        };
+        match found {
+            Some(i) => self.select(i),
+            None => sh.notify(if forward {
+                "no changed symbol below"
+            } else {
+                "no changed symbol above"
+            }),
+        }
+    }
+
+    /// `]` / `[` then `c` changed symbol / step, `f` section or module.
+    fn bracket(&mut self, sh: &mut Shared, forward: bool, c: char) {
+        let Some(g) = sh.graph.take() else {
+            return;
+        };
+        match c {
+            'c' if self.mode == Mode::Map => self.map.next_changed(forward),
+            'c' if self.mode == Mode::Flows && self.focus == Focus::Content => {
+                self.flows.next_change(forward)
+            }
+            'c' => self.next_changed_row(sh, &g, forward),
+            'f' if self.mode != Mode::Map => self.next_header(forward),
+            _ => {
+                let p = if forward { ']' } else { '[' };
+                sh.notify(format!(
+                    "{p}c next changed symbol / step · {p}f next section or module ({p} alone is a prefix now)"
+                ))
+            }
+        }
+        sh.graph = Some(g);
+    }
+
+    /// `y` (`gx`: and open it in the browser): the diagram of what is shown.
+    fn export(&mut self, sh: &mut Shared, open: bool) {
+        match self.mode {
+            Mode::Flows => {
+                if let Some(d) = self.flows.export(sh, open) {
+                    self.last_export = Some(d);
+                }
+            }
+            Mode::Map => self.export_map(sh, open),
+            Mode::Modules => self.export_mermaid(sh, open),
+            _ => sh.notify(
+                "nothing to export here: y exports the module map (m), the map (M) or a flow (f)",
+            ),
         }
     }
 
@@ -1099,7 +1230,7 @@ impl GraphView {
         }
     }
 
-    /// `x` / `X`: the module map as Mermaid; `open`: in the browser too.
+    /// `y` / `gx`: the module map as Mermaid; `open`: in the browser too.
     fn export_mermaid(&mut self, sh: &mut Shared, open: bool) {
         let Some(map) = &self.modules else {
             return;
@@ -1119,7 +1250,7 @@ impl GraphView {
         }
     }
 
-    /// `x` / `X` in the map: the middle box and its columns.
+    /// `y` / `gx` in the map: the middle box and its columns.
     fn export_map(&mut self, sh: &mut Shared, open: bool) {
         let Some(d) = self.map.diagram() else {
             return;
@@ -1136,7 +1267,7 @@ impl GraphView {
         match &self.last_export {
             Some(d) => Action::AddToSummary(d.markdown()),
             None => {
-                sh.notify("export a diagram first: x (module map, flow)");
+                sh.notify("export a diagram first: y (module map, map, flow)");
                 Action::None
             }
         }
@@ -1176,11 +1307,31 @@ impl GraphView {
                 },
                 ('g', KeyCode::Char('d')) => return self.to_diff(sh),
                 ('g', KeyCode::Char('f')) => return self.whole_file(sh),
-                ('z', KeyCode::Char('a' | 'o' | 'c')) => {
-                    if let Some(g) = &sh.graph {
-                        self.toggle_fold(g);
+                ('g', KeyCode::Char('G')) => {
+                    return match self.to_diff(sh) {
+                        Action::ShowHunk(h) => Action::ShowGroup(h),
+                        a => a,
+                    };
+                }
+                ('g', KeyCode::Char('s')) => {
+                    sh.notify("already in the Graph view (gd: Diff, gG: Stack group)")
+                }
+                ('g', KeyCode::Char('x')) => self.export(sh, true),
+                ('z', KeyCode::Char(c)) if Fold::of(c).is_some() => {
+                    if self.mode == Mode::Map {
+                        sh.notify("the map has no folds: Enter goes down a level, u up");
+                    } else if let Some(g) = sh.graph.take() {
+                        self.fold(&g, Fold::of(c).unwrap_or(Fold::Toggle));
+                        sh.graph = Some(g);
                     }
                 }
+                ('z', KeyCode::Char(c @ ('M' | 'R'))) => {
+                    if let Some(g) = sh.graph.take() {
+                        self.fold_all(sh, &g, c == 'M');
+                        sh.graph = Some(g);
+                    }
+                }
+                (']' | '[', KeyCode::Char(c)) => self.bracket(sh, p == ']', c),
                 _ => {}
             }
             return Action::None;
@@ -1199,11 +1350,7 @@ impl GraphView {
             }
         }
         match key.code {
-            KeyCode::Char('g') | KeyCode::Char('z') if !ctrl => {
-                if let KeyCode::Char(c) = key.code {
-                    self.pending = Some(c);
-                }
-            }
+            KeyCode::Char(c @ ('g' | 'z' | ']' | '[')) if !ctrl => self.pending = Some(c),
             KeyCode::Char('o') if ctrl => self.go_back(sh),
             KeyCode::Backspace => self.go_back(sh),
             KeyCode::Char('h') if ctrl => {
@@ -1233,20 +1380,14 @@ impl GraphView {
                 self.query.clear();
             }
             KeyCode::Char('e') => self.open_in_editor(sh),
-            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Flows => {
-                if let Some(d) = self.flows.export(sh, c == 'X') {
-                    self.last_export = Some(d);
-                }
+            KeyCode::Char('y') => self.export(sh, false),
+            KeyCode::Char(c @ ('x' | 'X')) => {
+                sh.once(
+                    "x-export",
+                    "x / X are now y / gx (export the diagram, and open it); they stay aliases until 0.4",
+                );
+                self.export(sh, c == 'X');
             }
-            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Map => {
-                self.export_map(sh, c == 'X')
-            }
-            KeyCode::Char(c @ ('x' | 'X')) if self.mode == Mode::Modules => {
-                self.export_mermaid(sh, c == 'X')
-            }
-            KeyCode::Char('x' | 'X') => sh.notify(
-                "nothing to export here: x exports the module map (m), the map (M) or a flow (f)",
-            ),
             KeyCode::Char('S') => return self.add_to_summary(sh),
             KeyCode::Char('o') => self.toggle_fold(g),
             KeyCode::Char('0') => self.hscroll = 0,
@@ -1276,8 +1417,14 @@ impl GraphView {
             KeyCode::PageUp => self.move_by(-half * 2),
             KeyCode::Char('G') | KeyCode::End => self.select(usize::MAX),
             KeyCode::Home => self.select(0),
-            KeyCode::Char('n') | KeyCode::Char('J') | KeyCode::Char(']') => self.next_header(true),
-            KeyCode::Char('N') | KeyCode::Char('K') | KeyCode::Char('[') => self.next_header(false),
+            KeyCode::Char('J') => self.next_header(true),
+            KeyCode::Char('K') => self.next_header(false),
+            KeyCode::Char(c @ ('n' | 'N')) => {
+                if let Some(g) = sh.graph.take() {
+                    self.next_changed_row(sh, &g, c == 'n');
+                    sh.graph = Some(g);
+                }
+            }
             KeyCode::Char('l') | KeyCode::Right => {
                 if let Some(g) = &sh.graph {
                     match self.mode {
@@ -1336,8 +1483,8 @@ impl GraphView {
             KeyCode::PageUp => self.flows.move_step(-half * 2),
             KeyCode::Char('G') | KeyCode::End => self.flows.select_step(usize::MAX),
             KeyCode::Home => self.flows.select_step(0),
-            KeyCode::Char('n') | KeyCode::Char(']') => self.flows.next_change(true),
-            KeyCode::Char('N') | KeyCode::Char('[') => self.flows.next_change(false),
+            KeyCode::Char('n') => self.flows.next_change(true),
+            KeyCode::Char('N') => self.flows.next_change(false),
             KeyCode::Enter => return self.enter(sh),
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => self.focus = Focus::List,
             _ => {}
@@ -1356,7 +1503,14 @@ impl GraphView {
             KeyCode::Char('b') if ctrl => self.preview_offset -= 20,
             KeyCode::Char('h') | KeyCode::Left => self.hscroll = self.hscroll.saturating_sub(8),
             KeyCode::Char('l') | KeyCode::Right => self.hscroll += 8,
-            KeyCode::Enter => self.open_in_editor(sh),
+            // Down a level: the whole file at the line (`e`: the editor).
+            KeyCode::Enter => {
+                sh.once(
+                    "enter-preview",
+                    "Enter in the preview opens the whole file now (e: the editor)",
+                );
+                return self.whole_file(sh);
+            }
             KeyCode::Esc => self.focus = Focus::List,
             _ => {}
         }
@@ -1883,8 +2037,8 @@ mod tests {
         assert_eq!(center(&v), "OwnerRepository.java");
         v.on_key(&mut sh, key('h'));
 
-        // `x`: the middle box and its columns in Mermaid.
-        v.on_key(&mut sh, key('x'));
+        // `y`: the middle box and its columns in Mermaid.
+        v.on_key(&mut sh, key('y'));
         let md = tmp.path().join(".git/survol/exports/map-head.md");
         let text = std::fs::read_to_string(&md).unwrap_or_else(|_| panic!("{:?}", sh.message()));
         assert!(text.contains("OwnerRepository.java"), "{text}");
@@ -2120,5 +2274,108 @@ mod tests {
         app.on_key(ctrl('o'));
         assert_eq!(app.view, View::Graph);
         assert_eq!(app.graph.mode, Mode::Changed);
+    }
+
+    #[test]
+    fn y_gx_export_n_goes_to_changed_symbols_z_folds_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        let (mut sh, mut v) = setup(tmp.path());
+        let press = |v: &mut GraphView, sh: &mut Shared, keys: &str| {
+            keys.chars().for_each(|c| {
+                v.on_key(sh, key(c));
+            })
+        };
+        // n / N: the changed symbols (only one here).
+        let find = sym(&sh, "OwnerService.find");
+        assert_eq!(v.list[v.pos().cursor], ListRow::Symbol(find));
+        press(&mut v, &mut sh, "n");
+        assert!(sh.message().unwrap().starts_with("no changed symbol below"));
+        press(&mut v, &mut sh, "gs");
+        assert!(sh.message().unwrap().starts_with("already in the Graph"));
+        // The module map: y writes it, x still does (told once).
+        v.mode = Mode::Modules;
+        press(&mut v, &mut sh, "y");
+        let md = tmp.path().join(".git/survol/exports/modules-head.md");
+        assert!(md.exists(), "{:?}", sh.message());
+        std::fs::remove_file(&md).unwrap();
+        press(&mut v, &mut sh, "x");
+        assert!(md.exists());
+        assert!(!sh.once("x-export", ""), "x was told about y / gx");
+        // zR / zM: every module open / closed.
+        press(&mut v, &mut sh, "zR");
+        assert!(
+            v.mod_rows
+                .iter()
+                .any(|r| matches!(r, ModRow::Symbol { .. }))
+        );
+        press(&mut v, &mut sh, "zM");
+        assert!(v.mod_rows.iter().all(|r| matches!(r, ModRow::Module(_))));
+        // The symbol tree: zM folds every section, zc / zo one.
+        v.show_symbol(&sh, find);
+        press(&mut v, &mut sh, "zM");
+        assert!(v.tree.iter().all(|r| !matches!(r, TreeRow::Node { .. })));
+        press(&mut v, &mut sh, "zR");
+        assert!(v.tree.iter().any(|r| matches!(r, TreeRow::Node { .. })));
+        let section = v
+            .tree
+            .iter()
+            .position(|r| matches!(r, TreeRow::Section { folded: false, .. }))
+            .unwrap();
+        v.select(section);
+        press(&mut v, &mut sh, "zo");
+        assert!(matches!(
+            v.tree[section],
+            TreeRow::Section { folded: false, .. }
+        ));
+        press(&mut v, &mut sh, "zc");
+        assert!(matches!(
+            v.tree[section],
+            TreeRow::Section { folded: true, .. }
+        ));
+        press(&mut v, &mut sh, "zc");
+        assert!(matches!(
+            v.tree[section],
+            TreeRow::Section { folded: true, .. }
+        ));
+        // Enter in the preview: the whole file, not the editor.
+        v.focus = Focus::Content;
+        assert!(matches!(
+            v.on_key(&mut sh, code(KeyCode::Enter)),
+            Action::WholeFile { .. }
+        ));
+    }
+
+    #[test]
+    fn backspace_in_the_map_goes_back_in_the_map() {
+        use crate::app::{App, View};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sh, _) = setup(dir.path());
+        let g = sh.graph.take().unwrap();
+        let mut app = App::new(
+            sh.review.clone(),
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            survol_core::config::Config::default(),
+        );
+        app.set_graph(g);
+        app.on_key(key('3'));
+        app.on_key(key('M'));
+        app.graph.map.ensure(app.sh.graph.as_ref().unwrap());
+        let scope = app.graph.map.scope().clone();
+        app.on_key(code(KeyCode::Enter));
+        assert_ne!(*app.graph.map.scope(), scope);
+        app.on_key(code(KeyCode::Backspace));
+        assert_eq!(app.view, View::Graph);
+        assert_eq!(app.graph.mode, Mode::Map);
+        assert_eq!(*app.graph.map.scope(), scope);
+        // ]c: the next changed box; zc: no folds in the map.
+        app.on_key(key('z'));
+        app.on_key(key('c'));
+        assert!(app.sh.message().unwrap().contains("no folds"));
     }
 }

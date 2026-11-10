@@ -216,7 +216,7 @@ impl MapState {
         }
     }
 
-    /// The middle box and its columns as a Mermaid flowchart (`x` / `X`).
+    /// The middle box and its columns as a Mermaid flowchart (`y` / `gx`).
     pub fn diagram(&self) -> Option<Diagram> {
         let center = self.center?;
         let label = |i: usize| {
@@ -415,7 +415,7 @@ impl MapState {
     }
 
     /// `n` / `N`: the next / previous changed box of the level to the middle.
-    fn next_changed(&mut self, forward: bool) {
+    pub fn next_changed(&mut self, forward: bool) {
         if let Some(i) = next_changed(&self.level, self.center, forward) {
             self.recenter(i);
         }

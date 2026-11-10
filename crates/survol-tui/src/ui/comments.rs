@@ -236,7 +236,7 @@ pub fn render_panel(f: &mut Frame, area: Rect, app: &mut App) {
             Line::from(" Delete this draft?  y / n ".fg(theme().warn).bold())
         }
         _ => Line::from(
-            " Enter go / edit summary · e edit (reply on a discussion) · t thread · d delete · S summary · p publish · r refresh · Esc close ",
+            " Enter go / edit summary · c edit (reply on a discussion) · e editor · t thread · d delete · S summary · p publish · r refresh · ? keys · Esc ",
         )
         .fg(theme().meta),
     };
@@ -550,7 +550,7 @@ pub fn render_thread(f: &mut Frame, area: Rect, app: &mut App, v: &mut ThreadVie
     v.height = inner_h;
     v.total = lines.len();
     v.scroll = v.scroll.min(lines.len().saturating_sub(inner_h));
-    let hint = format!(" {write} · n/N next thread · j/k scroll · Esc close ");
+    let hint = format!(" {write} · e editor · n/N next thread · j/k scroll · ? keys · Esc ");
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(lines).scroll((v.scroll as u16, 0)).block(

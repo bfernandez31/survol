@@ -135,7 +135,7 @@ pub fn render_answer(f: &mut Frame, area: Rect, v: &mut AnswerView, hl: &Highlig
         (area.height * 9 / 10).max(10),
     );
     let block = popup_block(format!(" {} ", v.answer.label)).title_bottom(
-        Line::from(" Tab/n link · Enter go (graph) · d diff · e editor · j/k scroll · A history · Esc close ")
+        Line::from(" Tab/n link · Enter go (graph) · gd diff · gf file · e editor · j/k scroll · A history · ? keys · Esc ")
             .fg(theme().meta),
     );
     let inner = block.inner(rect);

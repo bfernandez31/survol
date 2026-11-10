@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use survol_core::graph::EdgeKind;
 
 use super::explorer::{self, SideItem};
-use super::{Focus, Row, Scroll, push_hunk_rows};
+use super::{Focus, Fold, Row, Scroll, push_hunk_rows};
 use crate::app::{Action, Shared};
 use crate::views::comments::{CommentTarget, row_target};
 use crate::views::graph::symbol_at_position;
@@ -51,7 +51,8 @@ pub struct DiffView {
     pub explorer: explorer::Mode,
     /// Folded directories of the sidebar, by key.
     folded_dirs: HashSet<String>,
-    pending: Option<char>,
+    /// First key of a prefix (`g`, `z`, `]`, `[`) waiting for the second.
+    pub pending: Option<char>,
     /// Other end of a `V` selection (row index).
     pub visual: Option<usize>,
     /// [`NoteIndex::generation`](crate::views::comments::NoteIndex) the rows were built with.
@@ -490,12 +491,82 @@ impl DiffView {
         }
     }
 
+    /// `[u`: the unreviewed hunk before the cursor, going round.
+    fn prev_unreviewed(&mut self, sh: &mut Shared) {
+        let r = self
+            .find(false, |r| Self::is_unreviewed(sh, r))
+            .or_else(|| {
+                (self.pos.cursor + 1..self.rows.len())
+                    .rev()
+                    .find(|&i| Self::is_unreviewed(sh, &self.rows[i]))
+            });
+        match r {
+            Some(r) => self.goto_top(r),
+            None => sh.notify("everything is reviewed"),
+        }
+    }
+
+    /// `]t` / `[t`: the next / previous note (draft or discussion).
+    fn next_thread(&mut self, sh: &mut Shared, forward: bool) {
+        match self.find(forward, |r| matches!(r, Row::Comment { part: 0, .. })) {
+            Some(r) => self.goto(r),
+            None => sh.notify(if forward {
+                "no thread below"
+            } else {
+                "no thread above"
+            }),
+        }
+    }
+
+    /// `]` / `[` then `c` hunk, `f` file, `t` thread, `u` unreviewed.
+    fn bracket(&mut self, sh: &mut Shared, forward: bool, c: char) {
+        match c {
+            'c' => self.next_hunk(forward),
+            'f' => self.next_file(forward),
+            't' => self.next_thread(sh, forward),
+            'u' if forward => self.next_unreviewed(sh),
+            'u' => self.prev_unreviewed(sh),
+            _ => {
+                let p = if forward { ']' } else { '[' };
+                sh.notify(format!(
+                    "{p}c hunk · {p}f file · {p}t thread · {p}u unreviewed ({p} alone is a prefix now)"
+                ))
+            }
+        }
+    }
+
+    /// `gG`: the Stack group of the hunk under the cursor (or of the file's
+    /// first hunk).
+    fn show_group(&self, sh: &mut Shared) -> Action {
+        let d = &sh.review.diff;
+        let hunk = self
+            .anchor()
+            .and_then(|a| a.hunk)
+            .or_else(|| d.files[self.current_file()].hunk_ids.first().copied());
+        match hunk {
+            Some(h) => Action::ShowGroup(h),
+            None => {
+                sh.notify("this file has no hunk to find in a group");
+                Action::None
+            }
+        }
+    }
+
     // ----- review actions -----------------------------------------------
 
-    fn toggle_hunk(&mut self, sh: &mut Shared) {
+    /// `space` (`advance`: then the next unreviewed hunk) and `x`: the hunk
+    /// under the cursor reviewed or not; on a file header, the file.
+    fn toggle_hunk(&mut self, sh: &mut Shared, advance: bool) {
         let Some(h) = self.anchor().and_then(|a| a.hunk) else {
             return self.toggle_file(sh);
         };
+        if !advance {
+            let d = &sh.review.diff;
+            let reviewed = !sh.state.is_hunk_reviewed(d, h);
+            sh.state.set_hunk(d, h, reviewed);
+            sh.save();
+            return;
+        }
         let d = &sh.review.diff;
         let reviewed = !sh.state.is_hunk_reviewed(d, h);
         sh.state.set_hunk(d, h, reviewed);
@@ -540,11 +611,20 @@ impl DiffView {
         self.collapse(sh, f, !self.collapsed[f]);
     }
 
-    /// `o` / `za`: the note under the cursor whole or folded, else the file.
-    fn toggle_here(&mut self, sh: &mut Shared) {
+    /// `o` / `za` / `zo` / `zc`: the note under the cursor whole or folded,
+    /// else the file.
+    fn fold_here(&mut self, sh: &mut Shared, fold: Fold) {
         match self.rows.get(self.pos.cursor) {
-            Some(&Row::Comment { note, .. }) => self.toggle_note(sh, note),
-            _ => self.toggle_collapse(sh),
+            Some(&Row::Comment { note, .. }) => {
+                let folded = !sh.notes.is_expanded(note);
+                if fold.folded(folded) != folded {
+                    self.toggle_note(sh, note);
+                }
+            }
+            _ => {
+                let f = self.current_file();
+                self.collapse(sh, f, fold.folded(self.collapsed[f]));
+            }
         }
     }
 
@@ -644,11 +724,18 @@ impl DiffView {
                     self.side_sel = 0;
                 }
                 ('g', KeyCode::Char('s')) => return self.show_symbol(sh),
+                ('g', KeyCode::Char('G')) => return self.show_group(sh),
+                ('g', KeyCode::Char('d')) => {
+                    sh.notify("already in the Diff view (gs: Graph, gG: Stack group)")
+                }
                 ('g', KeyCode::Char('f')) => {
                     let (hunk, line) = self.anchor().map_or((None, None), |a| (a.hunk, a.line));
                     return sh.whole_file(self.current_file(), hunk, line);
                 }
-                ('z', KeyCode::Char('a' | 'o' | 'c')) => self.toggle_here(sh),
+                ('z', KeyCode::Char(c)) if Fold::of(c).is_some() => {
+                    self.fold_here(sh, Fold::of(c).unwrap_or(Fold::Toggle))
+                }
+                (']' | '[', KeyCode::Char(c)) => self.bracket(sh, p == ']', c),
                 ('z', KeyCode::Char('M')) if self.focus == Focus::List => {
                     self.fold_all_dirs(sh, true)
                 }
@@ -663,11 +750,7 @@ impl DiffView {
         }
 
         match key.code {
-            KeyCode::Char('g') | KeyCode::Char('z') if !ctrl => {
-                if let KeyCode::Char(c) = key.code {
-                    self.pending = Some(c);
-                }
-            }
+            KeyCode::Char(c @ ('g' | 'z' | ']' | '[')) if !ctrl => self.pending = Some(c),
             KeyCode::Char('h') if ctrl => {
                 self.sidebar_visible = true;
                 self.focus = Focus::List;
@@ -692,22 +775,47 @@ impl DiffView {
             KeyCode::PageDown => self.move_by(page),
             KeyCode::Char('G') | KeyCode::End => self.goto(self.rows.len().saturating_sub(1)),
             KeyCode::Home => self.goto(0),
-            KeyCode::Char('n') | KeyCode::Char('}') => self.next_hunk(true),
-            KeyCode::Char('N') | KeyCode::Char('{') => self.next_hunk(false),
-            KeyCode::Char('J') | KeyCode::Char(']') => self.next_file(true),
-            KeyCode::Char('K') | KeyCode::Char('[') => self.next_file(false),
+            KeyCode::Char('n') => self.next_hunk(true),
+            KeyCode::Char('N') => self.next_hunk(false),
+            KeyCode::Char(c @ ('}' | '{')) => {
+                sh.once(
+                    "}",
+                    "} / { are now ]c / [c (next / previous hunk); they stay aliases until 0.4",
+                );
+                self.next_hunk(c == '}');
+            }
+            KeyCode::Char('J') => self.next_file(true),
+            KeyCode::Char('K') => self.next_file(false),
             KeyCode::Char('u') => self.next_unreviewed(sh),
             KeyCode::Char('m') => self.cycle_explorer(sh),
-            KeyCode::Char(' ') if self.focus == Focus::List && self.selected_dir().is_some() => {
+            KeyCode::Char(' ' | 'x' | 'X')
+                if self.focus == Focus::List && self.selected_dir().is_some() =>
+            {
                 let files = self
                     .selected_dir()
                     .map(|(_, f)| f.to_vec())
                     .unwrap_or_default();
                 self.review_dir(sh, files);
             }
-            KeyCode::Char(' ') => self.toggle_hunk(sh),
-            KeyCode::Char('r') | KeyCode::Char('v') => self.toggle_file(sh),
-            KeyCode::Char('o') => self.toggle_here(sh),
+            KeyCode::Char(' ') => self.toggle_hunk(sh, true),
+            KeyCode::Char('x') if self.focus == Focus::List => self.toggle_file(sh),
+            KeyCode::Char('x') => self.toggle_hunk(sh, false),
+            KeyCode::Char('X') => self.toggle_file(sh),
+            KeyCode::Char('r') => {
+                sh.once(
+                    "r",
+                    "r is now X (file reviewed); r stays an alias until 0.4",
+                );
+                self.toggle_file(sh);
+            }
+            KeyCode::Char('v') => {
+                sh.once(
+                    "v",
+                    "v now selects lines, like V (X marks the file reviewed)",
+                );
+                return self.on_key(sh, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+            }
+            KeyCode::Char('o') => self.fold_here(sh, Fold::Toggle),
             KeyCode::Char('e') => self.open_in_editor(sh),
             // The list shows files: `c` and `C` both comment the selected one.
             KeyCode::Char('c' | 'C') if self.focus == Focus::List => {
@@ -757,7 +865,15 @@ impl DiffView {
                 Some(&Row::Comment { note, .. }) => {
                     return Action::Thread(sh.notes.items[note as usize].kind);
                 }
-                _ => self.open_in_editor(sh),
+                // Down a level: the whole file (`e` opens the editor).
+                _ => {
+                    sh.once(
+                        "enter-line",
+                        "Enter on a line opens the whole file now (e: the editor)",
+                    );
+                    let (hunk, line) = self.anchor().map_or((None, None), |a| (a.hunk, a.line));
+                    return sh.whole_file(self.current_file(), hunk, line);
+                }
             },
             KeyCode::Esc if !self.filter.is_empty() => self.set_filter(sh, String::new()),
             _ => {}
@@ -765,7 +881,7 @@ impl DiffView {
         Action::None
     }
 
-    fn on_sidebar_key(&mut self, sh: &Shared, key: KeyEvent) {
+    fn on_sidebar_key(&mut self, sh: &mut Shared, key: KeyEvent) {
         let dir = self
             .selected_dir()
             .map(|(k, _)| (k.to_string(), self.folded_dirs.contains(k)));
@@ -786,7 +902,12 @@ impl DiffView {
                 None => self.focus = Focus::Content,
             },
             KeyCode::Esc if !self.filter.is_empty() => self.set_filter(sh, String::new()),
-            KeyCode::Esc => self.focus = Focus::Content,
+            KeyCode::Esc => {
+                sh.once(
+                    "esc-list",
+                    "Esc stays in the list now: l, Enter or Ctrl-l go to the diff",
+                );
+            }
             _ => {}
         }
     }
