@@ -148,6 +148,8 @@ pub struct StackView {
     pub list_hidden: bool,
     /// Waiting for y/n before regrouping with the LLM.
     pub confirm_regroup: bool,
+    /// Waiting for y/n before folding / unfolding the rename-only hunks.
+    pub confirm_fold_renames: bool,
     pub show_warnings: bool,
     pending: Option<char>,
     /// Other end of a `V` selection (content row index).
@@ -159,7 +161,10 @@ pub struct StackView {
 impl StackView {
     /// Keys this view handles before the global ones (prompts, popups, prefixes).
     pub fn captures_keys(&self) -> bool {
-        self.confirm_regroup || self.show_warnings || self.pending.is_some()
+        self.confirm_regroup
+            || self.confirm_fold_renames
+            || self.show_warnings
+            || self.pending.is_some()
     }
 
     /// Displays a new grouping: mechanical and reviewed groups folded, the
@@ -810,6 +815,14 @@ impl StackView {
             sh.notify("regrouping cancelled");
             return Action::None;
         }
+        if self.confirm_fold_renames {
+            self.confirm_fold_renames = false;
+            if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                return Action::FoldRenames;
+            }
+            sh.notify("cancelled");
+            return Action::None;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(p) = self.pending.take() {
             match (p, key.code) {
@@ -850,6 +863,13 @@ impl StackView {
                     self.confirm_regroup = true;
                 } else {
                     return Action::Regroup;
+                }
+            }
+            KeyCode::Char('F') => {
+                if llm_enabled {
+                    self.confirm_fold_renames = true;
+                } else {
+                    return Action::FoldRenames;
                 }
             }
             KeyCode::Char('w') => match &self.grouping {
@@ -1230,5 +1250,12 @@ pub(crate) mod tests {
         v.on_key(&mut sh, key('R'), true);
         assert_eq!(v.on_key(&mut sh, key('y'), true), Action::Regroup);
         assert_eq!(v.on_key(&mut sh, key('R'), false), Action::Regroup);
+
+        assert_eq!(v.on_key(&mut sh, key('F'), true), Action::None);
+        assert!(v.captures_keys());
+        assert_eq!(v.on_key(&mut sh, key('n'), true), Action::None);
+        v.on_key(&mut sh, key('F'), true);
+        assert_eq!(v.on_key(&mut sh, key('y'), true), Action::FoldRenames);
+        assert_eq!(v.on_key(&mut sh, key('F'), false), Action::FoldRenames);
     }
 }

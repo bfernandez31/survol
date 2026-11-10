@@ -17,6 +17,7 @@ pub mod llm;
 pub mod lsp;
 pub mod mechanical;
 pub mod model;
+pub mod renames;
 pub mod review;
 pub mod review_state;
 

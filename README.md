@@ -109,6 +109,16 @@ tests…), each group with a title and a 2–3 line functional summary. `--lang 
   the groups whose symbols others use first.
 - A **mechanical** group (lockfiles, generated code, whitespace-only changes, pure renames,
   binaries) is detected without the LLM, placed last, folded, and validated with one `space`.
+- The hunks that only **follow a rename or a move** get their own group, *Renames, moves
+  and imports*, also detected without the LLM, folded and placed last: the hunks changing
+  only import / package lines (layer `imports`), and those whose code is the same once the
+  renamed names are replaced (layer `renames`; the summary lists the renames and how many
+  hunks follow each). A name counts as renamed only when the old one is gone from the
+  whole head revision and the new one did not exist at the base, so a call switched from
+  one existing method to another stays in its functional group; so does a hunk that
+  changes anything else, a string literal included. It compares tokens, not syntax trees:
+  any language works. `F` puts these hunks back with the others, or sets them aside again
+  (`[review] fold_renames`, `--no-fold-renames`); both groupings are cached.
 - `space` validates the whole node (group, layer or hunk) and moves on. `R` regroups
   without cache (asks first: it is a new LLM call). `w` shows grouping warnings.
 - Without the LLM (`--no-llm`), groups are built by directory.
@@ -358,6 +368,8 @@ remote = "origin"                  # remote to detect the forge from and to fetc
 mechanical_globs = []              # extra globs for the mechanical group, on top of the built-in
                                    # ones (lockfiles, wrappers, *.min.*, *.map, generated/...)
 # mechanical_globs = ["**/openapi/generated/**"]
+fold_renames = true                # Stack view: the hunks that only follow a rename or a move
+                                   # (imports, renamed names) in their own group; `F` toggles it
 
 [llm]
 enabled = true                     # false: never call the LLM (same as --no-llm)
@@ -525,6 +537,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `n` / `N` (content) | next / previous hunk |
 | `w` | grouping warnings |
 | `R` | regroup without cache (asks: LLM call) |
+| `F` | rename / move / import-only hunks: in their own group, or with the others (asks: LLM call unless cached) |
 | `gs` | Graph view of the hunk's symbol |
 | `c` / `V` then `c` / `C` (content) | comment line / range / file |
 | `o` / `za`, `Enter` on a note | whole note / fold it back; its thread |
@@ -577,6 +590,8 @@ survol [OPTIONS] [TARGET]
   --no-llm      never call the LLM (same as [llm] enabled = false)
   --lang LANG   language of LLM-written text (overrides [llm] language)
   --no-lsp      do not start language servers (same as [lsp] enabled = false)
+  --no-fold-renames  group the hunks that only follow a rename or a move like the
+                others (same as [review] fold_renames = false)
 ```
 
 ### `survol-cli`
@@ -590,7 +605,7 @@ The engine as JSON commands, for scripts, tests and debugging. Every command tak
 | `config` | Prints the effective configuration and where it is read from | |
 | `fetch` | Fetches a merge / pull request and checks it out in its worktree | |
 | `diff` | Parsed diff (files, hunks) as JSON | |
-| `group` | Stack grouping as JSON | `--no-cache`, `--no-llm`, `--lang` |
+| `group` | Stack grouping as JSON | `--no-cache`, `--no-llm`, `--lang`, `--no-fold-renames` |
 | `graph` | Changed symbols with callers, callees, tests as JSON | `--symbol NAME`, `--modules`, `--mermaid`, `--no-cache`, `--lsp` (refine and print edge counts by confidence before / after on stderr) |
 | `flows` | Impacted entry points and their end-to-end flows, with before / after | `--entry NAME`, `--mermaid`, `--no-base`, `--no-cache` |
 | `ask` | Asks a question about a symbol, a group or a hunk | `--symbol NAME`, `--group N` (1 = first), `--hunk ID`, `--no-cache`, `--prompt` (print the prompt, no LLM call), `--lang` |

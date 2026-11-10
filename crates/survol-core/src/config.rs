@@ -83,11 +83,23 @@ impl Default for GitConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReviewConfig {
     /// Extra globs for the mechanical / noise group, added to the built-in ones.
     pub mechanical_globs: Vec<String>,
+    /// Set aside, in their own group of the Stack view, the hunks that only
+    /// follow a rename or a move (see [`crate::renames`]).
+    pub fold_renames: bool,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            mechanical_globs: Vec::new(),
+            fold_renames: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

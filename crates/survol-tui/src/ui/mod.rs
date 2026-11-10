@@ -298,6 +298,16 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 .fg(t.warn)
                 .bold(),
         )
+    } else if app.view == View::Stack && app.stack.confirm_fold_renames {
+        Line::from(
+            if app.cfg.review.fold_renames {
+                " Group the rename-only hunks like the others? New LLM call, unless already cached.  y / n"
+            } else {
+                " Set the rename-only hunks aside in their own group? New LLM call, unless already cached.  y / n"
+            }
+            .fg(t.warn)
+            .bold(),
+        )
     } else if let Some(m) = app.sh.message() {
         Line::from(m.to_string().fg(t.warn))
     } else {
@@ -385,6 +395,10 @@ const HELP: &[(&str, &str)] = &[
     ("n / N (content)", "next / previous hunk"),
     ("w", "grouping warnings"),
     ("R", "regroup without cache (asks: LLM call)"),
+    (
+        "F",
+        "rename / move / import-only hunks: own group, or with the others",
+    ),
     ("gs", "Graph view of the hunk's symbol"),
     ("c / V then c / C (content)", "comment line / range / file"),
     ("o / za, Enter on a note", "whole note / fold; its thread"),

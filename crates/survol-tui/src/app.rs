@@ -62,6 +62,8 @@ pub enum Action {
     ShowFile(usize),
     /// Recompute the grouping without cache.
     Regroup,
+    /// Set aside, or not, the hunks that only follow a rename, and regroup.
+    FoldRenames,
     /// Show this symbol in the Graph view.
     ShowSymbol(SymIdx),
     /// Show this line (index in the hunk) in the Diff view.
@@ -750,6 +752,20 @@ impl App {
                     self.sh.notify("grouping is already running");
                 } else {
                     self.start_grouping(false);
+                }
+            }
+            Action::FoldRenames => {
+                if self.grouping_running() {
+                    self.sh.notify("grouping is already running");
+                } else {
+                    let fold = !self.cfg.review.fold_renames;
+                    self.cfg.review.fold_renames = fold;
+                    self.sh.notify(if fold {
+                        "hunks that only follow a rename or a move: in their own group"
+                    } else {
+                        "hunks that only follow a rename or a move: grouped like the others"
+                    });
+                    self.start_grouping(true);
                 }
             }
         }

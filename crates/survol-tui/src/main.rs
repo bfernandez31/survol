@@ -50,6 +50,10 @@ struct Cli {
     /// (same as `[lsp] enabled = false`).
     #[arg(long)]
     no_lsp: bool,
+    /// Group the hunks that only follow a rename or a move like the others
+    /// (same as `[review] fold_renames = false`).
+    #[arg(long)]
+    no_fold_renames: bool,
 }
 
 fn main() -> Result<()> {
@@ -64,6 +68,7 @@ fn main() -> Result<()> {
     let mut cfg = Config::load(Some(repo.dir()))?;
     cfg.llm.enabled &= !cli.no_llm;
     cfg.lsp.enabled &= !cli.no_lsp;
+    cfg.review.fold_renames &= !cli.no_fold_renames;
     cfg.llm.override_language(cli.lang.as_deref());
     theme::init(theme::Theme::from_config(&cfg.theme).map_err(anyhow::Error::msg)?);
     let target = Target::parse(cli.target.as_deref())?;
