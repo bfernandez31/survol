@@ -497,37 +497,43 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `Ctrl-h` / `Ctrl-l` | focus list / content pane |
 | `B` | show / hide the list pane |
 | `j` / `k`, `Ctrl-d` / `Ctrl-u` | move, half page down / up |
+| `Ctrl-f` / `Ctrl-b` | page down / up |
 | `gg` / `G` | top / bottom |
-| `h` / `l`, `0` | scroll content horizontally, reset |
-| `s` | unified ↔ split |
+| `h` / `l`, `0` | content: scroll horizontally, reset (lists: fold / unfold, parent) |
+| `Ctrl-o` | back where a jump came from (`gd`, `gs`, `Enter`, a link of an answer, the Review panel) |
+| `s` | unified ↔ split (also the layout `gf` opens in) |
 | `gf` | whole file at the head, changes in place (see Popups) |
 | `e` | open in editor (parent Neovim if any) |
 | `a` | ask the LLM about the node / group / hunk |
 | `A` | last answer, then the review's questions |
 | `P` | Review panel: drafts, summary, discussions, publish |
-| `?` | keys of the current view |
-| `q` | quit (state is saved on each change) |
-| `Ctrl-r` | reload: reopen the review in the same view (new snapshot of the working tree, new commits of the MR / PR) |
+| `?` | keys of the current view (`j` / `k`, `Ctrl-d` / `Ctrl-u`, `gg` / `G` scroll them) |
+| `q`, `Ctrl-c` | quit (state is saved on each change; `q` waits for a publication to end) |
+| `Ctrl-r` | reload: reopen the review in the same view (new snapshot of the working tree, new commits of the MR / PR); not while publishing, twice while a question or the grouping runs |
+
+Letters typed with `Ctrl` never do what the letter alone does (`Ctrl-v` is not `v`).
 
 ### Diff
 
 | Key | Action |
 |---|---|
-| `n` / `N` (`{` `}`) | next / previous hunk |
-| `J` / `K` (`[` `]`) | next / previous file |
+| `n` / `N` (`}` `{`) | next / previous hunk |
+| `J` / `K` (`]` `[`) | next / previous file |
 | `u` | next unreviewed hunk |
 | `space` | toggle hunk reviewed, go to next |
 | `r` / `v` | toggle file reviewed (folds it) |
-| `o` / `za`, `Enter` on header | fold / unfold file |
+| `o` / `za`, `Enter` on header | fold / unfold file (`zo`, `zc` toggle too) |
 | `zM` / `zR` | fold / unfold all (in the list: every directory) |
 | `/` | filter files, `Esc` to clear |
 | `m` | file list: tree → pairs (classes and their tests) → flat |
 | `h` / `l` (list) | fold / unfold directory, parent |
 | `space` on a directory (list) | mark all its files reviewed |
+| `Esc` (list) | clear the filter, else focus the diff |
 | `gs` | Graph view of the symbol under the cursor |
 | `c` | comment the line (on a draft: edit; on a thread: reply) |
 | `V` then `c` | select lines, comment the range |
-| `C` | comment the whole file |
+| `C`; `c` / `C` in the list | comment the whole file |
+| `Enter` on a line | open it in the editor (as `e`) |
 | `o` / `za` on a note | show the whole note, fold it back |
 | `Enter` on a note | its thread: code, note, replies (`c` reply, `n` / `N` next) |
 
@@ -537,16 +543,18 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 |---|---|
 | `space` | toggle group / layer / hunk reviewed, go on |
 | `u` | next unreviewed group |
-| `J` / `K` (`[` `]`) | next / previous group |
+| `J` / `K` (`]` `[`) | next / previous group |
 | `h` / `l` (list) | fold / unfold, parent / child |
 | `o` / `za`, `zM` / `zR` | fold / unfold node, all |
-| `Enter` / `gd` | show the hunk in the Diff view |
-| `n` / `N` (content) | next / previous hunk |
+| `Enter` / `gd` | the Diff view: at the line (content), at the node's first hunk (list) |
+| `n` / `N` (`}` `{`) (content) | next / previous hunk |
+| `Esc` (content) | focus the tree |
 | `w` | grouping warnings |
 | `R` | regroup without cache (asks: LLM call) |
 | `F` | rename / move / import-only hunks: in their own group, or with the others (asks: LLM call unless cached) |
 | `gs` | Graph view of the hunk's symbol |
 | `c` / `V` then `c` / `C` (content) | comment line / range / file |
+| `C` (list) | comment the file of the node (when it has one file) |
 | `o` / `za`, `Enter` on a note | whole note / fold it back; its thread |
 
 ### Graph
@@ -555,20 +563,21 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 |---|---|
 | `m` | mode: changed symbols / search / module map / flows / symbol |
 | `Enter` | symbol: focus it (new root); section / module: fold |
+| `o` / `za` | fold / unfold the section or module |
 | `l` / `h` | expand / collapse (callers of callers…), parent |
-| `Backspace` / `Ctrl-o` | back to the previous symbol or list |
-| `n` / `N` (`J` / `K`) | next / previous section or module |
-| `/` | find a symbol by name (changed or not) |
+| `Backspace` / `Ctrl-o` | back to the previous symbol or list, then where a jump came from |
+| `n` / `N` (`J` / `K`, `]` `[`) | next / previous section or module |
+| `/` | find a symbol by name (changed or not); `Esc` on the results: back |
 | `e` | open the node's line in the editor |
 | `gd` | the symbol's hunks in the Diff view |
-| `Ctrl-l`, `j` / `k` | preview pane, scroll it |
+| `Ctrl-l`, `j` / `k` | preview pane, scroll it; `Enter`: editor |
 | `t` (module map) | all modules ↔ changed ones and their neighbours |
-| `x` | write the module map as Mermaid (`.git/survol/exports`) |
-| `X` | same, plus an HTML page opened in the browser |
+| `x` (module map) | write the module map as Mermaid (`.git/survol/exports`) |
+| `X` (module map) | same, plus an HTML page opened in the browser |
 | `S` | add the last exported diagram to the overall comment |
 | `f` | flows: impacted entry points and their end-to-end flow |
 | flows: `Enter` / `l`, `h` | into the flow, back to the entry points |
-| flows: `n` / `N` | next / previous changed (or added / removed) step |
+| flows: `n` / `N` (`]` `[`) | next / previous changed (or added / removed) step |
 | flows: `Enter` | symbol view of the step |
 | flows: `b` | after → before → merged (when the flow differs) |
 | flows: `x` / `X` | write the flow as Mermaid (`X`: and open it in the browser) |
@@ -580,10 +589,10 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | Question input | type, or `↑` / `↓` (`Tab`, `Ctrl-n` / `Ctrl-p`) or `1`–`9` to pick a suggestion; `Ctrl-u` clear; `Enter` ask; `Esc` cancel |
 | Answer | `Tab` / `n`, `Shift-Tab` / `N` next / previous link; `Enter` go (Graph, else Diff); `d` Diff; `e` editor; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `A` history; `Esc` / `q` close |
 | Comment editor | `Ctrl-s` or `Alt-Enter` save; `Enter` new line; `Tab` indent; `Ctrl-u` clear the line; `Esc` cancel (twice if the text changed) |
-| Whole file (`gf`) | `n` / `N` next / previous change; `]c` / `[c` next / previous thread; `d` hide / show removed lines; `s` side by side; `c`, `V` then `c` comment a diff line / range; `o` / `za` fold a note; `Enter` on a note: thread, else editor; `e` editor; `h` / `l`, `gg` / `G`, `Ctrl-d` / `Ctrl-u` move; `Esc` / `q` close |
-| Thread | `c` reply (edit on a draft); `n` / `N` next / previous thread; `j` / `k`, `Ctrl-d` / `Ctrl-u` scroll; `Esc` / `q` close |
-| Review panel | `Enter` go / edit summary; `e` edit (reply on a discussion); `t` thread; `d` delete; `S` summary; `p` publish; `r` refresh; `Esc` / `P` close |
-| Publish confirmation | `y` publish; `n` cancel; `J` exact JSON requests; `j` / `k` scroll |
+| Whole file (`gf`) | `n` / `N` next / previous change; `]c` / `[c` next / previous thread; `d` hide / show removed lines; `s` side by side (opens in the layout of the views); `c`, `V` then `c` comment a diff line / range; `o` / `za` fold a note; `Enter` on a note: thread, else editor; `e` editor; `h` / `l`, `gg` / `G`, `Ctrl-d` / `Ctrl-u`, `Ctrl-f` / `Ctrl-b` move; `Esc` / `q` close |
+| Thread | `c` / `e` reply (edit on a draft); `n` / `N` (`Tab` / `Shift-Tab`) next / previous thread; `j` / `k`, `Ctrl-d` / `Ctrl-u`, `space` scroll; `g` / `G` top / bottom; `Esc` / `q` close |
+| Review panel | `Enter` go / edit summary; `e` / `c` edit (reply on a discussion); `t` thread; `d` / `x` delete; `S` summary; `p` publish; `r` refresh; `j` / `k`, `g` / `G` move; `Esc` / `q` / `P` close |
+| Publish confirmation | `y` publish; `J` exact JSON requests; `j` / `k` scroll; any other key cancels |
 
 ## CLI reference
 
@@ -672,7 +681,7 @@ survol.nvim (Neovim ≥ 0.10) lives in [`nvim/`](nvim). Commands work without `s
 | `:SurvolClose` | Stops survol |
 | `:checkhealth survol` | Neovim version, binary and version, RPC socket |
 
-**Round trip.** `e` in the TUI calls `require("survol").open_file(path, line, col)` in the
+**Round trip.** `e` in the TUI (or `Enter` on a line of the Diff view) calls `require("survol").open_file(path, line, col)` in the
 parent Neovim through `nvim --server $NVIM --remote-expr`. The float is hidden, not
 closed, and the file opens at the line (an existing window already showing it is reused).
 `:SurvolBack` or your toggle key shows the same TUI at the same position. Without the

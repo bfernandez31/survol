@@ -22,6 +22,15 @@ struct Anchor {
     note: Option<(u32, u16)>,
 }
 
+/// Where the cursor of the Diff view stands, to come back to it (`Ctrl-o`).
+#[derive(Debug, Clone, Copy)]
+pub struct Place {
+    anchor: Anchor,
+    /// Cursor row minus scroll.
+    offset: usize,
+    focus: Focus,
+}
+
 pub struct DiffView {
     pub rows: Vec<Row>,
     /// File of each row.
@@ -142,6 +151,28 @@ impl DiffView {
             line,
             note,
         })
+    }
+
+    /// Where the cursor stands, independent of folds.
+    pub fn place(&self) -> Option<Place> {
+        Some(Place {
+            anchor: self.anchor()?,
+            offset: self.pos.cursor.saturating_sub(self.pos.scroll),
+            focus: self.focus,
+        })
+    }
+
+    /// Back to `p`, unfolding its file if needed.
+    pub fn restore(&mut self, sh: &Shared, p: Place) {
+        if p.anchor.hunk.is_some() {
+            self.unfold(sh, p.anchor.file);
+        }
+        self.visual = None;
+        self.focus = p.focus;
+        self.pos.cursor = self.locate(p.anchor);
+        self.pos.scroll = self.pos.cursor.saturating_sub(p.offset);
+        self.clamp();
+        self.sync_sidebar();
     }
 
     /// Rebuilds the rows, keeping the cursor on the same content.
@@ -598,6 +629,10 @@ impl DiffView {
             self.on_filter_key(sh, key);
             return Action::None;
         }
+        if super::stray_ctrl(&key, &['d', 'u', 'f', 'b', 'h', 'l']) {
+            self.pending = None;
+            return Action::None;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pos.height / 2).max(1) as isize;
         let page = self.pos.height.max(1) as isize;
@@ -674,9 +709,24 @@ impl DiffView {
             KeyCode::Char('r') | KeyCode::Char('v') => self.toggle_file(sh),
             KeyCode::Char('o') => self.toggle_here(sh),
             KeyCode::Char('e') => self.open_in_editor(sh),
+            // The list shows files: `c` and `C` both comment the selected one.
+            KeyCode::Char('c' | 'C') if self.focus == Focus::List => {
+                match self.sidebar.get(self.side_sel) {
+                    Some(SideItem::Dir { .. }) => {
+                        sh.notify("select a file to comment on it (not a directory)")
+                    }
+                    Some(&SideItem::File { file, .. }) => {
+                        return Action::Comment(CommentTarget::File(file));
+                    }
+                    None => return Action::Comment(CommentTarget::File(self.current_file())),
+                }
+            }
+            KeyCode::Char('V') if self.focus == Focus::List => {
+                sh.notify("V: select lines in the diff pane (l / Enter / Ctrl-l)")
+            }
             KeyCode::Char('C') => return Action::Comment(CommentTarget::File(self.current_file())),
-            KeyCode::Char('c') if self.focus == Focus::Content => return self.comment(sh),
-            KeyCode::Char('V') if self.focus == Focus::Content => {
+            KeyCode::Char('c') => return self.comment(sh),
+            KeyCode::Char('V') => {
                 self.visual = match self.visual {
                     Some(_) => None,
                     None => Some(self.pos.cursor),

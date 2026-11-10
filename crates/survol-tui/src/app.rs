@@ -27,7 +27,7 @@ use crate::views::comments::{
     CommentTarget, Confirm, Editor, EditorOutcome, NoteIndex, NoteKind, PanelOutcome, PanelRow,
     ReviewPanel, ThreadOutcome, ThreadView, panel_rows,
 };
-use crate::views::diff::DiffView;
+use crate::views::diff::{self, DiffView};
 use crate::views::fileview::{FileOutcome, FileView};
 use crate::views::graph::GraphView;
 use crate::views::stack::StackView;
@@ -83,6 +83,21 @@ pub enum Action {
         line: u32,
     },
 }
+
+/// Where a jump (`gd`, `gs`, `Enter` in the Stack, a link of an answer, a
+/// row of the Review panel) came from: `Ctrl-o` goes back there.
+#[derive(Debug, Clone, Copy)]
+struct Jump {
+    view: View,
+    /// The Diff cursor, when the jump left the Diff view.
+    diff: Option<diff::Place>,
+    /// Length of the Graph's own back stack right after a jump into the
+    /// Graph view: until it grows, `Ctrl-o` leaves the Graph.
+    graph_depth: Option<usize>,
+}
+
+/// Jumps kept for `Ctrl-o`.
+const MAX_JUMPS: usize = 50;
 
 /// A modal window over the views.
 pub enum Popup {
@@ -360,9 +375,17 @@ pub struct App {
     pub lsp_status: LspStatus,
     lsp_rx: Option<mpsc::Receiver<LspEvent>>,
     pub help: bool,
+    /// First line of the help shown (`j` / `k` scroll it).
+    pub help_scroll: usize,
+    /// `g` typed in the help: `gg` goes to the top.
+    help_g: bool,
     pub quit: bool,
     /// Quit to reopen the review (`Ctrl-r`).
     pub reload: bool,
+    /// `Ctrl-r` pressed while work would be lost: a second one reloads.
+    reload_armed: bool,
+    /// Places left by jumps, most recent last (`Ctrl-o`).
+    jumps: Vec<Jump>,
 
     pub popup: Option<Popup>,
     /// Answers questions (the Claude CLI; a fake in tests).
@@ -409,8 +432,12 @@ impl App {
             lsp_status: LspStatus::NotStarted,
             lsp_rx: None,
             help: false,
+            help_scroll: 0,
+            help_g: false,
             quit: false,
             reload: false,
+            reload_armed: false,
+            jumps: Vec::new(),
             popup: None,
             llm,
             ask_pending: None,
@@ -721,16 +748,22 @@ impl App {
         match action {
             Action::None => {}
             Action::ShowHunk(h) => {
+                let from = self.here();
                 self.diff.reveal_hunk(&self.sh, h);
                 self.switch(View::Diff);
+                self.push_jump(from);
             }
             Action::ShowFile(f) => {
+                let from = self.here();
                 self.diff.reveal_file(&self.sh, f);
                 self.switch(View::Diff);
+                self.push_jump(from);
             }
             Action::ShowLine { hunk, line } => {
+                let from = self.here();
                 self.diff.reveal_line(&self.sh, hunk, line);
                 self.switch(View::Diff);
+                self.push_jump(from);
             }
             Action::Comment(t) => self.open_editor(t, false),
             Action::Thread(kind) => self.open_thread(kind, false),
@@ -746,8 +779,13 @@ impl App {
             },
             Action::ShowSymbol(s) => {
                 if self.sh.graph.is_some() {
+                    let from = self.here();
                     self.graph.show_symbol(&self.sh, s);
                     self.switch(View::Graph);
+                    // Within the Graph view, its own back stack goes back.
+                    if from.view != View::Graph {
+                        self.push_jump(from);
+                    }
                 }
             }
             Action::Regroup => {
@@ -774,6 +812,55 @@ impl App {
         }
     }
 
+    /// The place a jump leaves.
+    fn here(&self) -> Jump {
+        Jump {
+            view: self.view,
+            diff: if self.view == View::Diff {
+                self.diff.place()
+            } else {
+                None
+            },
+            graph_depth: None,
+        }
+    }
+
+    /// Records `from` once the jump is done.
+    fn push_jump(&mut self, mut from: Jump) {
+        if self.view == View::Graph {
+            from.graph_depth = Some(self.graph.back.len());
+        }
+        self.jumps.push(from);
+        if self.jumps.len() > MAX_JUMPS {
+            self.jumps.remove(0);
+        }
+    }
+
+    /// `Ctrl-o` (and `Backspace` in the Graph view): back to where the last
+    /// jump came from. In the Graph view, its own history goes first, back
+    /// to the place the jump arrived at.
+    fn jump_back(&mut self) {
+        if self.view == View::Graph {
+            let depth = self.graph.back.len();
+            let at_jump = self
+                .jumps
+                .last()
+                .is_some_and(|j| j.graph_depth == Some(depth));
+            if !at_jump && (depth > 0 || self.jumps.is_empty()) {
+                return self.graph.go_back(&self.sh);
+            }
+        }
+        let Some(j) = self.jumps.pop() else {
+            return self
+                .sh
+                .notify("no place to go back to (Ctrl-o comes back after gd, gs, Enter…)");
+        };
+        self.switch(j.view);
+        if let Some(p) = j.diff {
+            self.diff.restore(&self.sh, p);
+        }
+    }
+
     fn toggle_layout(&mut self) {
         self.sh.layout = match self.sh.layout {
             Layout::Unified => Layout::Split,
@@ -786,9 +873,9 @@ impl App {
     // ----- keys ---------------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        let reload_armed = std::mem::take(&mut self.reload_armed);
         if self.help {
-            self.help = false;
-            return;
+            return self.on_help_key(key);
         }
         if self.popup.is_some() {
             return self.on_popup_key(key);
@@ -798,8 +885,16 @@ impl App {
             View::Stack => self.stack.captures_keys(),
             View::Graph => self.graph.captures_keys(),
         };
-        if !captured && self.on_global_key(key) {
+        if !captured && self.on_global_key(key, reload_armed) {
             return;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if !captured {
+            match key.code {
+                KeyCode::Char('o') if ctrl => return self.jump_back(),
+                KeyCode::Backspace if self.view == View::Graph => return self.jump_back(),
+                _ => {}
+            }
         }
         if !captured && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             match key.code {
@@ -978,7 +1073,10 @@ impl App {
                 InputOutcome::Submit(q) => self.submit_question(&input, &q),
             },
             Popup::Pending(p) => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self
+                KeyCode::Esc => self
+                    .sh
+                    .notify("still asking in the background: A to come back"),
+                KeyCode::Char('q') if !key.modifiers.contains(KeyModifiers::CONTROL) => self
                     .sh
                     .notify("still asking in the background: A to come back"),
                 _ => self.popup = Some(Popup::Pending(p)),
@@ -1498,25 +1596,85 @@ impl App {
     }
 
     /// Keys valid in every view. Returns whether the key was used.
-    fn on_global_key(&mut self, key: KeyEvent) -> bool {
+    /// `reload_armed`: the previous key was a `Ctrl-r` that asked to confirm.
+    fn on_global_key(&mut self, key: KeyEvent, reload_armed: bool) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('c') if ctrl => self.quit = true,
-            KeyCode::Char('r') if ctrl => {
-                self.reload = true;
-                self.quit = true;
+            KeyCode::Char('q') if !ctrl => {
+                if self.publishing.is_some() {
+                    self.sh
+                        .notify("publishing in progress: wait for it to end before quitting");
+                } else {
+                    self.quit = true;
+                }
             }
-            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('c') if ctrl => self.quit = true,
+            KeyCode::Char('r') if ctrl => self.reload_key(reload_armed),
+            KeyCode::Char('?') if !ctrl => {
+                self.help = true;
+                self.help_scroll = 0;
+            }
             KeyCode::Tab => self.cycle(true),
             KeyCode::BackTab => self.cycle(false),
-            KeyCode::Char('1') => self.switch(View::Diff),
-            KeyCode::Char('2') => self.switch(View::Stack),
-            KeyCode::Char('3') => self.switch(View::Graph),
+            KeyCode::Char('1') if !ctrl => self.switch(View::Diff),
+            KeyCode::Char('2') if !ctrl => self.switch(View::Stack),
+            KeyCode::Char('3') if !ctrl => self.switch(View::Graph),
             KeyCode::Char('s') if !ctrl => self.toggle_layout(),
             _ => return false,
         }
         true
+    }
+
+    /// `Ctrl-r`: never during a publication; a second one when a question
+    /// or a grouping running in the background would be lost.
+    fn reload_key(&mut self, armed: bool) {
+        if self.publishing.is_some() {
+            return self
+                .sh
+                .notify("publishing in progress: wait for it to end before reloading");
+        }
+        let busy = if self.ask_pending.is_some() {
+            Some("a question is being answered")
+        } else if self.grouping_running() {
+            Some("the grouping is running")
+        } else {
+            None
+        };
+        match busy {
+            Some(what) if !armed => {
+                self.reload_armed = true;
+                self.sh.notify(format!(
+                    "{what}: Ctrl-r again to reload anyway (it is lost)"
+                ));
+            }
+            _ => {
+                self.reload = true;
+                self.quit = true;
+            }
+        }
+    }
+
+    /// Keys of the help (`?`): scroll it, any other key closes it.
+    fn on_help_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let g = std::mem::take(&mut self.help_g);
+        let s = &mut self.help_scroll;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down if !ctrl => *s += 1,
+            KeyCode::Char('k') | KeyCode::Up if !ctrl => *s = s.saturating_sub(1),
+            KeyCode::Char('d') if ctrl => *s += 10,
+            KeyCode::Char('u') if ctrl => *s = s.saturating_sub(10),
+            KeyCode::Char('f') if ctrl => *s += 20,
+            KeyCode::Char('b') if ctrl => *s = s.saturating_sub(20),
+            KeyCode::PageDown => *s += 20,
+            KeyCode::PageUp => *s = s.saturating_sub(20),
+            KeyCode::Char('g') if !ctrl && g => *s = 0,
+            KeyCode::Char('g') if !ctrl => self.help_g = true,
+            KeyCode::Home => *s = 0,
+            // Clamped to the last page when drawn.
+            KeyCode::Char('G') | KeyCode::End => *s = usize::MAX / 2,
+            _ => self.help = false,
+        }
     }
 }
 
@@ -2232,5 +2390,173 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, crate::views::stack::StackRow::Diff(Row::Pair { .. })))
         );
+    }
+
+    fn new_app(dir: &std::path::Path) -> App {
+        let (review, _) = fixture(dir);
+        App::new(
+            review,
+            ReviewState::default(),
+            dir.join("state.json"),
+            Config::default(),
+        )
+    }
+
+    #[test]
+    fn ctrl_letters_do_not_act_as_the_letter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app(dir.path());
+        cursor_to(&mut app, Row::Line { hunk: 0, line: 0 });
+        let collapsed = app.diff.collapsed.clone();
+        // Ctrl-v is not v (file reviewed), Ctrl-o not o (fold), Ctrl-q not q.
+        app.on_key(ctrl('v'));
+        assert!(!app.sh.state.is_file_reviewed(&app.sh.review.diff, 0));
+        app.on_key(ctrl('o'));
+        assert_eq!(app.diff.collapsed, collapsed);
+        app.on_key(ctrl('q'));
+        assert!(!app.quit);
+        // Ctrl-c in the Review panel does not edit, Ctrl-d does not delete.
+        app.on_key(key('P'));
+        app.on_key(ctrl('c'));
+        app.on_key(ctrl('d'));
+        assert!(matches!(app.popup, Some(Popup::Review)));
+        assert!(app.panel.confirm.is_none());
+    }
+
+    #[test]
+    fn ctrl_o_goes_back_where_a_jump_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, grouping) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.stack.set_grouping(&app.sh, grouping);
+        // Nothing to go back to yet: a message, no fold.
+        app.on_key(ctrl('o'));
+        assert!(app.sh.message().unwrap().contains("no place to go back"));
+        // Diff on the second line of hunk 1, then a jump to hunk 2 (as from
+        // an answer link): Ctrl-o comes back to the line.
+        cursor_to(&mut app, Row::Line { hunk: 1, line: 1 });
+        app.apply(Action::ShowLine { hunk: 2, line: 0 });
+        assert_eq!(
+            app.diff.rows[app.diff.pos.cursor],
+            Row::Line { hunk: 2, line: 0 }
+        );
+        app.on_key(ctrl('o'));
+        assert_eq!(app.view, View::Diff);
+        assert_eq!(
+            app.diff.rows[app.diff.pos.cursor],
+            Row::Line { hunk: 1, line: 1 }
+        );
+        // Stack, gd on the selected group: the Diff view; Ctrl-o: the Stack.
+        app.on_key(key('2'));
+        app.on_key(key('g'));
+        app.on_key(key('d'));
+        assert_eq!(app.view, View::Diff);
+        app.on_key(ctrl('o'));
+        assert_eq!(app.view, View::Stack);
+    }
+
+    #[test]
+    fn no_quit_nor_reload_while_publishing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app(dir.path());
+        app.publishing = Some("creating draft notes".into());
+        app.on_key(key('q'));
+        assert!(!app.quit);
+        assert!(app.sh.message().unwrap().contains("publishing in progress"));
+        app.on_key(ctrl('r'));
+        app.on_key(ctrl('r'));
+        assert!(!app.quit && !app.reload);
+        app.publishing = None;
+        app.on_key(key('q'));
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn ctrl_r_asks_twice_when_a_question_would_be_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app(dir.path());
+        app.ask_pending = Some(Pending {
+            label: "hunk".into(),
+            question: "why?".into(),
+            since: Instant::now(),
+        });
+        app.on_key(ctrl('r'));
+        assert!(!app.quit);
+        assert!(app.sh.message().unwrap().contains("Ctrl-r again"));
+        // Another key in between: asks again.
+        app.on_key(key('j'));
+        app.on_key(ctrl('r'));
+        assert!(!app.quit);
+        app.on_key(ctrl('r'));
+        assert!(app.quit && app.reload);
+    }
+
+    #[test]
+    fn help_scrolls_and_closes_on_another_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app(dir.path());
+        app.on_key(key('?'));
+        assert!(app.help);
+        app.on_key(key('j'));
+        app.on_key(key('j'));
+        assert_eq!(app.help_scroll, 2);
+        app.on_key(key('k'));
+        assert_eq!(app.help_scroll, 1);
+        app.on_key(key('G'));
+        assert!(app.help_scroll > 100);
+        app.on_key(key('g'));
+        app.on_key(key('g'));
+        assert_eq!(app.help_scroll, 0);
+        assert!(app.help);
+        app.on_key(key('x'));
+        assert!(!app.help);
+        // Not a Diff key either.
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn comment_keys_in_the_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, grouping) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.stack.set_grouping(&app.sh, grouping);
+        // Diff file list: c and C comment the selected file, V says where.
+        app.on_key(ctrl('h'));
+        app.on_key(key('V'));
+        assert!(app.sh.message().unwrap().starts_with("V: select lines"));
+        let file = app.diff.current_file();
+        app.on_key(key('c'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no comment editor");
+        };
+        assert_eq!(e.target, CommentTarget::File(file));
+        app.on_key(code(KeyCode::Esc));
+        // Stack tree: c says to go to a line; C on a group of one file
+        // comments it, on a group of several files explains.
+        app.on_key(key('2'));
+        app.on_key(key('c'));
+        assert!(app.popup.is_none());
+        assert!(app.sh.message().unwrap().starts_with("c: put the cursor"));
+        app.on_key(key('C'));
+        let Some(Popup::Comment(e)) = &app.popup else {
+            panic!("no comment editor for the group of src/a.rs");
+        };
+        assert_eq!(e.target, CommentTarget::File(0));
+        app.on_key(code(KeyCode::Esc));
+        app.on_key(key('J'));
+        app.on_key(key('J'));
+        app.on_key(key('C'));
+        assert!(app.popup.is_none(), "group of a lock file and a rename");
+        assert!(app.sh.message().unwrap().starts_with("C: select a hunk"));
     }
 }

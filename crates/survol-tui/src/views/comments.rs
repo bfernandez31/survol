@@ -500,6 +500,9 @@ impl ThreadView {
     pub fn on_key(&mut self, key: KeyEvent) -> ThreadOutcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.height / 2).max(1) as isize;
+        if super::stray_ctrl(&key, &['d', 'u']) {
+            return ThreadOutcome::Continue;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return ThreadOutcome::Close,
             KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
@@ -683,6 +686,9 @@ pub enum PanelOutcome {
 
 impl ReviewPanel {
     pub fn on_key(&mut self, key: KeyEvent, rows: &[PanelRow]) -> PanelOutcome {
+        if super::stray_ctrl(&key, &[]) {
+            return PanelOutcome::Continue;
+        }
         if let Some(c) = self.confirm.take() {
             return match c {
                 Confirm::Delete(id) => match key.code {
@@ -1091,5 +1097,14 @@ mod tests {
             p.on_key(key(KeyCode::Char('y')), &rows),
             PanelOutcome::Publish(plan)
         );
+    }
+
+    #[test]
+    fn thread_ignores_ctrl_letters() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut t = ThreadView::new(NoteKind::Remote(2));
+        assert_eq!(t.on_key(ctrl('n')), ThreadOutcome::Continue);
+        assert_eq!(t.on_key(ctrl('q')), ThreadOutcome::Continue);
+        assert_eq!(t.on_key(ctrl('g')), ThreadOutcome::Continue);
     }
 }
