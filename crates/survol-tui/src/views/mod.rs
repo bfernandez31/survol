@@ -1,6 +1,7 @@
 //! State and key handling of each view. Rendering lives in `ui/`.
 
 pub mod ask;
+pub mod boxes;
 pub mod comments;
 pub mod diff;
 pub mod explorer;
@@ -8,6 +9,7 @@ pub mod export;
 pub mod fileview;
 pub mod flows;
 pub mod graph;
+pub mod map;
 pub mod stack;
 
 use survol_core::model::{DiffLine, LineKind};

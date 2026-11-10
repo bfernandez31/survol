@@ -23,6 +23,9 @@ pub fn render(f: &mut Frame, body: Rect, app: &mut App) {
     if app.sh.graph.is_none() {
         return render_status(f, body, app);
     }
+    if app.graph.mode == Mode::Map {
+        return super::map::render(f, body, app);
+    }
     if app.graph.mode == Mode::Flows {
         app.graph.flows.tick(&mut app.sh, &app.cfg);
     }
@@ -218,6 +221,8 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
             Mode::Modules => mod_row(g, v, v.mod_rows[i], in_out.as_deref()),
             Mode::Flows => super::flows::entry_row(&v.flows, v.flows.rows[i], width),
             Mode::Symbol => tree_row(g, &v.tree[i], width),
+            // Drawn by `ui/map.rs`.
+            Mode::Map => Vec::new(),
         };
         lines.push(cursor_line(
             clip(spans, width),
@@ -258,6 +263,7 @@ fn list_title(g: &Graph, v: &GraphView) -> Line<'static> {
         }
         Mode::Found => Line::from(format!(" search `{}` ", v.query).bold()),
         Mode::Flows => super::flows::list_title(&v.flows),
+        Mode::Map => Line::default(),
         Mode::Modules => {
             let n = v.modules.as_ref().map_or(0, |m| m.modules.len());
             let c = v
@@ -696,7 +702,7 @@ fn render_module_details(f: &mut Frame, area: Rect, app: &App, focused: bool) {
                 _ => None,
             }
         }
-        Mode::Symbol | Mode::Flows => None,
+        Mode::Symbol | Mode::Flows | Mode::Map => None,
     };
     let Some(i) = name.and_then(|n| map.modules.iter().position(|m| m.name == n)) else {
         f.render_widget(pane(focused), area);

@@ -161,6 +161,29 @@ Mermaid blocks, so everyone sees it in the merge / pull request.
 
 ![Module map: the six changed modules first, then their neighbours, 44 unrelated modules hidden; the right pane details the dependencies of the service package](docs/screenshots/graph-module-map.png)
 
+**Map** (`M`): the graph drawn as boxes and arrows, one level at a time. It opens on the
+modules; `Enter` goes into a box (a module shows its files, a file its symbols, a symbol
+opens its tree), `Backspace` / `u` goes back out, the title is the path from the root.
+What lies outside the level stays around it as dashed boxes, coarser the further it is:
+around the symbols of a file, the other files of its module and the other modules.
+`Enter` on one of them goes there.
+
+- The modules are drawn in one frame per parent package: the path they share is written
+  once, on the frame, and each box only carries the last part of its name. The links
+  between two frames are one arrow in the left margin.
+- An arrow reads "uses" (calls, imports, extends, injects...), left to right; an arrow
+  pointing left closes a cycle. A box the review changes has its name in the text colour
+  and, on its bottom border, the number of changed symbols inside (`M` / `D` for a
+  modified / removed symbol); the others are greyed. `n` / `N` jump from changed box to
+  changed box.
+- Around the selected box, what it uses and what uses it take two colours, boxes and
+  arrows alike; the right pane lists these links: the short name and the number of
+  links, then where it lives and the kinds of links.
+- A level only shows the changed boxes and their neighbours, at most 36 (`t`: every box of
+  the level). When it has more than 20 links, the arrows to the outside are left out, then
+  the links a longer path already implies: the title says how many are drawn, the colours
+  and the right pane still show them all.
+
 **Flows** (`f`): the entry points (HTTP endpoints, front-end routes, listeners, scheduled
 jobs, runners) whose end-to-end flow reaches a changed symbol. `Enter` / `l` opens the flow:
 an indented tree from the entry down to repositories (`[db]`, with their entities and
@@ -553,7 +576,8 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 
 | Key | Action |
 |---|---|
-| `m` | mode: changed symbols / search / module map / flows / symbol |
+| `m` | mode: changed symbols / search / module map / map / flows / symbol |
+| `M` | map: the graph as boxes and arrows; `h` `j` `k` `l` move, `Enter` into the box, `Backspace` / `u` back out, `n` / `N` changed boxes, `t` all / around the changes |
 | `Enter` | symbol: focus it (new root); section / module: fold |
 | `l` / `h` | expand / collapse (callers of callers…), parent |
 | `Backspace` / `Ctrl-o` | back to the previous symbol or list |
