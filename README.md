@@ -12,6 +12,9 @@ without reading every line. It is **not a bug finder**.
 - **GitHub and GitLab.** Open a GitHub pull request (github.com or GitHub Enterprise
   Server) or a GitLab merge request (self-hosted) by number or URL, or review a local
   range `base..head` with no forge at all. The forge is detected from the git remote.
+- **Uncommitted work too.** `WORKTREE` reviews the changes not committed yet (what an
+  agent just did, say), `INDEX` the staged ones, `main..WORKTREE` the branch and its
+  uncommitted changes; `Ctrl-r` takes a new snapshot as the work goes on.
   Existing review threads show under their line; your comments are published as one
   review.
 - **Three views of one change**: the whole diff as one stream (Diff), hunks grouped by
@@ -253,7 +256,7 @@ edit, `d` delete), the discussions (`e` reply, `t` thread) and `p` publish. Publ
 be sent (`J` for the exact JSON requests) and waits for `y`. On GitLab it creates draft
 notes, then publishes them all at once (`bulk_publish`); on GitHub it fills your pending
 review, then submits it once (`COMMENT`). Either way the review appears in one go. A local
-range (`base..head`) keeps its drafts local.
+range (`base..head`, `WORKTREE`...) keeps its drafts local.
 
 ![Publish confirmation on a GitHub pull request: one comment, sent as one pending review then one submission, with the requests listed](docs/screenshots/publish-confirm.png)
 
@@ -317,6 +320,9 @@ cargo install --path crates/survol-cli   # `survol-cli` (JSON engine, doctor)
    survol https://gitlab.corp.example/group/app/-/merge_requests/123
    survol https://github.com/owner/repo/pull/123
    survol main..feat      # local range, diffed from the merge base (no forge needed)
+   survol WORKTREE        # uncommitted changes, untracked files included (from HEAD)
+   survol INDEX           # staged changes only
+   survol main..WORKTREE  # the branch and its uncommitted changes
    survol --no-llm 123    # never call the LLM: the Stack view groups by directory
    survol --lang fr 123   # LLM titles, summaries and answers in French
    survol --no-lsp 123    # heuristic graph only: start no language server
@@ -501,6 +507,7 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 | `P` | Review panel: drafts, summary, discussions, publish |
 | `?` | keys of the current view |
 | `q` | quit (state is saved on each change) |
+| `Ctrl-r` | reload: reopen the review in the same view (new snapshot of the working tree, new commits of the MR / PR) |
 
 ### Diff
 
@@ -584,8 +591,10 @@ Press `?` in any view for the keys of that view. Tables below come from the in-a
 
 ```
 survol [OPTIONS] [TARGET]
-  TARGET        MR / PR number (123, !123, #123), MR / PR URL, or local range
-                base..head. Empty: the MR / PR of the current branch
+  TARGET        MR / PR number (123, !123, #123), MR / PR URL, local range
+                base..head, or uncommitted changes: WORKTREE (tracked and untracked
+                files, from HEAD), INDEX (staged), base..WORKTREE. Empty: the MR / PR
+                of the current branch
   -C, --repo    repository to work in (default: current directory)
   --no-llm      never call the LLM (same as [llm] enabled = false)
   --lang LANG   language of LLM-written text (overrides [llm] language)

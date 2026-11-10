@@ -361,6 +361,10 @@ const HELP: &[(&str, &str)] = &[
     ("A", "last answer, then the review's questions"),
     ("P", "Review panel: drafts, summary, discussions, publish"),
     ("q", "quit (state is saved on each change)"),
+    (
+        "Ctrl-r",
+        "reload: new snapshot of the working tree, new commits",
+    ),
     ("# Diff", ""),
     ("n / N  ({ })", "next / previous hunk"),
     ("J / K  ([ ])", "next / previous file"),
