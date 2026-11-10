@@ -361,6 +361,8 @@ pub struct App {
     lsp_rx: Option<mpsc::Receiver<LspEvent>>,
     pub help: bool,
     pub quit: bool,
+    /// Quit to reopen the review (`Ctrl-r`).
+    pub reload: bool,
 
     pub popup: Option<Popup>,
     /// Answers questions (the Claude CLI; a fake in tests).
@@ -408,6 +410,7 @@ impl App {
             lsp_rx: None,
             help: false,
             quit: false,
+            reload: false,
             popup: None,
             llm,
             ask_pending: None,
@@ -703,7 +706,7 @@ impl App {
 
     // ----- views --------------------------------------------------------
 
-    fn switch(&mut self, view: View) {
+    pub fn switch(&mut self, view: View) {
         self.view = view;
     }
 
@@ -1498,6 +1501,10 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
+            KeyCode::Char('r') if ctrl => {
+                self.reload = true;
+                self.quit = true;
+            }
             KeyCode::Char('?') => self.help = true,
             KeyCode::Tab => self.cycle(true),
             KeyCode::BackTab => self.cycle(false),
@@ -1516,6 +1523,22 @@ mod tests {
     use super::*;
     use crate::views::Row;
     use crate::views::stack::tests::{fixture, key};
+
+    #[test]
+    fn ctrl_r_quits_to_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = fixture(dir.path());
+        let mut app = App::new(
+            review,
+            ReviewState::default(),
+            dir.path().join("state.json"),
+            Config::default(),
+        );
+        app.on_key(key('2'));
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(app.quit && app.reload);
+        assert_eq!(app.view, View::Stack);
+    }
 
     #[test]
     fn graph_reorders_the_stack_keeping_the_selection() {

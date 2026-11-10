@@ -43,17 +43,17 @@ enum Cmd {
     Config,
     /// Fetch a merge request and check it out in its worktree.
     Fetch {
-        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, `base..head`, or `WORKTREE` / `INDEX` / `base..WORKTREE` (uncommitted changes). Empty: MR / PR of the current branch.
         target: Option<String>,
     },
     /// Print the parsed diff of a merge request or range as JSON.
     Diff {
-        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, `base..head`, or `WORKTREE` / `INDEX` / `base..WORKTREE` (uncommitted changes). Empty: MR / PR of the current branch.
         target: Option<String>,
     },
     /// Group the hunks by functional capability and layer (Stack view), as JSON.
     Group {
-        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, `base..head`, or `WORKTREE` / `INDEX` / `base..WORKTREE` (uncommitted changes). Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Ignore the cached grouping and call the LLM again.
         #[arg(long)]
@@ -73,7 +73,7 @@ enum Cmd {
     /// Code graph (tree-sitter): changed symbols with their callers, callees
     /// and tests, as JSON.
     Graph {
-        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, `base..head`, or `WORKTREE` / `INDEX` / `base..WORKTREE` (uncommitted changes). Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Only the symbols with this name (`find`, or `OwnerService.find`),
         /// changed or not.
@@ -97,7 +97,7 @@ enum Cmd {
     /// (HTTP endpoint, front-end route, listener, job, runner) down to
     /// persistence and external calls, with their before / after, as JSON.
     Flows {
-        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, `base..head`, or `WORKTREE` / `INDEX` / `base..WORKTREE` (uncommitted changes). Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Only the flows whose entry label, name or id contains NAME
         /// (`GET /api/owners`, `OwnerController.show`...).
@@ -142,14 +142,14 @@ enum Cmd {
     /// The local draft comments (with where they land in the current diff)
     /// and, for a merge request, its discussions, as JSON.
     Comments {
-        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, `base..head`, or `WORKTREE` / `INDEX` / `base..WORKTREE` (uncommitted changes). Empty: MR / PR of the current branch.
         target: Option<String>,
     },
     /// Publish the draft comments to the merge request: GitLab draft notes,
     /// then one bulk publish (or discussions one by one on instances without
     /// draft notes); on GitHub, one pending review, then one submission.
     Publish {
-        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, or `base..head`. Empty: MR / PR of the current branch.
+        /// MR / PR number (`123`, `!123`, `#123`), MR / PR URL, `base..head`, or `WORKTREE` / `INDEX` / `base..WORKTREE` (uncommitted changes). Empty: MR / PR of the current branch.
         target: Option<String>,
         /// Print the exact API requests without sending anything.
         #[arg(long)]

@@ -25,15 +25,29 @@ pub enum Target {
     /// A merge request; `None` means the one of the current branch.
     MergeRequest(Option<MrRef>),
     /// A local range `base..head`, diffed from their merge base like GitLab.
+    /// `head` may be [`WORKTREE`] or [`INDEX`]: the uncommitted changes.
     Range { base: String, head: String },
 }
 
+/// Head of a range standing for the working tree: the tracked files as they
+/// are on disk and the untracked ones git does not ignore.
+pub const WORKTREE: &str = "WORKTREE";
+/// Head of a range standing for the index (the staged changes).
+pub const INDEX: &str = "INDEX";
+
 impl Target {
-    /// `123`, `!123`, `#123`, a MR / PR URL, `base..head`, or nothing.
+    /// `123`, `!123`, `#123`, a MR / PR URL, `base..head`, `WORKTREE` /
+    /// `INDEX` (alone: from `HEAD`), or nothing.
     pub fn parse(arg: Option<&str>) -> Result<Self> {
         let Some(arg) = arg.map(str::trim).filter(|a| !a.is_empty()) else {
             return Ok(Self::MergeRequest(None));
         };
+        if arg == WORKTREE || arg == INDEX {
+            return Ok(Self::Range {
+                base: "HEAD".into(),
+                head: arg.into(),
+            });
+        }
         if let Some(mr) = MrRef::parse(arg) {
             return Ok(Self::MergeRequest(Some(mr)));
         }
@@ -45,7 +59,8 @@ impl Target {
             });
         }
         Err(Error::Target(format!(
-            "`{arg}` is neither a merge / pull request (number or URL) nor a range base..head"
+            "`{arg}` is neither a merge / pull request (number or URL), a range base..head, \
+             WORKTREE nor INDEX"
         )))
     }
 }
@@ -57,6 +72,9 @@ pub struct Review {
     pub base_sha: String,
     pub head_sha: String,
     pub diff: Diff,
+    /// What the head stands for when it is not a commit of the repository:
+    /// [`WORKTREE`] or [`INDEX`] (the head is then a snapshot commit).
+    pub head_label: Option<String>,
     /// Where the head is checked out. Created by [`Review::ensure_worktree`].
     pub worktree: PathBuf,
     /// Key of the review state, see [`crate::review_state::state_path`].
@@ -68,7 +86,11 @@ impl Review {
     pub fn title(&self) -> String {
         match &self.mr {
             Some(mr) => format!("{} {}", mr.reference(), mr.title),
-            None => format!("{}..{}", short(&self.base_sha), short(&self.head_sha)),
+            None => match self.head_label.as_deref() {
+                Some(WORKTREE) => format!("{}..working tree", short(&self.base_sha)),
+                Some(INDEX) => format!("{}..index", short(&self.base_sha)),
+                _ => format!("{}..{}", short(&self.base_sha), short(&self.head_sha)),
+            },
         }
     }
 
@@ -105,6 +127,7 @@ pub fn open(
     target: &Target,
     mut progress: impl FnMut(&str),
 ) -> Result<Review> {
+    let mut head_label = None;
     let (mr, base_sha, head_sha, state_key, worktree) = match target {
         Target::MergeRequest(mr_ref) => {
             progress("fetching merge request metadata");
@@ -122,11 +145,25 @@ pub fn open(
             (Some(mr.clone()), mr.base_sha, mr.head_sha, key, wt)
         }
         Target::Range { base, head } => {
-            let head_sha = repo.rev_parse(head)?;
+            let head_sha = match head.as_str() {
+                WORKTREE => {
+                    progress("snapshotting the working tree");
+                    head_label = Some(WORKTREE.to_string());
+                    repo.snapshot_worktree()?
+                }
+                INDEX => {
+                    head_label = Some(INDEX.to_string());
+                    repo.snapshot_index()?
+                }
+                _ => repo.rev_parse(head)?,
+            };
             let base_sha = repo.text(&["merge-base", &repo.rev_parse(base)?, &head_sha])?;
             let key = format!("range-{}", sanitize(&format!("{base}..{head}")));
-            // Reviewing the checked-out commit: the repo itself is the worktree.
-            let wt = if repo.rev_parse("HEAD").ok().as_deref() == Some(head_sha.as_str()) {
+            // Reviewing the checked-out commit or the working tree: the repo
+            // itself is the worktree.
+            let wt = if head == WORKTREE
+                || repo.rev_parse("HEAD").ok().as_deref() == Some(head_sha.as_str())
+            {
                 repo.dir().to_path_buf()
             } else {
                 repo.survol_dir()?.join("worktrees").join(&key)
@@ -149,6 +186,7 @@ pub fn open(
         base_sha,
         head_sha,
         diff,
+        head_label,
         worktree,
         state_key,
         repo: repo.clone(),
@@ -670,6 +708,74 @@ mod tests {
             }
         );
         assert!(Target::parse(Some("feature/x")).is_err());
+        assert_eq!(
+            Target::parse(Some("WORKTREE")).unwrap(),
+            Target::Range {
+                base: "HEAD".into(),
+                head: WORKTREE.into()
+            }
+        );
+        assert_eq!(
+            Target::parse(Some("main..INDEX")).unwrap(),
+            Target::Range {
+                base: "main".into(),
+                head: INDEX.into()
+            }
+        );
+    }
+
+    #[test]
+    fn opens_the_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = repo(tmp.path());
+        std::fs::write(tmp.path().join(".gitignore"), "target/\n").unwrap();
+        let base = commit(&g, &[("a.txt", "1\n"), ("b.txt", "b\n")], "base");
+        g.bytes(&["checkout", "--quiet", "-b", "feat"]).unwrap();
+        commit(&g, &[("c.txt", "committed\n")], "feat");
+        let head = g.rev_parse("HEAD").unwrap();
+        // Staged, then modified again; an untracked file; an ignored one.
+        std::fs::write(tmp.path().join("a.txt"), "2\n").unwrap();
+        g.bytes(&["add", "a.txt"]).unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "3\n").unwrap();
+        std::fs::write(tmp.path().join("new.txt"), "new\n").unwrap();
+        std::fs::create_dir(tmp.path().join("target")).unwrap();
+        std::fs::write(tmp.path().join("target/out"), "x\n").unwrap();
+        let status = g.text(&["status", "--porcelain"]).unwrap();
+
+        let open_ = |t: &str| {
+            open(
+                &g,
+                &Config::default(),
+                &Target::parse(Some(t)).unwrap(),
+                |_| {},
+            )
+            .unwrap()
+        };
+        let paths =
+            |r: &Review| -> Vec<String> { r.diff.files.iter().map(|f| f.path.clone()).collect() };
+        let new_text = |r: &Review, path: &str| read_file(&r.repo, &r.head_sha, path);
+
+        let wt = open_("WORKTREE");
+        assert_eq!(wt.base_sha, head);
+        assert_eq!(paths(&wt), ["a.txt", "new.txt"]);
+        assert_eq!(new_text(&wt, "a.txt").as_deref(), Some("3\n"));
+        assert_eq!(wt.worktree, g.dir());
+        assert_eq!(wt.title(), format!("{}..working tree", short(&head)));
+        // Same files, same snapshot: the caches keyed by the head still apply.
+        assert_eq!(open_("WORKTREE").head_sha, wt.head_sha);
+
+        let idx = open_("INDEX");
+        assert_eq!(paths(&idx), ["a.txt"]);
+        assert_eq!(new_text(&idx, "a.txt").as_deref(), Some("2\n"));
+        assert_ne!(idx.worktree, g.dir());
+
+        let branch = open_("main..WORKTREE");
+        assert_eq!(branch.base_sha, base);
+        assert_eq!(paths(&branch), ["a.txt", "c.txt", "new.txt"]);
+
+        // Nothing moved: index, HEAD, status.
+        assert_eq!(g.rev_parse("HEAD").unwrap(), head);
+        assert_eq!(g.text(&["status", "--porcelain"]).unwrap(), status);
     }
 
     #[test]

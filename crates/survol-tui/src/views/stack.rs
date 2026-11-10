@@ -1012,6 +1012,7 @@ pub(crate) mod tests {
             head_sha: "head".into(),
             diff,
             worktree: dir.to_path_buf(),
+            head_label: None,
             state_key: "test".into(),
             repo: Git::new(dir),
         };

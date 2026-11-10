@@ -116,6 +116,7 @@ fn shared(dir: &std::path::Path) -> Shared {
         head_sha: "head".into(),
         diff: diff(),
         worktree: dir.to_path_buf(),
+        head_label: None,
         state_key: "test".into(),
         repo: Git::new(dir),
     };

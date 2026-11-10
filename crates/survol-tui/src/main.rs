@@ -32,8 +32,11 @@ use crate::app::{App, GraphStatus};
         Run `survol-cli doctor` to check your setup."
 )]
 struct Cli {
-    /// Merge / pull request number (`123`, `!123`, `#123`), its URL, or local
-    /// range `base..head`. Empty: the merge / pull request of the current branch.
+    /// Merge / pull request number (`123`, `!123`, `#123`), its URL, a local
+    /// range `base..head`, or the uncommitted changes: `WORKTREE` (tracked and
+    /// untracked files, from `HEAD`), `INDEX` (staged), `base..WORKTREE`
+    /// (the branch and its uncommitted changes). Empty: the merge / pull
+    /// request of the current branch.
     target: Option<String>,
     /// Repository to work in (defaults to the current directory).
     #[arg(short = 'C', long)]
@@ -73,10 +76,29 @@ fn main() -> Result<()> {
     theme::init(theme::Theme::from_config(&cfg.theme).map_err(anyhow::Error::msg)?);
     let target = Target::parse(cli.target.as_deref())?;
 
-    let review = review::open(&repo, &cfg, &target, |m| eprintln!("· {m}"))?;
+    // `Ctrl-r` reopens the review (a new snapshot of the working tree, new
+    // commits of the merge request) in the view it was in.
+    let mut view = None;
+    loop {
+        match session(&repo, &cfg, &target, view)? {
+            Some(v) => view = Some(v),
+            None => return Ok(()),
+        }
+    }
+}
+
+/// Opens the review and runs the UI. Returns the view to reopen the review
+/// in, or `None` to quit.
+fn session(
+    repo: &Git,
+    cfg: &Config,
+    target: &Target,
+    view: Option<app::View>,
+) -> Result<Option<app::View>> {
+    let review = review::open(repo, cfg, target, |m| eprintln!("· {m}"))?;
     if review.diff.files.is_empty() {
         println!("{}: no changes", review.title());
-        return Ok(());
+        return Ok(None);
     }
     let state_path = review.state_path()?;
     let state = ReviewState::load(&state_path)
@@ -92,7 +114,10 @@ fn main() -> Result<()> {
         });
     }
 
-    let mut app = App::new(review, state, state_path, cfg);
+    let mut app = App::new(review, state, state_path, cfg.clone());
+    if let Some(v) = view {
+        app.switch(v);
+    }
     app.start_grouping(true);
     app.start_remote();
     let mut terminal = ratatui::init();
@@ -101,7 +126,8 @@ fn main() -> Result<()> {
     let result = run(&mut terminal, &mut app, rx);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
     ratatui::restore();
-    result
+    result?;
+    Ok(app.reload.then_some(app.view))
 }
 
 fn run(

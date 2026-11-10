@@ -127,6 +127,75 @@ impl Git {
         self.fetch(remote, &[&spec])
     }
 
+    /// A commit of the working tree on top of `HEAD`: tracked files as they
+    /// are on disk, and the untracked ones git does not ignore. Neither the
+    /// index nor any ref is touched (a separate index file is used), and the
+    /// same files give the same commit, so the caches keyed by the head
+    /// survive until something changes.
+    pub fn snapshot_worktree(&self) -> Result<String> {
+        let index = self.survol_dir()?.join("worktree.index");
+        if let Some(dir) = index.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        // Starting from the real index keeps its stat cache: `add` only
+        // rehashes the files that changed.
+        let real = PathBuf::from(self.text(&["rev-parse", "--git-path", "index"])?);
+        let real = if real.is_absolute() {
+            real
+        } else {
+            self.dir.join(real)
+        };
+        let _ = std::fs::remove_file(&index);
+        if real.exists() {
+            std::fs::copy(&real, &index)?;
+        }
+        let env = [("GIT_INDEX_FILE", index.as_os_str())];
+        self.bytes_env(&["add", "--all", "--", "."], &env)?;
+        let tree = self.text_env(&["write-tree"], &env)?;
+        self.snapshot_commit(&tree, "survol: working tree")
+    }
+
+    /// A commit of the index (the staged changes) on top of `HEAD`; same
+    /// properties as [`Self::snapshot_worktree`].
+    pub fn snapshot_index(&self) -> Result<String> {
+        let tree = self.text(&["write-tree"])?;
+        self.snapshot_commit(&tree, "survol: index")
+    }
+
+    /// A commit of `tree` whose parent is `HEAD`, with a fixed author and
+    /// date: the same tree on the same `HEAD` always gives the same sha.
+    fn snapshot_commit(&self, tree: &str, msg: &str) -> Result<String> {
+        let head = self.rev_parse("HEAD")?;
+        let mut cmd = self.command();
+        for (k, v) in [
+            ("GIT_AUTHOR_NAME", "survol"),
+            ("GIT_AUTHOR_EMAIL", "survol@localhost"),
+            ("GIT_AUTHOR_DATE", "@0 +0000"),
+            ("GIT_COMMITTER_NAME", "survol"),
+            ("GIT_COMMITTER_EMAIL", "survol@localhost"),
+            ("GIT_COMMITTER_DATE", "@0 +0000"),
+        ] {
+            cmd.env(k, v);
+        }
+        let args = ["commit-tree", "--no-gpg-sign", tree, "-p", &head, "-m", msg];
+        let out = Self::check(&args, cmd.args(args).output()?)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_string())
+    }
+
+    fn bytes_env(&self, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Result<Vec<u8>> {
+        let mut cmd = self.command();
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        Self::check(args, cmd.args(args).output()?)
+    }
+
+    fn text_env(&self, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Result<String> {
+        Ok(String::from_utf8_lossy(&self.bytes_env(args, env)?)
+            .trim()
+            .to_string())
+    }
+
     pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
         self.text(&["merge-base", a, b])
     }
